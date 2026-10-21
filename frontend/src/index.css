@@ -1,0 +1,160 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    --grid-line: rgba(134, 239, 172, 0.045);
+  }
+
+  * {
+    @apply border-ink-600;
+  }
+
+  html {
+    @apply bg-ink-950;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply min-h-screen bg-ink-950 font-sans text-mist-200 antialiased;
+    background-image:
+      radial-gradient(ellipse 80% 50% at 15% -10%, rgba(61, 220, 132, 0.09), transparent 60%),
+      radial-gradient(ellipse 60% 40% at 100% 0%, rgba(128, 168, 255, 0.05), transparent 55%),
+      linear-gradient(to bottom, #070b09, #080d0a 55%, #070b09);
+    background-attachment: fixed;
+  }
+
+  ::selection {
+    @apply bg-lime-500/30 text-mist-100;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #070b09;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #22352a;
+    border-radius: 20px;
+    border: 2px solid #070b09;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #2f4a39;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-lime-400/70 ring-offset-2 ring-offset-ink-950;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-2xl border border-ink-600/80 bg-ink-850/80 shadow-panel backdrop-blur-sm;
+  }
+
+  .panel-soft {
+    @apply rounded-xl border border-ink-600/60 bg-ink-800/50;
+  }
+
+  .eyebrow {
+    @apply font-mono text-[10px] font-medium uppercase tracking-[0.24em] text-mist-400;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border text-sm font-semibold transition
+      duration-150 disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .btn-primary {
+    @apply btn border-lime-400/30 bg-lime-400 px-4 py-2.5 text-ink-950 hover:bg-lime-300 active:scale-[0.98];
+  }
+
+  .btn-secondary {
+    @apply btn border-ink-500 bg-ink-800 px-4 py-2.5 text-mist-200 hover:border-ink-500 hover:bg-ink-700;
+  }
+
+  .btn-ghost {
+    @apply btn border-transparent px-3 py-2 text-mist-300 hover:bg-ink-800 hover:text-mist-100;
+  }
+
+  .icon-btn {
+    @apply inline-flex h-9 w-9 items-center justify-center rounded-lg border border-ink-600 bg-ink-800/70
+      text-mist-300 transition hover:border-ink-500 hover:bg-ink-700 hover:text-mist-100;
+  }
+
+  .field {
+    @apply w-full rounded-lg border border-ink-600 bg-ink-900/80 px-3.5 py-2.5 text-sm text-mist-100
+      placeholder:text-mist-500 transition focus:border-lime-400/60 focus:ring-1 focus:ring-lime-400/30;
+  }
+
+  .label {
+    @apply mb-1.5 block text-xs font-medium text-mist-300;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium;
+  }
+
+  .filter-chip {
+    @apply inline-flex shrink-0 items-center gap-1.5 rounded-full border border-ink-600 bg-ink-850
+      px-3 py-1.5 text-xs font-medium text-mist-300 transition hover:border-ink-500 hover:text-mist-100;
+  }
+
+  .filter-chip-active {
+    @apply border-lime-400/40 bg-lime-400/10 text-lime-300 hover:border-lime-400/50 hover:text-lime-200;
+  }
+
+  .divider {
+    @apply border-t border-ink-700/70;
+  }
+
+  .skeleton {
+    @apply rounded-lg bg-gradient-to-r from-ink-800 via-ink-700 to-ink-800;
+    background-size: 700px 100%;
+    animation: shimmer 1.6s linear infinite;
+  }
+
+  .numeric {
+    @apply font-mono tabular-nums;
+  }
+
+  .prose-compact p {
+    @apply text-sm leading-relaxed text-mist-300;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    scrollbar-width: none;
+  }
+
+  .grid-noise {
+    background-image: linear-gradient(var(--grid-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+    background-size: 36px 36px;
+  }
+
+  .mask-fade-r {
+    mask-image: linear-gradient(to right, black 80%, transparent 100%);
+  }
+
+  .line-clamp-2 {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+  }
+}
