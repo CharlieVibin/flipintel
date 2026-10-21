@@ -48,8 +48,8 @@
 
 | Metric | Value |
 | --- | --- |
-| Active listings in local DB | 4,218 |
-| Qualifying deals | 30 |
+| Active listings in local DB | 4,903 |
+| Qualifying deals | 24 |
 | Sources healthy | Vinted, Gumtree |
 | eBay | `not_configured` — free developer keys not set |
 | CeX | HTTP 403 from this network; surfaced honestly |
@@ -57,7 +57,7 @@
 | Tests | 6 passed, 0 failed |
 
 Real listing data is intentionally not committed: `data/` is ignored, so the
-1,196+ collected rows (now 4,218) remain local and are not uploaded.
+collected rows (4,903 at last check) remain local and are not uploaded.
 
 ## Marketplace status
 
@@ -144,8 +144,20 @@ Optional eBay keys: copy `.env.example` to `.env`, fill
 
 ## Git / handoff
 
-The workspace was not a Git repository when this status was written. The
-intended remote is the connected FlipIntel GitHub repository. If the push could
-not be authenticated from this environment, initialise/commit locally first,
-then push from a machine with GitHub credentials; never commit `.env`, `data/`,
-`.venv/`, `frontend/node_modules/` or `frontend/dist/`.
+A local Git repository now exists on branch `main` with the application commit.
+The intended remote is `https://github.com/bboyrican20/flipintel.git` and the
+intended branch is `flipintel-scanner` (the remote's existing `main` was not
+modified). The push was attempted but **blocked by missing GitHub credentials**
+in this environment: `fatal: could not read Username for 'https://github.com'`.
+No secrets, `.env`, database, `data/`, `.venv/`, `node_modules/` or `dist/`
+files are tracked.
+
+To finish the handoff on a machine signed in to GitHub:
+
+```bat
+git remote add origin https://github.com/bboyrican20/flipintel.git
+git push -u origin main:flipintel-scanner
+```
+
+If the connected repository is a different/private repository, replace the URL
+with its clone URL before pushing.
