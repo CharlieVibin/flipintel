@@ -39,25 +39,25 @@
 - [x] Discord webhook and browser-notification support (optional; disabled by
       default).
 - [x] Windows `start.bat` launcher and manual README instructions.
-- [x] Focused pytest suite: **6 passed** (accessory/game rejection, PC/GPU
-      split, console matching, suspicious-price gate, eBay item parser, API
-      health/empty feed).
+- [x] Focused pytest suite: **7 passed** (accessory/game rejection, PC/GPU
+      split, console matching, suspicious-price gate, eBay item parser,
+      failed-scan error propagation, API health/empty feed).
 - [x] Live collection validated against real Vinted and Gumtree responses.
 
 ## Verified live state at last check
 
 | Metric | Value |
 | --- | --- |
-| Active listings in local DB | 4,903 |
-| Qualifying deals | 24 |
+| Active listings in local DB | 5,066 |
+| Qualifying deals | 21 |
 | Sources healthy | Vinted, Gumtree |
 | eBay | `not_configured` — free developer keys not set |
 | CeX | HTTP 403 from this network; surfaced honestly |
 | Facebook | Paused/unavailable; requires authenticated session |
-| Tests | 6 passed, 0 failed |
+| Tests | 7 passed, 0 failed |
 
 Real listing data is intentionally not committed: `data/` is ignored, so the
-collected rows (4,903 at last check) remain local and are not uploaded.
+collected rows (5,066 at last check) remain local and are not uploaded.
 
 ## Marketplace status
 

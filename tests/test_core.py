@@ -5,6 +5,7 @@ import asyncio
 
 from fastapi.testclient import TestClient
 
+from app.collectors.base import BaseCollector, CollectorError, run_queries
 from app.collectors.ebay import EbayCollector
 from app.db import Database
 from app.identification import identify_listing
@@ -98,6 +99,26 @@ def test_ebay_browse_item_parser():
         assert item.shipping == 5.0
         assert item.url == "https://www.ebay.co.uk/itm/123"
         assert item.marketplace == "ebay"
+    finally:
+        asyncio.run(collector.close())
+        db.close()
+
+
+def test_failed_scan_returns_the_error(tmp_path):
+    class BrokenCollector(BaseCollector):
+        marketplace = "broken"
+        label = "Broken"
+
+        async def search_query(self, query, max_pages=1):
+            raise CollectorError("simulated parser failure", "parse")
+
+    db = Database(tmp_path / "failure.db")
+    collector = BrokenCollector(db)
+    try:
+        outcome = asyncio.run(run_queries(collector, ["gpu"]))
+        assert outcome.status == "failed"
+        assert "simulated parser failure" in (outcome.error or "")
+        assert outcome.items == []
     finally:
         asyncio.run(collector.close())
         db.close()
