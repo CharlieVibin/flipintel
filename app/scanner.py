@@ -1302,17 +1302,84 @@ class Scanner:
                 break
 
     # --- auctions -----------------------------------------------------------
+    async def _recheck_auctions(self) -> int:
+        """Refresh the live bid and end time of auctions about to finish.
+
+        Discovery rotates through categories, so an auction alerted earlier may
+        not appear in the next pass. Only the specific shortlisted IDs are
+        fetched (one Browse request, at most 20 items), and an auction that has
+        already ended is removed from the active feed instead of being alerted.
+        """
+        collector = self.collectors.get("ebay")
+        if collector is None or not hasattr(collector, "get_items"):
+            return 0
+        rows = self.db.query(
+            """
+            SELECT id, external_id, auction_end_at, price, current_bid
+            FROM listings
+            WHERE status='active' AND is_auction=1 AND auction_end_at IS NOT NULL
+              AND auction_end_at >= ? AND auction_end_at <= ?
+            ORDER BY auction_end_at ASC
+            LIMIT 20
+            """,
+            (iso(), iso(utcnow() + timedelta(minutes=35))),
+        )
+        if not rows:
+            return 0
+        try:
+            items, _status = await collector.get_items(
+                [str(row["external_id"]) for row in rows if row.get("external_id")]
+            )
+        except CollectorError as exc:
+            log.info("Auction recheck unavailable: %s", exc.message)
+            return 0
+        except Exception:
+            log.exception("Auction recheck failed")
+            return 0
+        by_id = {item.external_id: item for item in items}
+        now = utcnow()
+        updated = 0
+        for row in rows:
+            item = by_id.get(str(row["external_id"]))
+            if item is None:
+                continue
+            end = parse_iso(item.auction_end_at)
+            if end is not None and end <= now:
+                self.db.execute(
+                    "UPDATE listings SET status='stale', last_seen=?, current_bid=?, "
+                    "bid_count=?, min_next_bid=? WHERE id=?",
+                    (
+                        iso(), item.current_bid, item.bid_count,
+                        item.min_next_bid, row["id"],
+                    ),
+                )
+            else:
+                self.db.execute(
+                    "UPDATE listings SET price=?, current_bid=?, bid_count=?, "
+                    "min_next_bid=?, auction_end_at=?, shipping=?, last_seen=? WHERE id=?",
+                    (
+                        float(item.current_bid if item.current_bid is not None else item.price),
+                        item.current_bid, item.bid_count, item.min_next_bid,
+                        item.auction_end_at, item.shipping, iso(), row["id"],
+                    ),
+                )
+            updated += 1
+        if updated:
+            self._data_version += 1
+        return updated
+
     def _shortlisted_auctions(self) -> list[dict[str, Any]]:
         return self.db.query(
             """
             SELECT l.id, l.title, l.price, l.shipping, l.current_bid, l.bid_count,
                    l.min_next_bid, l.auction_end_at, d.expected_resale, d.net_profit,
-                   d.max_bid, d.confidence, d.evidence_level
+                   d.max_bid, d.confidence, d.evidence_level, d.rank_score, d.rank_tier,
+                   d.roi
             FROM listings l JOIN deals d ON d.listing_id = l.id
             WHERE l.status='active' AND l.is_auction=1 AND l.auction_end_at IS NOT NULL
               AND l.auction_end_at >= ? AND l.auction_end_at <= ?
               AND d.max_bid IS NOT NULL AND l.price <= d.max_bid
-            ORDER BY l.auction_end_at ASC
+            ORDER BY d.rank_score DESC, l.auction_end_at ASC
             LIMIT 60
             """,
             (iso(), iso(utcnow() + timedelta(days=2))),
@@ -1333,6 +1400,10 @@ class Scanner:
             return None
         if not self.db.setting_bool("auction_alerts_enabled", True):
             return None
+        # A shortlisted auction is re-read before more discovery so alerts use
+        # the bid and end time that exist now, not the ones from its discovery
+        # pass ten minutes ago.
+        await self._recheck_auctions()
         window = self.db.setting_int("auction_window_minutes", 30)
         budget = max(1, min(6, self.db.setting_int("auction_requests_per_pass", 4)))
         catalogue = [

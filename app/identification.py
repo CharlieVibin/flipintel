@@ -73,10 +73,10 @@ ACCESSORY_TITLE_RE = re.compile(
     r"\b(backpack|rucksack|carry\s+bag|carry\s+case|travel\s+case|sleeve|laptop\s+bag|"
     r"charger|charging\s+dock|power\s+supply|psu|keyboard|mouse|mousepad|headset|"
     r"headphones|earphones|screws?|screwdriver|stand|bracket|cable|adapter|dock|"
-    r"battery|skins?|covers?|protectors?|decals?|stickers?|replacement|spares?|spare\s+parts|"
+    r"battery\s+only|replacement\s+battery|skins?|covers?|protectors?|decals?|stickers?|replacement|spares?|spare\s+parts|"
     r"faceplates?|shell|bezel|hinge|fan\s+only|cooler\s+only|empty\s+box|boxes|cases?|"
     r"nudient|casely|badge|pin\s+badge|bodyguardz|caudabe|velvet\s+caviar|loopy|"
-    r"thumb\s*grips?|joy[-\s]?con|game\s+cartridge|splitter|\bhdmi\b|docking\s+station|"
+    r"thumb\s*grips?|joy[-\s]?con|game\s+cartridge|splitter|docking\s+station|"
     r"joystick|thumbstick|analog\s+stick|heatsink|\bhub\b|\b6\s*in\s*1\b|"
     r"flash\s+drive|usb\s+stick|pen\s+drive|enclosure|caddy|housing|digitizer|"
     r"screen\s+assembly|replacement\s+screen|glass\s+only|box\s+only|"
@@ -217,7 +217,31 @@ def system_assembly_evidence(title: str) -> bool:
     )
     ram = bool(SYSTEM_RAM_RE.search(title)) or bare_config
     storage = bool(SYSTEM_STORAGE_RE.search(title)) or bare_config
-    chassis = bool(DEVICE_CHASSIS_RE.search(title)) or bool(SCREEN_RE.search(title))
+    chassis_match = DEVICE_CHASSIS_RE.search(title)
+    chassis = bool(chassis_match) or bool(SCREEN_RE.search(title))
+    # "Desktop RAM" and "desktop hard drive" describe a form factor, not a
+    # chassis. Treating that word as a machine made every DDR4 module look like
+    # a complete computer, so no RAM comparable could ever be accepted.
+    component_noun = bool(
+        re.search(
+            r"\b(?:ram|memory|ddr[345]|dimm|sodimm|so-dimm|ssd|nvme|hdd|"
+            r"hard\s+drive|graphics\s+card|gpu|cpu|processor|motherboard)\b",
+            title,
+            re.I,
+        )
+    )
+    if (
+        component_noun
+        and chassis_match
+        and chassis_match.group(0).lower() == "desktop"
+        and not re.search(
+            r"\b(?:desktop\s+(?:pc|computer)|gaming\s+desktop|desktop\s+tower|"
+            r"tower\s+pc|complete\s+pc|pc\s+tower)\b",
+            title,
+            re.I,
+        )
+    ):
+        chassis = bool(SCREEN_RE.search(title))
     os_cue = bool(re.search(r"\b(?:windows|win\s*1[01]|macos|chrome\s*os)\b", title, re.I))
     component_only = bool(COMPONENT_SALE_RE.search(title))
     if component_only and not chassis:
@@ -351,9 +375,18 @@ CONSOLE_BUNDLE_RE = re.compile(
     r"(?:\b(?:with|plus|and)\b|\+)\s+(?:an?\s+)?(?:"
     r"\d+\s+(?:extra\s+)?games?"
     r"|(?:\d+\s+)?(?:extra|additional|spare|second|2nd)\s+controllers?"
-    r"|\d+\s+controllers?"
+    r"|[2-9]\d*\s+controllers?"
     r"|(?:a\s+)?(?:headset|charging\s+dock|memory\s+card)\b"
-    r")",
+    r")"
+    # Extra hardware changes what the bundle is worth. Two controllers, an Edge
+    # pad, a disc drive or a headset are not part of a bare console sale, and
+    # including those asks in a used-console pool inflates the estimate by the
+    # accessory's own resale value.
+    r"|\b(?:2|two|3|three)\s*(?:x\s*)?(?:dualsense|dualshock|controllers?)\b"
+    r"|\b(?:extra|additional|spare|second|2nd)\s+controllers?\b"
+    r"|\bedge\s+controller\b"
+    r"|\b(?:with|plus|includes?|including|\+)\s+(?:an?\s+)?(?:disc|optical|blu[-\s]?ray)\s+drive\b"
+    r"|\b(?:with|including|includes?|comes\s+with)\b[^|;]{0,40}\b(?:headset|headphones)\b",
     re.I,
 )
 ACCESSORY_NOUN_RE = re.compile(
@@ -444,7 +477,7 @@ BUNDLED_ACCESSORY_RE = re.compile(
     r"\b(?:with|including|includes?|inc\.?|comes\s+with|boxed\s+with|supplied\s+with)\b"
     r"[^|;]{0,60}\b(?:cases?|box|boxes|chargers?|cables?|docks?|covers?|"
     r"sleeves?|bags?|controllers?|gamepads?|headsets?|keyboard|mouse|stylus|"
-    r"pen|accessor(?:y|ies)|screen\s+protectors?|stands?|brackets?|faceplates?)\b",
+    r"pen|pencil|accessor(?:y|ies)|screen\s+protectors?|stands?|brackets?|faceplates?)\b",
     re.I,
 )
 CONSOLE_CUE_RE = re.compile(
@@ -490,7 +523,7 @@ PLATFORM_RE = re.compile(
 GAME_MEDIA_RE = re.compile(
     r"\b(?:game|games|cartridge|disc\s+only|manual|inlay|box\s+art|"
     r"cib|complete\s+in\s+box|pal|ntsc|region\s+free|steelbook|"
-    r"video\s+game)\b",
+    r"video\s+game|pegi|esrb)\b",
     re.I,
 )
 # These cues describe actual hardware. "Boxed", "complete", "working" and
@@ -545,7 +578,7 @@ ULTRA_RE = re.compile(
 DDR_RE = re.compile(r"\bddr\s*([45])\b", re.I)
 CAPACITY_GB_RE = re.compile(r"\b(\d{1,3})\s*gb\b", re.I)
 KIT_RE = re.compile(r"\b(\d)\s*[x×]\s*(\d{1,3})\s*gb\b", re.I)
-CAPACITY_TB_RE = re.compile(r"\b(\d(?:\.\d)?)\s*tb\b", re.I)
+CAPACITY_TB_RE = re.compile(r"\b(\d{1,2}(?:\.\d)?)\s*tb\b", re.I)
 SIZE_GB_RE = re.compile(r"\b(\d{2,4})\s*gb\b", re.I)
 MOBO_CHIPSET_RE = re.compile(
     r"\b(x870e?|x670e?|b650e?|a620|b550|a520|x570|x470|b450|b350|a320|x370|"
@@ -1452,6 +1485,16 @@ def _non_apple_tablet(
 def _monitor(text: str) -> tuple[str, str, dict[str, Any]] | None:
     if not re.search(r"\b(monitor|display|screen)\b", text):
         return None
+    # A tablet or laptop title can quote a screen size ("iPad Air 11\""). The
+    # device name settles the class; the screen is a specification, not a
+    # monitor.
+    if re.search(
+        r"\b(?:ipad|iphone|macbook|galaxy\s+tab|surface\s+(?:pro|laptop)|"
+        r"thinkpad|pixel\s+\d{1,2}|steam\s+deck|switch\s+oled)\b",
+        text,
+        re.I,
+    ):
+        return None
     if re.search(r"\b(laptop|phone|tablet|pc|console)\b", text) and not re.search(r"\bmonitor\b", text):
         return None
     size = SCREEN_RE.search(text)
@@ -1662,10 +1705,18 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     # edition or "PS5 Pro Enhanced". Only an explicit console or bundled
     # controller turns it back into console hardware (e.g. "PS5 console with
     # Spider-Man 2").
+    console_game_media = bool(
+        re.search(
+            r"\b(?:console|ps[1-5]|playstation\s*[1-5]?|xbox|switch)\s+games?\b",
+            title_clean,
+            re.I,
+        )
+        and not CONSOLE_BUNDLE_RE.search(title_clean)
+    )
     platform_game = bool(
-        GAME_TITLE_RE.search(title_clean)
+        (GAME_TITLE_RE.search(title_clean) or console_game_media)
         and not re.search(
-            r"\b(console|boxed\s+console|complete\s+console|"
+            r"\b(console(?!\s+games?)|boxed\s+console|complete\s+console|"
             r"with\s+(?:an?\s+)?controllers?|includes?\s+(?:an?\s+)?controllers?)\b",
             title_clean,
             re.I,
@@ -1728,8 +1779,21 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         title_accessory = False
     # "Xbox Series X console & controller" names the console itself. A bare
     # "Xbox Series X controller" does not, and is already caught above.
-    if console and re.search(r"\bconsoles?\b", title_clean, re.I) and not re.search(
-        r"\b(?:disc|optical|blu[-\s]?ray)\s+drive\b|\bfaceplates?\b", title_clean, re.I
+    if (
+        console
+        and re.search(r"\bconsoles?\b", title_clean, re.I)
+        and not re.search(
+            r"\b(?:disc|optical|blu[-\s]?ray)\s+drive\b|\bfaceplates?\b",
+            title_clean, re.I,
+        )
+        # "PS5 console covers" says console only to name the accessory. The
+        # word "console" must not launder a cover, case, skin or stand into
+        # console hardware.
+        and not re.search(
+            r"\bconsole\s+(?:covers?|cases?|skins?|shells?|stands?|brackets?|"
+            r"bags?|sleeves?|faceplates?|docks?)\b",
+            title_clean, re.I,
+        )
     ):
         console_accessory = False
         strong_accessory = False
@@ -1795,7 +1859,8 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     title_gpu = _gpu(subject_text)
     title_cpu = _cpu(subject_text)
     cpu_family = re.search(
-        r"\b(ryzen\s*[3579]|core\s*i[3579]|i[3579][\s-]?\d{0,5}|intel\s+core|athlon)\b",
+        r"\b(ryzen\s*[3579]|core\s*i[3579]|i[3579][\s-]?\d{0,5}|intel\s+core|"
+        r"core\s+ultra\s*[3579]|ultra\s*[3579]|athlon)\b",
         title_clean,
         re.I,
     )
@@ -1823,11 +1888,16 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     monitor_wins = (
         bool(monitor_ident)
         and not explicit_laptop
+        and not tablet_explicit
         and not bool(console)
         and not bool(PC_RE.search(title_clean))
         and not (monitor_system_spec and bool(SYSTEM_BRAND_RE.search(title_clean)))
     )
     pc_cue = bool(PC_RE.search(title_clean)) or bool(SYSTEM_BRAND_RE.search(title_clean))
+    if re.search(r"\btower\b", title_clean, re.I) and (
+        cpu or cpu_family or _ram(text) or _gpu(text)
+    ):
+        pc_cue = True
     if not pc_cue and re.search(r"\baio\b", title_clean, re.I) and re.search(
         r"\b(pc|computer|windows|win\s*1[01])\b", title_clean, re.I
     ):
@@ -1836,7 +1906,7 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     # A model line can name a laptop, a desktop tower, a monitor or a spare
     # part. These cues decide which one it is before the model list is trusted.
     laptop_excluded = bool(
-        not explicit_laptop
+        not re.search(r"\b(?:laptop|notebook)\b", title_clean, re.I)
         and re.search(
             r"\b(?:monitor|desktop|tower|25l|30l|35l|40l|45l|"
             r"top\s+lid|bottom\s+case|palmrest|bezel|webcam|chassis|shell\s+only)\b",
@@ -1844,8 +1914,24 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
             re.I,
         )
     )
+    # "Dell Pro Max 16 - Intel Ultra 7 - 64GB DDR5 Ram" is a mobile
+    # workstation. A system brand plus a processor and a standalone screen size
+    # identifies a laptop even when the word "laptop" is absent; the 64GB is
+    # its installed memory, not a DIMM for sale.
+    branded_laptop_spec = bool(
+        re.search(r"\b(?:dell|hp|lenovo|acer|asus|msi|alienware|gigabyte)\b", title_clean, re.I)
+        and not re.search(
+            r"\b(?:desktop|tower|optiplex|precision\s+\d{4}\s+(?:tower|desktop)|workstation)\b",
+            title_clean,
+            re.I,
+        )
+        and (cpu or cpu_family)
+        and re.search(r"\b1[2-8](?:\.\d)?(?:\s*(?:inch|in|\"|”|-inch))?\b", title_clean, re.I)
+    )
     is_laptop = (
-        explicit_laptop or (bool(LAPTOP_CUE_RE.search(title_clean)) and not pc_cue)
+        explicit_laptop
+        or branded_laptop_spec
+        or (bool(LAPTOP_CUE_RE.search(title_clean)) and not pc_cue)
     ) and not monitor_wins and not laptop_excluded and not bool(
         re.search(r"\byoga\s+tab\b", title_clean, re.I)
     )
@@ -1896,8 +1982,16 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         # without the usual "gaming PC" phrase. A bare "PC Monitor" has no
         # component specs and is still left to the monitor parser.
         or bool(
-            re.search(r"\bpc\b", title_clean, re.I)
+            re.search(r"\bpc\b(?!\s*[a-z]{0,5}\d{3,4}\b)", title_clean, re.I)
             and (gpu or cpu or _ram(text) or _ssd(text))
+            # "Digital PC SN720 NVMe SSD" is a drive model, not a computer.
+            and not (
+                re.search(r"\b(?:nvme|ssd|hdd)\b", title_clean, re.I)
+                and not re.search(
+                    r"\b(?:gaming|desktop|tower|computer|windows|win\s*1[01]|ram|ddr[45])\b",
+                    title_clean, re.I,
+                )
+            )
         )
         # A CPU sold with RAM, storage and a Windows licence is a complete
         # machine (often a business laptop or mini PC), not a loose processor.
@@ -2138,11 +2232,24 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         title_clean,
         re.I,
     ))
+    # A motherboard sold with its own heatsink, I/O shield or fan is still the
+    # motherboard. Those are included parts, not a different product class.
+    board_with_parts = bool(
+        product_key
+        and str(product_key).startswith(("motherboard:", "mobo:"))
+        and re.search(r"\b(?:motherboard|mainboard|mobo)\b", title_clean, re.I)
+        and not parts_only
+        and not box_only
+        and not re.search(r"\b(?:empty|original)\s+box\b|\bbox\s+only\b", title_clean, re.I)
+    )
     keep_bundled_device = bool(
         accessory
         and product_key
-        and bundled_accessory
-        and not accessory_named_first
+        and (
+            (bundled_accessory and not accessory_named_first)
+            # A motherboard with its own cooling parts needs no "with" phrase.
+            or board_with_parts
+        )
         and not accessory_lot
         and not console_part
         and not compatibility
@@ -2151,6 +2258,18 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         and not empty_title
         and not parts_only
     )
+    # A monitor naming its own ports ("HDMI, DVI-D, VGA") is not an accessory.
+    if product_key and str(product_key).startswith("monitor:"):
+        port_only = bool(
+            re.search(r"\b(?:monitor|display)\b", title_clean, re.I)
+            and not re.search(
+                r"\b(?:cable|adapter|splitter|stand|bracket|mount|remote|case|cover)\b",
+                title_clean, re.I,
+            )
+        )
+        if port_only:
+            keep_bundled_device = True
+            flags = [flag for flag in flags if flag != "accessory_or_box"]
     if keep_bundled_device:
         accessory = False
         flags = [flag for flag in flags if flag != "accessory_or_box"]
@@ -2191,6 +2310,15 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         r"aio\s+cooler)\b",
         title_clean, re.I,
     ))
+    # "4x 8GB DDR4" is four modules, not one. The capacity in the key is the
+    # module size, so the lot must not be valued as a single stick.
+    if re.search(
+        r"\b(?:[2-9]\d*\s*x\s*\d{1,3}(?:\s*gb)?|kit\s+of\s+[2-9]|"
+        r"[2-9]\s*(?:sticks?|modules?))\b",
+        title_clean,
+        re.I,
+    ) and re.search(r"\b(?:ram|memory|ddr[345]|dimm|sodimm)\b", title_clean, re.I):
+        bundle = True
     if console and CONSOLE_BUNDLE_RE.search(title_clean):
         bundle = True
     if console and (

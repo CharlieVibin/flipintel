@@ -267,6 +267,61 @@ def _auction(index: int, minutes: int) -> RawListing:
 
 
 @pytest.mark.asyncio
+async def test_get_items_rechecks_at_most_twenty_known_auctions(tmp_path):
+    db = Database(tmp_path / "recheck.db")
+
+    class _Response:
+        status_code = 200
+        headers: dict[str, str] = {}
+
+        def json(self):
+            return {
+                "items": [
+                    {
+                        "itemId": "a1",
+                        "title": "RTX 4070 12GB",
+                        "itemWebUrl": "https://www.ebay.co.uk/itm/a1",
+                        "buyingOptions": ["AUCTION"],
+                        "currentBidPrice": {"value": "250.00", "currency": "GBP"},
+                        "bidCount": 7,
+                        "itemEndDate": "2026-10-23T20:00:00.000Z",
+                        "itemLocation": {"country": "GB"},
+                    }
+                ]
+            }
+
+    class _Client:
+        def __init__(self):
+            self.calls = []
+
+        async def get(self, url, params=None, headers=None):
+            self.calls.append((url, params))
+            return _Response()
+
+        async def aclose(self):
+            return None
+
+    collector = EbayCollector(db)
+    fake = _Client()
+    collector.client = fake
+    collector._token = "test"
+    collector._token_expires = 10**12
+    collector._token_fingerprint = collector.credentials.fingerprint
+    try:
+        items, status = await collector.get_items([f"a{i}" for i in range(30)])
+        assert status == 200
+        assert len(fake.calls) == 1
+        assert len(fake.calls[0][1]["item_ids"].split(",")) == 20
+        assert items[0].external_id == "a1"
+        assert items[0].current_bid == 250.0
+        assert items[0].bid_count == 7
+        assert items[0].is_auction is True
+    finally:
+        await collector.close()
+        db.close()
+
+
+@pytest.mark.asyncio
 async def test_category_auction_scan_pages_only_inside_the_window():
     page_one = [_auction(i, 5) for i in range(200)]
     page_two = [_auction(200 + i, 25) for i in range(10)] + [

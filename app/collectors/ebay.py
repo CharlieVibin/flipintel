@@ -403,6 +403,71 @@ class EbayCollector(BaseCollector):
             "note": "Connection test only; results were not inserted into the deal feed.",
         }
 
+    async def get_items(self, item_ids: list[str]) -> tuple[list[RawListing], int]:
+        """Re-fetch up to 20 known items by ID.
+
+        Ending-soon discovery covers a rotating slice of the catalogue, so a
+        shortlisted auction is not guaranteed to appear in the next category
+        pass. Checking the specific IDs is the only way to know its latest bid
+        and true end time before alerting. The Browse get_items endpoint accepts
+        at most 20 IDs per request.
+        """
+        ids = [str(item) for item in dict.fromkeys(item_ids) if item][:20]
+        if not ids:
+            return [], 0
+        if time.monotonic() < self._quota_pause_until:
+            raise CollectorError(self._quota_reason or "eBay quota pause", "rate_limited")
+        token = await self._access_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-EBAY-C-MARKETPLACE-ID": MARKETPLACE_ID,
+            "Accept": "application/json",
+        }
+        started = time.monotonic()
+        try:
+            await self._throttle()
+            response = await self.client.get(
+                f"{self.api_base}/buy/browse/v1/item/get_items",
+                params={"item_ids": ",".join(ids)},
+                headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            record_api_usage(
+                self.db, self.marketplace,
+                error=f"Browse recheck network error: {type(exc).__name__}",
+            )
+            raise CollectorError(
+                f"eBay recheck network error: {type(exc).__name__}", "network"
+            )
+        self._last_request_at = iso()
+        record_api_usage(
+            self.db, self.marketplace,
+            status=response.status_code,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            error=None if response.status_code < 400 else f"HTTP {response.status_code}",
+            quota_remaining=_int_header(response, "X-RateLimit-Remaining", "RateLimit-Remaining"),
+            quota_limit=_int_header(response, "X-RateLimit-Limit", "RateLimit-Limit"),
+            quota_reset_at=_reset_header(response),
+        )
+        if response.status_code == 429:
+            self._quota_pause_until = time.monotonic() + 5 * 60
+            raise CollectorError("eBay API rate limit reached (HTTP 429)", "rate_limited", 429)
+        if response.status_code >= 400:
+            raise CollectorError(
+                f"eBay recheck failed (HTTP {response.status_code})", "http", response.status_code
+            )
+        try:
+            payload = response.json()
+        except ValueError:
+            raise CollectorError("eBay recheck returned non-JSON", "parse", response.status_code)
+        items = [
+            parsed for parsed in (
+                self._parse_item(raw, "auction-recheck")
+                for raw in payload.get("items") or []
+            ) if parsed
+        ]
+        return items, response.status_code
+
     async def _browse_request(
         self, params: dict[str, Any], query_label: str
     ) -> tuple[list[RawListing], int, int]:

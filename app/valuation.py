@@ -8,9 +8,11 @@ the strength of the price evidence. Ask prices are never labelled as sold.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
@@ -42,7 +44,7 @@ FULL_REFRESH_HOURS = 6
 
 # Bump when evaluation logic changes so the next refresh cannot reuse deals
 # computed by the previous rules.
-VALUATION_REVISION = 2
+VALUATION_REVISION = 3
 
 
 def _fingerprint(payload: Any) -> str:
@@ -383,8 +385,14 @@ def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     weighting purposes; the first row wins because current listings and the
     newest snapshots are ordered first. Two genuinely distinct sales with the
     same source ID cannot exist (the evidence table enforces uniqueness).
+
+    Asking pools also collapse byte-identical offers (same marketplace, title,
+    price and condition) posted from several accounts. That is duplicated
+    inventory, not independent evidence of what the market will pay. Completed
+    sales are never collapsed this way: two identical sales are two sales.
     """
     seen: set[tuple[str, str]] = set()
+    seen_offers: set[tuple[str, str, float, str]] = set()
     unique: list[dict[str, Any]] = []
     for row in rows:
         source = str(row.get("source") or row.get("marketplace") or "")
@@ -394,8 +402,54 @@ def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if key in seen:
             continue
         seen.add(key)
+        if not row.get("is_sold"):
+            offer = (
+                source,
+                title,
+                round(float(row.get("price") or 0), 2),
+                str(row.get("condition_norm") or "unknown"),
+            )
+            if offer in seen_offers:
+                continue
+            seen_offers.add(offer)
         unique.append(row)
     return unique
+
+
+def _cap_source_weight(
+    rows: list[dict[str, Any]], cap: float = 0.55
+) -> list[dict[str, Any]]:
+    """Stop one marketplace from defining the whole asking market.
+
+    eBay carries far more live listings than Vinted or Gumtree, so an
+    uncapped pool is effectively an eBay pool. That is a problem when eBay is
+    also where business sellers list new or near-new stock. Each marketplace is
+    limited to its share of the total weight, preserving the smaller private
+    market's evidence instead of drowning it.
+    """
+    total = sum(float(row.get("weight") or 0) for row in rows)
+    if total <= 0 or not rows:
+        return rows
+    by_source: dict[str, float] = defaultdict(float)
+    for row in rows:
+        by_source[str(row.get("marketplace") or row.get("source") or "")] += float(
+            row.get("weight") or 0
+        )
+    if len(by_source) < 2:
+        return rows
+    limit = total * cap
+    for row in rows:
+        source = str(row.get("marketplace") or row.get("source") or "")
+        weight = float(row.get("weight") or 0)
+        if source and by_source[source] > limit and weight > 0:
+            row["weight"] = max(0.05, weight * (limit / by_source[source]))
+    return rows
+
+
+_PREPARED_RE = re.compile(
+    r"\b(?:tested|fully\s+working|serviced|refurbished|professionally\s+cleaned|diagnostics?\s+checked)\b",
+    re.I,
+)
 
 
 def _evidence_level(
@@ -509,8 +563,27 @@ def _estimate_from_rows(
     sold_rows = [c for c in cleaned if c["is_sold"]]
     asking_rows = [c for c in cleaned if not c["is_sold"] and c.get("source") != "cex"]
     cex_rows = [c for c in cleaned if c.get("source") == "cex"]
+    # New stock is not evidence of the used price. eBay in particular is full of
+    # sealed, brand-new consoles and graphics cards priced above retail; pooling
+    # those asks made a used PS5 Pro look worth £833 when the private used
+    # market was asking £500–600. New asks are kept as a retail ceiling only.
+    candidate_is_new = str(candidate_condition or "").lower() == "new"
+    new_asking_rows = [
+        c for c in asking_rows
+        if str(c.get("condition_norm") or "").lower() == "new"
+    ]
+    # The basis is always the used market, even when the candidate is new.
+    # Sealed stock is a different market: its asks are often above retail and
+    # a single cheap new listing must not drag the used baseline down. New asks
+    # set the retail ceiling and scale the condition premium instead.
+    asking_rows = [
+        c for c in asking_rows
+        if str(c.get("condition_norm") or "").lower() != "new"
+    ]
     sold_pool = _trim_pool(sold_rows)
-    asking_pool = _cap_concentration(_trim_pool(asking_rows, asking_only=True))
+    asking_pool = _cap_source_weight(
+        _cap_concentration(_trim_pool(asking_rows, asking_only=True))
+    )
     cex_pool = _trim_pool(cex_rows)
     sold_count = len(sold_pool)
     has_cex = bool(cex_pool)
@@ -543,6 +616,11 @@ def _estimate_from_rows(
     basis: list[dict[str, Any]] = []
     evidence_n = 0
     notes: list[str] = []
+    if new_asking_rows:
+        notes.append(
+            f"{len(new_asking_rows)} new-condition asking price(s) were kept out of the "
+            "used-market basis and used only as a retail ceiling."
+        )
 
     if sold_count >= 2:
         basis = sold_pool
@@ -651,25 +729,36 @@ def _estimate_from_rows(
     # £327 estimate. Scale the uplift by observed condition support instead of
     # assuming it.
     condition_support = 0.0
-    if condition_factor > 1.0 and kept:
+    if condition_factor > 1.0 and (kept or new_asking_rows):
         candidate_floor = condition_factor - 0.03
-        total_weight = sum(float(c["weight"]) for c in kept) or 1.0
+        total_weight = sum(
+            float(c["weight"]) for c in kept
+        ) + sum(float(c["weight"]) for c in new_asking_rows) or 1.0
         supported = sum(
             float(c["weight"])
-            for c in kept
+            for c in new_asking_rows
             if CONDITION_FACTORS.get(str(c.get("condition_norm") or "unknown"), 0.95)
             >= candidate_floor
         )
         condition_support = supported / total_weight
-        support_scale = min(1.0, condition_support / 0.30)
-        raw_factor = condition_factor
-        condition_factor = 1.0 + (raw_factor - 1.0) * (0.25 + 0.75 * support_scale)
-        if condition_factor < raw_factor - 0.005:
+        if condition_support <= 0.02:
+            # No new stock in the market: there is no evidence for a premium at
+            # all. The item is priced at the used level rather than guessed up.
+            condition_factor = 1.0
             notes.append(
-                f"The {candidate_condition.replace('_', ' ')} condition uplift was reduced from "
-                f"{raw_factor:.2f}× to {condition_factor:.2f}× because only "
-                f"{condition_support:.0%} of the comparable pool is in that condition."
+                f"No {candidate_condition.replace('_', ' ')}-condition comparables were found; "
+                "the estimate uses the used market without a condition uplift."
             )
+        else:
+            support_scale = min(1.0, condition_support / 0.30)
+            raw_factor = condition_factor
+            condition_factor = 1.0 + (raw_factor - 1.0) * (0.25 + 0.75 * support_scale)
+            if condition_factor < raw_factor - 0.005:
+                notes.append(
+                    f"The {candidate_condition.replace('_', ' ')} condition uplift was reduced from "
+                    f"{raw_factor:.2f}× to {condition_factor:.2f}× because only "
+                    f"{condition_support:.0%} of the comparable pool is in that condition."
+                )
     # A falling market should lower a conservative estimate, but only modestly:
     # one short-term move is not proof of a new price level. Rising markets are
     # not used to inflate an estimate.
@@ -677,11 +766,29 @@ def _estimate_from_rows(
     if sold_count == 0 and trend_pct is not None and trend_pct <= -0.05:
         damping = max(0.85, 1.0 + (trend_pct * 0.35))
         range_damping = damping
-        resale_good *= damping
         notes.append(
             f"The estimate was reduced by {abs(1 - damping):.0%} to reflect the recent downward asking trend."
         )
-    resale = resale_good * condition_factor
+    resale = resale_good * condition_factor * range_damping
+    # A used item cannot be worth more than the cheapest new stock of the same
+    # product. The cap is a sanity check, not an estimate: it only binds when
+    # the used pool itself contains near-new asks.
+    new_ceiling = None
+    # A single cheap "new" ask is not a retail ceiling; it is often a
+    # mis-described used card or a stale listing. Require a small sample before
+    # letting new stock cap the used estimate.
+    if not candidate_is_new and len(new_asking_rows) >= 3:
+        new_prices = sorted(
+            float(c.get("price") or 0) for c in new_asking_rows if float(c.get("price") or 0) > 0
+        )
+        if new_prices:
+            new_ceiling = round(median(new_prices) * 0.92, 2)
+            if resale > new_ceiling:
+                notes.append(
+                    "The estimate was capped at 92% of the median new asking price; "
+                    "a used item cannot be assumed to fetch more than new stock."
+                )
+                resale = new_ceiling
     spread = max(0.08, sigma)
 
     ident = clamp(ident_confidence, 0.0, 1.0)
@@ -778,6 +885,30 @@ def _estimate_from_rows(
     )
     notes.append(_evidence_sentence(level, sold_count, len(kept), distinct_sources))
 
+    # Prepared/tested items genuinely attract more than untested ones, but the
+    # premium has to come from this product's own market. Comparing asks that
+    # mention testing/service with the rest of the pool gives an observed ratio;
+    # it is applied only to the maximum-profit asking price, only when at least
+    # three listings sit on each side, and never by more than 15%.
+    prepared_uplift = 0.0
+    prepared = [
+        c for c in asking_pool if _PREPARED_RE.search(str(c.get("title") or ""))
+    ]
+    untested = [c for c in asking_pool if c not in prepared]
+    if len(prepared) >= 3 and len(untested) >= 3:
+        prepared_median = median([float(c["adjusted_price"]) for c in prepared]) or 0.0
+        untested_median = median([float(c["adjusted_price"]) for c in untested]) or 0.0
+        if prepared_median > 0 and untested_median > 0:
+            prepared_uplift = round(
+                clamp(prepared_median / untested_median - 1.0, 0.0, 0.15), 4
+            )
+            if prepared_uplift >= 0.02:
+                notes.append(
+                    f"Listings described as tested or fully working ask "
+                    f"{prepared_uplift:.0%} more than untested equivalents of this product "
+                    f"({len(prepared)} vs {len(untested)} listings)."
+                )
+
     def value_at(q: float) -> float:
         value = weighted_quantile(
             ((c["adjusted_price"], c["weight"]) for c in basis), q
@@ -803,6 +934,10 @@ def _estimate_from_rows(
         }
         for name, value in strategy_values.items()
     }
+    if prepared_uplift >= 0.02:
+        strategies["max"]["ask"] = round(
+            float(strategies["max"]["ask"]) * (1.0 + prepared_uplift), 2
+        )
 
     public_comps = []
     for comp in sorted(kept, key=lambda c: (not bool(c["is_sold"]), -float(c["weight"])))[:12]:
@@ -831,9 +966,12 @@ def _estimate_from_rows(
         strategies=strategies,
         sources={name: sum(1 for c in kept if (c.get('marketplace') or c.get('source')) == name)
                  for name in distinct_sources},
-        resale_good=round(resale_good, 2),
-        low=round((p25 or resale) * condition_factor * range_damping, 2),
-        high=round((p75 or resale) * condition_factor * range_damping, 2),
+        resale_good=round(resale, 2),
+        # The central value and the range must describe the same distribution.
+        # Storing the un-conditioned quantile next to an adjusted estimate
+        # produced ranges whose low was higher than the central estimate.
+        low=round(min(resale, (p25 or resale) * condition_factor * range_damping), 2),
+        high=round(max(resale, (p75 or resale) * condition_factor * range_damping), 2),
         confidence=round(clamp(confidence, 0.0, 0.98), 3),
         sample_size=len(kept),
         method=method,
@@ -844,8 +982,8 @@ def _estimate_from_rows(
         range_supported=range_supported,
         range_basis=range_basis,
         notes=notes,
-        ci_low=round((p10 or p25) * condition_factor * range_damping, 2),
-        ci_high=round((p90 or p75) * condition_factor * range_damping, 2),
+        ci_low=round(min(resale, (p10 or p25) * condition_factor * range_damping), 2),
+        ci_high=round(max(resale, (p90 or p75) * condition_factor * range_damping), 2),
         trend_pct=round(trend_pct, 4) if trend_pct is not None else None,
         trend_note=trend_note,
         market_values=[round(value, 2) for value in values],
@@ -861,6 +999,7 @@ class ValuationEngine:
         self._comp_cache: dict[tuple[str, str], list[dict[str, Any]]] | None = None
         self._rejected_cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
         self._estimates: dict[tuple[str, str], Any] = {}
+        self._estimate_conditions: dict[tuple[str, str], str] = {}
         self._snapshot_at: dict[str, str] = {}
         self._snapshot_cache: dict[str, str | None] = {}
 
@@ -1059,6 +1198,12 @@ class ValuationEngine:
                             )
                             method = "component_model"
                             notes = estimate.notes
+
+        # What goes into permanent product-price memory must describe the
+        # product, not one listing's missing controller or a learned flip
+        # adjustment. Those are applied to this deal below; snapshotting them
+        # would make the next listing of the same product inherit the discount.
+        market_estimate = copy.deepcopy(estimate) if estimate else None
 
         purchase_shipping = 0.0
         buyer_fee = 0.0
@@ -1354,8 +1499,16 @@ class ValuationEngine:
             if confidence < config.min_confidence:
                 reasons.append(f"Confidence below the {config.min_confidence:.0%} threshold")
 
-        if estimate is not None and product_key:
-            self._estimates[(str(product_key), str(kind))] = estimate
+        if market_estimate is not None and product_key:
+            slot = (str(product_key), str(kind))
+            condition = str(listing.get("condition_norm") or "unknown")
+            # Price memory should describe the product's used market, not
+            # whichever listing happened to be evaluated last. If the key has
+            # any used listing, its estimate replaces a new-condition one.
+            previous = self._estimate_conditions.get(slot)
+            if previous is None or (previous == "new" and condition != "new"):
+                self._estimates[slot] = market_estimate
+                self._estimate_conditions[slot] = condition
             key_text = str(product_key)
             if key_text not in self._snapshot_cache:
                 snapshot = self.pricing.latest(key_text)
@@ -1707,11 +1860,29 @@ class ValuationEngine:
                 key = (listing.get("product_key"), listing.get("listing_kind"))
                 if key in changed_keys or stored.get(listing_id) != fingerprints[listing_id]:
                     targets.append(listing)
+            # A product whose last valuation is older than the reuse window is
+            # queued for refresh even when none of its listing fields changed.
+            # Deals and ending auctions come first; without this the engine
+            # would keep serving week-old prices until the six-hour full pass.
+            stale_keys = {
+                str(row["product_key"])
+                for row in self.pricing.stale_products(limit=150)
+            }
+            if stale_keys:
+                queued = {int(listing["id"]) for listing in targets}
+                for listing in rows:
+                    listing_id = int(listing["id"])
+                    if listing_id in queued:
+                        continue
+                    if str(listing.get("product_key") or "") in stale_keys:
+                        targets.append(listing)
+                        queued.add(listing_id)
 
         evaluated = deals = review = 0
         self._comp_cache = {}
         self._rejected_cache = {}
         self._estimates = {}
+        self._estimate_conditions = {}
         self._snapshot_cache = {}
         self._snapshot_at = {}
         for listing in targets:

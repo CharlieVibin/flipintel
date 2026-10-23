@@ -1,0 +1,20 @@
+{
+  "note": "Manual review of every oracle/model disagreement in the 240-listing benchmark (2026-10-23). Each entry corrects the independent rule oracle, not the classifier: parts, contract plans, memorial cards, generic capacity-only titles and multi-item bundles are not a single device; part-numbered RAM modules and a specific ThinkPad are real products the classifier missed.",
+  "overrides": {
+    "71748": {"expected_valued": false, "reason": "Dell DC power jack is a part, not a laptop"},
+    "57303": {"expected_valued": true, "reason": "ASUS A520M-A is a complete motherboard sold with its own shield and fan"},
+    "2485": {"expected_valued": false, "reason": "CPU plus motherboard combo is a component bundle"},
+    "4916": {"expected_valued": false, "reason": "Monthly contract plan, not a private handset sale"},
+    "24906": {"expected_valued": false, "reason": "Memorial card; 'memory' is not computer memory"},
+    "18058": {"expected_valued": false, "reason": "Capacity-only title with no model or brand"},
+    "70946": {"expected_valued": false, "reason": "Generic 'RAM units' with no model or capacity"},
+    "72958": {"expected_valued": true, "reason": "Specific Lenovo memory module part number"},
+    "50454": {"expected_valued": true, "reason": "Specific Micron SDRAM module part number"},
+    "56894": {"expected_valued": true, "reason": "Specific 8GB SO-DIMM module (CoreParts part number)"},
+    "2477": {"expected_valued": false, "reason": "CPU plus motherboard combo is a component bundle"},
+    "26493": {"expected_valued": true, "reason": "Lenovo ThinkPad R61 is a complete laptop model"},
+    "66596": {"expected_valued": false, "reason": "Laptop motherboard is a replacement part"},
+    "17938": {"expected_valued": false, "reason": "PC and monitor is a multi-item lot"},
+    "65901": {"expected_valued": false, "reason": "Mixed RAM bundle of five modules"}
+  }
+}

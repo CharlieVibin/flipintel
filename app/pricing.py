@@ -44,7 +44,14 @@ class PricingDatabase:
         strategies = getattr(estimate, "strategies", {}) or {}
         latest = self.latest(product_key)
         confidence = round(float(getattr(estimate, "confidence", 0.0) or 0.0), 3)
-        if latest and abs(float(latest["resale_good"] or 0) - float(resale)) < 0.01:
+        # An unchanged fresh estimate is not new information. An unchanged
+        # *stale* one still needs a new timestamp, otherwise the product remains
+        # permanently overdue and the dashboard keeps reporting the old refresh.
+        if (
+            latest
+            and not self.is_stale(latest)
+            and abs(float(latest["resale_good"] or 0) - float(resale)) < 0.01
+        ):
             if abs(float(latest["confidence"] or 0) - confidence) < 0.005:
                 return False
         self.db.execute(
