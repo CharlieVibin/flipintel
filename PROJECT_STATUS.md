@@ -21,8 +21,8 @@ apples-to-apples comparison on identical collected listings.
 - The dominant review reason was not a suspicious price. It was
   `variant_unclear`: the risk model sent *every* phone/tablet with an unstated
   capacity to review, including hundreds priced at the normal market level.
-- 5,496 review rows were variant-unclear; 1,993 of those had only the variant
-  data gap as a reason. The queue was bookkeeping, not triage.
+- 1,993 review rows carried the two variant sentences as their entire review
+  reason string. The queue was bookkeeping, not triage.
 - Identification lost real listings for mechanical reasons: 8/16/32GB legacy
   capacities were ignored (iPhone 6/7, iPad 2–5), games such as `MW2 ps3` and
   `Skyrim - PS3` were read as consoles, cases containing `Plus` (`iPhone 16 Plus
