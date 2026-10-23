@@ -238,22 +238,13 @@ Last verified: **55 passed, 0 failed**; frontend `tsc -b && vite build` passes.
 
 ## Git / handoff
 
-The local repository and the GitHub remote have unrelated root histories. Local
-`main` is the working FlipIntel implementation in this workspace; `origin/main`
-contains an older, different backend/frontend layout. The remote history was not
-overwritten. This pass is committed locally on `main`.
+Remote: <https://github.com/CharlieVibin/flipintel> (public, default branch
+`main`). The local `main` branch is the working FlipIntel implementation and was
+pushed as the repository's first commit on 2026-10-23 (`22d2ea2`), so no remote
+history was overwritten. `main` tracks `origin/main`; local and remote trees
+match.
 
-**Push blocker (verified 2026-10-23):** pushing `main:reliability-pass` was
-rejected with HTTP 403 by GitHub. The authenticated account (`CharlieVibin`)
-does not have write permission to `bboyrican20/flipintel`. The commit is intact
-locally; grant that account write access (or authenticate an account with access)
-and run:
-
-```bat
-git push -u origin main:reliability-pass
-```
-
-Do not force-push `main`: the remote's older layout is unrelated and must not be
-discarded without the owner's decision.
+Earlier notes referenced `bboyrican20/flipintel`; that was the wrong remote and
+is no longer configured. No force-push is needed or recommended.
 
 Never stage `.env`, `data/`, `.venv/`, `node_modules/`, or `frontend/dist/`.
