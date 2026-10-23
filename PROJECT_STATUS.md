@@ -79,7 +79,7 @@ All changes are additive; raw listings, observations and snapshots were kept.
 | Repair measure | Result |
 | --- | ---: |
 | Listings audited | 74,489 |
-| Listings whose identity changed | 609 |
+| Listings whose identity changed | 614 (609 initial + 5 RAM refinement) |
 | Affected product keys | 449 |
 | Market observations reassigned | 429 |
 | Market observations invalidated but retained | 15 |
