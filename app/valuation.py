@@ -1037,9 +1037,6 @@ class ValuationEngine:
             int(row["listing_id"]): row["decision"]
             for row in self.db.query("SELECT listing_id, decision FROM review_decisions")
         }
-        # Clear recommendations for listings that are no longer evaluated (for
-        # example after identification rules tightened) before rebuilding them.
-        self.db.execute("UPDATE deals SET is_deal = 0, needs_review = 0, review_reason = NULL")
         evaluated = deals = review = 0
         self._comp_cache = {}
         for listing in rows:
@@ -1091,5 +1088,16 @@ class ValuationEngine:
             evaluated += 1
             deals += result["is_deal"]
             review += result["needs_review"]
+        # Clear only rows that are no longer part of the evaluated universe.
+        # Keeping the previous flags during the loop avoids the empty/partial
+        # feed that occurred when every deal was zeroed before being rebuilt.
+        self.db.execute(
+            "UPDATE deals SET is_deal=0, needs_review=0, review_reason=NULL "
+            "WHERE listing_id IN ("
+            "  SELECT d.listing_id FROM deals d JOIN listings l ON l.id=d.listing_id "
+            "  WHERE l.status != 'active' OR l.last_seen < ?"
+            ")",
+            (hours_ago(24 * 21),),
+        )
         self._comp_cache = None
         return {"evaluated": evaluated, "deals": deals, "review": review, "observed": observed}
