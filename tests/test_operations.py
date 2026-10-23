@@ -6,6 +6,8 @@ import asyncio
 from app.collectors.base import BaseCollector, RawListing, SearchOutcome, run_queries
 from app.collectors.ebay import EbayCollector
 from app.db import Database
+from app.scan_config import save_scan_config
+from app.scan_taxonomy import all_leaf_keys
 from app.scanner import Scanner
 from app.utils import iso
 
@@ -140,6 +142,14 @@ def test_scan_records_stage_and_query_performance_metrics(tmp_path):
     db = Database(tmp_path / "metrics.db")
     stub = _StubCollector(db)
     try:
+        save_scan_config(
+            db,
+            categories=all_leaf_keys(),
+            min_price=0,
+            max_price=25000,
+            marketplaces={"vinted": True, "gumtree": True, "ebay": True},
+            active_preset="all-electronics",
+        )
         scanner = Scanner(db, collectors={"vinted": stub})
         outcome = asyncio.run(scanner._scan(stub))
         assert outcome.status == "ok"

@@ -8,11 +8,14 @@ import json
 import logging
 import random
 from datetime import timedelta
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlparse
 
 from .categories import CATALOGUES, Category, categories_for, category_by_id, category_url
 from .config import CATEGORY_LABELS, DISCOVERY_QUERIES, MARKETPLACE_LABELS, settings
+from .scan_config import ScanConfiguration, load_scan_config, scan_leaf_for
+from .scan_taxonomy import mapped_category_ids
 from .collectors import (
     BaseCollector,
     CollectorError,
@@ -34,6 +37,9 @@ from .utils import (
 from .valuation import ValuationEngine
 
 log = logging.getLogger(__name__)
+
+# Distinguishes "leave the stored error alone" from an explicit clear.
+_UNSET = object()
 
 # Targeted auction searches. Broad words such as "gpu" or "cpu" return
 # coolers, food processors and other unrelated auctions; these phrases name the
@@ -110,6 +116,10 @@ def _valid_url(url: str, marketplace: str) -> bool:
     return parsed.hostname in ALLOWED_HOSTS.get(marketplace, set())
 
 
+class ScanConfigurationRequired(RuntimeError):
+    """Raised when a scan is requested before the configuration is saved."""
+
+
 class Scanner:
     def __init__(self, db: Database, collectors: dict[str, BaseCollector] | None = None) -> None:
         self.db = db
@@ -129,6 +139,8 @@ class Scanner:
         self._stop = asyncio.Event()
         self._running: set[str] = set()
         self._started = False
+        self.scheduled_enabled = True
+        self.scan_config: ScanConfiguration = load_scan_config(db)
         self._last_refresh_at: str | None = None
         self._last_refresh_result: dict[str, int] | None = None
         # Ingest bumps this whenever a stored listing changes. Valuation refresh
@@ -143,6 +155,19 @@ class Scanner:
         if self._started:
             return
         self._started = True
+        self.scan_config = load_scan_config(self.db)
+        if not self.scan_config.confirmed:
+            for marketplace in ("vinted", "gumtree", "ebay"):
+                self._set_status(
+                    marketplace,
+                    "paused",
+                    last_error="Scan configuration has not been saved",
+                    next_scan=None,
+                )
+            log.warning(
+                "Scanner waiting for scan configuration; no marketplace requests will be made"
+            )
+            return
         # Re-apply the current classifier to stored listings so parser fixes
         # (for example separating a whole PC from its GPU) take effect without
         # deleting the user's collected market history.
@@ -156,11 +181,31 @@ class Scanner:
             await self._run_refresh(force=True)
         except Exception:
             log.exception("Existing-listing re-identification failed")
+        if self.scheduled_enabled:
+            self._start_loops()
+        log.info("Scanner started for %s", ", ".join(self.collectors))
+
+    def _start_loops(self) -> None:
+        if self._tasks:
+            return
         for marketplace in ("vinted", "gumtree", "ebay"):
             self._tasks.append(asyncio.create_task(self._loop(marketplace), name=f"scan-{marketplace}"))
         self._tasks.append(asyncio.create_task(self._maintenance_loop(), name="maintenance"))
         self._tasks.append(asyncio.create_task(self._auction_loop(), name="auctions"))
-        log.info("Scanner started for %s", ", ".join(self.collectors))
+
+    async def apply_scan_config(self, config: ScanConfiguration | None = None) -> None:
+        """Reload a saved configuration without restarting the server."""
+        self.scan_config = config or load_scan_config(self.db)
+        if self.scan_config.confirmed and self.scheduled_enabled and self._started and not self._tasks:
+            self._start_loops()
+        for marketplace in ("vinted", "gumtree", "ebay"):
+            if not self.scan_config.confirmed:
+                self._set_status(
+                    marketplace, "paused", last_error="Scan configuration has not been saved",
+                    next_scan=None,
+                )
+            elif not self.scan_config.marketplace_enabled(marketplace):
+                self._set_status(marketplace, "paused", last_error="Source disabled in scan setup")
 
     async def stop(self) -> None:
         self._stop.set()
@@ -248,7 +293,17 @@ class Scanner:
         await self._sleep(random.uniform(2, 8))
         while not self._stop.is_set():
             try:
-                if not self.db.setting_bool(f"enabled_{marketplace}", marketplace != "facebook"):
+                self.scan_config = load_scan_config(self.db)
+                if not self.scan_config.confirmed:
+                    self._set_status(
+                        marketplace, "paused",
+                        last_error="Scan configuration has not been saved", next_scan=None,
+                    )
+                    await self._sleep(30)
+                    continue
+                if not self.scan_config.marketplace_enabled(marketplace) or not self.db.setting_bool(
+                    f"enabled_{marketplace}", marketplace != "facebook"
+                ):
                     self._set_status(marketplace, "paused", next_scan=None)
                     await self._sleep(30)
                     continue
@@ -323,7 +378,17 @@ class Scanner:
                 self._running.discard(marketplace)
 
     async def trigger(self, marketplace: str | None = None) -> list[str]:
+        self.scan_config = load_scan_config(self.db)
+        if not self.scan_config.confirmed:
+            raise ScanConfigurationRequired(
+                "Save the scan configuration before starting a scan"
+            )
         targets = [marketplace] if marketplace else [m for m in ("vinted", "gumtree", "ebay")]
+        targets = [
+            target for target in targets
+            if self.scan_config.marketplace_enabled(target)
+            and mapped_category_ids(target, self.scan_config.categories)
+        ]
         accepted: list[str] = []
         for target in targets:
             if target not in self.collectors or self._locks[target].locked():
@@ -356,7 +421,34 @@ class Scanner:
         )
         counts = self._category_counts()
         cursor = self.db.setting_int(f"cursor_{marketplace}", 0)
-        categories = list(DISCOVERY_QUERIES.keys())
+        query_leaves = {
+            "gpu": "pc-components/graphics-cards",
+            "cpu": "pc-components/processors",
+            "ram": "pc-components/memory",
+            "ssd": "pc-components/ssds",
+            "motherboard": "pc-components/motherboards",
+            "pc": "computers-laptops",
+            "laptop": "computers-laptops",
+            "console": "gaming-consoles",
+            "handheld": "gaming-consoles/steam-deck-handhelds",
+            "retro": "gaming-consoles/retro",
+            "monitor": "tablets-displays/monitors",
+            "phone": "phones-mobile",
+            "tablet": "tablets-displays",
+            "networking": "networking-smart-home",
+            "other": "peripherals",
+        }
+        categories = [
+            category for category in DISCOVERY_QUERIES
+            if any(
+                leaf == wanted or leaf.startswith(wanted + "/")
+                for leaf in self.scan_config.categories
+                for wanted in [query_leaves.get(category, "")]
+                if wanted
+            )
+        ]
+        if not categories:
+            return []
         # Rotate the tie-break order so categories with equal coverage are not
         # always visited in the same priority. The target is a soft floor, not
         # a hard cap: broad categories still get scanned regularly.
@@ -484,7 +576,11 @@ class Scanner:
             )
 
     def _due_category_rows(
-        self, marketplace: str, manual: bool, limit: int
+        self,
+        marketplace: str,
+        manual: bool,
+        limit: int,
+        allowed_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         self._seed_categories(marketplace)
         rows = self.db.query(
@@ -493,6 +589,8 @@ class Scanner:
         now = utcnow()
 
         def due(row: dict[str, Any]) -> bool:
+            if allowed_ids is not None and str(row.get("category_id")) not in allowed_ids:
+                return False
             if manual:
                 return row.get("state") != "scanning"
             target = parse_iso(row.get("next_due_at"))
@@ -549,10 +647,33 @@ class Scanner:
         self, collector: BaseCollector, manual: bool = False
     ) -> SearchOutcome:
         marketplace = collector.marketplace
+        self.scan_config = load_scan_config(self.db)
+        if not self.scan_config.confirmed:
+            self._set_status(
+                marketplace, "paused",
+                last_error="Scan configuration has not been saved", next_scan=None,
+            )
+            return SearchOutcome(
+                marketplace=marketplace, status="paused",
+                error="Scan configuration has not been saved",
+            )
+        if not self.scan_config.marketplace_enabled(marketplace):
+            self._set_status(marketplace, "paused", last_error="Source disabled in scan setup", next_scan=None)
+            return SearchOutcome(marketplace=marketplace, status="paused", error="Source disabled in scan setup")
         enabled = self.db.setting_bool(f"enabled_{marketplace}", marketplace != "facebook")
         if not enabled:
             self._set_status(marketplace, "paused", last_error=None)
             return SearchOutcome(marketplace=marketplace, status="paused", error="Source paused in settings")
+
+        allowed_ids = set(mapped_category_ids(marketplace, self.scan_config.categories))
+        if not allowed_ids:
+            self._set_status(marketplace, "paused", last_error="No enabled categories for this source", next_scan=None)
+            return SearchOutcome(
+                marketplace=marketplace, status="paused",
+                error="No enabled categories for this source",
+            )
+        low, high = self.scan_config.server_price_bounds(marketplace)
+        collector.scan_price_min, collector.scan_price_max = low, high
 
         available, reason = collector.available
         if not available:
@@ -569,7 +690,9 @@ class Scanner:
             else "category_requests_per_cycle"
         )
         budget = max(1, min(30, self.db.setting_int(budget_key, budget_default)))
-        rows = self._due_category_rows(marketplace, manual, budget)
+        rows = self._due_category_rows(
+            marketplace, manual, budget, allowed_ids=allowed_ids
+        )
         if not rows:
             return SearchOutcome(
                 marketplace=marketplace,
@@ -593,6 +716,7 @@ class Scanner:
         failures = 0
         total_found = total_new = total_drops = 0
         session_ids: set[str] = set()
+        processed_ids: set[str] = set()
 
         for index, row in enumerate(rows):
             if budget <= 0:
@@ -655,7 +779,19 @@ class Scanner:
                 cat["pages"] += 1
                 if page.items:
                     cat["overlap"] = round(len(known) / len(page.items), 3)
-                page_found, page_new, page_drops = self._ingest(page.items, marketplace)
+                fresh = []
+                for item in page.items:
+                    if not item.external_id or item.external_id in processed_ids:
+                        continue
+                    processed_ids.add(item.external_id)
+                    fresh.append(item)
+                page_found, page_new, page_drops = self._ingest(
+                    fresh,
+                    marketplace,
+                    category_id=category.category_id,
+                    scan_config=self.scan_config,
+                    enforce_budget=True,
+                )
                 total_found += page_found
                 total_new += page_new
                 total_drops += page_drops
@@ -802,6 +938,19 @@ class Scanner:
 
     async def _scan_keywords(self, collector: BaseCollector, manual: bool = False) -> SearchOutcome:
         marketplace = collector.marketplace
+        self.scan_config = load_scan_config(self.db)
+        if not self.scan_config.confirmed:
+            self._set_status(
+                marketplace, "paused",
+                last_error="Scan configuration has not been saved", next_scan=None,
+            )
+            return SearchOutcome(
+                marketplace=marketplace, status="paused",
+                error="Scan configuration has not been saved",
+            )
+        if not self.scan_config.marketplace_enabled(marketplace):
+            self._set_status(marketplace, "paused", last_error="Source disabled in scan setup", next_scan=None)
+            return SearchOutcome(marketplace=marketplace, status="paused", error="Source disabled in scan setup")
         enabled = self.db.setting_bool(f"enabled_{marketplace}", marketplace != "facebook")
         if not enabled:
             self._set_status(marketplace, "paused", last_error=None)
@@ -822,6 +971,15 @@ class Scanner:
             return SearchOutcome(marketplace=marketplace, status=state, error=reason)
 
         queries = self._queries_for_cycle(marketplace)
+        if not queries:
+            self._set_status(
+                marketplace, "paused",
+                last_error="No enabled categories for this source", next_scan=None,
+            )
+            return SearchOutcome(
+                marketplace=marketplace, status="paused",
+                error="No enabled categories for this source",
+            )
         started = utcnow()
         run_id = self.db.execute(
             "INSERT INTO scan_runs(marketplace, started_at, status, queries) VALUES (?, ?, 'running', ?)",
@@ -831,6 +989,8 @@ class Scanner:
 
         stage_ms: dict[str, int] = {}
         try:
+            low, high = self.scan_config.server_price_bounds(marketplace)
+            collector.scan_price_min, collector.scan_price_max = low, high
             outcome = await collector.search(queries, max_pages=1)
         except Exception as exc:
             log.exception("Collector crashed: %s", marketplace)
@@ -876,7 +1036,12 @@ class Scanner:
                 stage_ms["duplicates"] = int((utcnow() - duplicate_started).total_seconds() * 1000)
         elif outcome.items:
             ingest_started = utcnow()
-            found, new, drops = self._ingest(outcome.items, marketplace)
+            found, new, drops = self._ingest(
+                outcome.items,
+                marketplace,
+                scan_config=self.scan_config,
+                enforce_budget=True,
+            )
             self._data_version += 1
             stage_ms["ingest"] = int((utcnow() - ingest_started).total_seconds() * 1000)
             duplicate_started = utcnow()
@@ -1002,7 +1167,13 @@ class Scanner:
         return marked
 
     def _ingest(
-        self, items: list[RawListing], marketplace: str, category_id: str | None = None
+        self,
+        items: list[RawListing],
+        marketplace: str,
+        category_id: str | None = None,
+        *,
+        scan_config: ScanConfiguration | None = None,
+        enforce_budget: bool = False,
     ) -> tuple[int, int, int]:
         now = iso()
         seen: set[str] = set()
@@ -1014,17 +1185,35 @@ class Scanner:
                 continue
             if not _valid_url(item.url, marketplace):
                 continue
-            seen.add(item.external_id)
-            found += 1
             title = normalise_text(item.title)[:500]
             description = normalise_text(item.description)[:4000]
             ident = identify_listing(title, f"{description} {item.condition_raw}", marketplace)
+            source_category = str(item.category_id or category_id or "")
+            scan_leaf = None
+            if scan_config is not None:
+                scan_leaf = scan_leaf_for(
+                    ident, title, source_category or None, marketplace
+                )
+                # A disabled product class is rejected before storage, dedupe,
+                # enrichment and valuation. Existing historical rows are not
+                # deleted; they simply stop being refreshed by new scans.
+                if not scan_config.allows(scan_leaf):
+                    continue
+                if enforce_budget:
+                    affordable, _, _ = scan_config.affordable(
+                        marketplace, float(item.price), float(item.shipping or 0)
+                    )
+                    if not affordable:
+                        continue
             # Structural noise (games, cases, packaging, compatibility parts)
-            # is not worth storing or valuing. Existing rows are left untouched
-            # and expire through the normal stale-listing maintenance; nothing
-            # collected is deleted.
+            # is not worth storing or valuing. An explicitly enabled product
+            # class such as mice or keyboards is still collected even when the
+            # hardware parser has no model key for it yet.
             if not ident.product_key and NOISE_FLAGS.intersection(ident.flags):
-                continue
+                if scan_leaf is None:
+                    continue
+            seen.add(item.external_id)
+            found += 1
             existing = self.db.query_one(
                 """
                 SELECT l.id, l.price, l.last_price, l.category, l.product_key, l.product_name,
@@ -1170,9 +1359,12 @@ class Scanner:
     async def _enrich_comparables(self) -> None:
         """Automatically fetch a model-level search for models whose comparable
         set is thin. No user configuration is needed; this is rate limited."""
+        self.scan_config = load_scan_config(self.db)
         candidates = self.db.query(
             """
-            SELECT l.product_key, l.listing_kind, l.product_name, COUNT(*) AS n, COUNT(DISTINCT l.marketplace) AS mp
+            SELECT l.product_key, l.listing_kind, l.product_name, l.category,
+                   MAX(l.title) AS title, MAX(l.marketplace) AS marketplace,
+                   COUNT(*) AS n, COUNT(DISTINCT l.marketplace) AS mp
             FROM listings l
             WHERE l.status='active' AND l.product_key IS NOT NULL AND l.last_seen >= ?
               AND l.is_faulty=0 AND l.is_wanted=0
@@ -1188,6 +1380,8 @@ class Scanner:
             if budget <= 0:
                 break
             key = row["product_key"]
+            if not self._stored_row_allowed(row):
+                continue
             term = search_term_for(key, row["product_name"] or "")
             if not term:
                 continue
@@ -1215,11 +1409,32 @@ class Scanner:
                 (key, iso(), outcome.status, len(outcome.items)),
             )
             if outcome.items:
-                self._ingest(outcome.items, "vinted")
+                self._ingest(
+                    outcome.items, "vinted", scan_config=self.scan_config,
+                    enforce_budget=False,
+                )
             if outcome.status in {"blocked", "failed"}:
                 log.warning("Comparable enrichment source problem: %s", outcome.error)
                 break
             budget -= 1
+
+    def _stored_row_allowed(self, row: dict[str, Any]) -> bool:
+        """Whether a stored product belongs to an enabled scan category."""
+        if not self.scan_config.confirmed:
+            return False
+        ident = SimpleNamespace(
+            category=row.get("category") or "other",
+            product_key=row.get("product_key") or "",
+            flags=[],
+            attrs={},
+        )
+        leaf = scan_leaf_for(
+            ident,
+            row.get("title") or row.get("product_name") or "",
+            None,
+            str(row.get("marketplace") or ""),
+        )
+        return self.scan_config.allows(leaf)
 
     async def cex_quote_pause_check(self) -> None:
         # Kept as a hook so enrichment pacing can evolve without changing callers.
@@ -1249,7 +1464,8 @@ class Scanner:
             """
             SELECT l.product_key, MAX(l.product_name) AS product_name,
                    MAX(l.condition_norm) AS condition_norm, MAX(l.attrs) AS attrs,
-                   COUNT(*) AS n,
+                   MAX(l.category) AS category, MAX(l.title) AS title,
+                   MAX(l.marketplace) AS marketplace, COUNT(*) AS n,
                    MAX(CASE WHEN d.is_deal = 1 THEN 1 ELSE 0 END) AS deal_count,
                    MAX(CASE WHEN l.is_auction = 1 THEN 1 ELSE 0 END) AS auction_count
             FROM listings l
@@ -1281,6 +1497,8 @@ class Scanner:
             if refreshed >= limit:
                 break
             product_key = str(row["product_key"])
+            if not self._stored_row_allowed(row):
+                continue
             if not self.cex.needs_refresh(product_key):
                 continue
             if not pricing.claim(product_key):
@@ -1539,7 +1757,7 @@ class Scanner:
         state: str | None,
         *,
         last_attempt_at: str | None = None,
-        last_error: str | None = None,
+        last_error: str | None | object = _UNSET,
         next_scan: str | None = None,
     ) -> None:
         fields = ["checked_at=?"]
@@ -1550,7 +1768,7 @@ class Scanner:
         if last_attempt_at is not None:
             fields.append("last_attempt_at=?")
             params.append(last_attempt_at)
-        if last_error is not None:
+        if last_error is not _UNSET:
             fields.append("last_error=?")
             params.append(last_error)
         if next_scan is not None:
@@ -1675,7 +1893,9 @@ class Scanner:
                 }
             )
         health = {
-            "scanner_running": self._started,
+            # The scheduler may be intentionally idle while the configuration
+            # is unsaved. Report actual loops rather than the object existing.
+            "scanner_running": bool(self._tasks),
             "sources": sources,
             "cex": self.cex.health(),
             "coverage": self.coverage_snapshot(),

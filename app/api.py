@@ -26,7 +26,18 @@ from .evidence import (
 )
 from .flips import FlipBook
 from .identification import CONDITION_FACTORS
-from .scanner import Scanner
+from .scan_config import (
+    MAX_BUDGET,
+    config_payload,
+    coverage_report,
+    create_custom_preset,
+    delete_custom_preset,
+    list_presets,
+    load_scan_config,
+    save_scan_config,
+    update_custom_preset,
+)
+from .scanner import Scanner, ScanConfigurationRequired
 from .utils import age_hours, hours_ago, iso, parse_iso, normalise_text, utcnow
 from .valuation import ValuationConfig
 
@@ -194,11 +205,21 @@ async def health(request: Request) -> dict[str, Any]:
         (row["decision"], row["count"])
         for row in db.query("SELECT decision, COUNT(*) AS count FROM review_decisions GROUP BY decision")
     )
+    scan_config = load_scan_config(db)
     return {
         "status": "ok",
         "time": iso(),
         "version": "1.0.0",
         "scanner": scanner.health_snapshot(),
+        "scan_config": {
+            "confirmed": scan_config.confirmed,
+            "active_preset": scan_config.active_preset,
+            "enabled_categories": scan_config.enabled_count,
+            "min_price": scan_config.min_price,
+            "max_price": scan_config.max_price,
+            "marketplaces": scan_config.marketplaces,
+            "confirmed_at": scan_config.confirmed_at,
+        },
         "counts": counts,
         "last_successful_scan": last_scan,
         "review_decisions": decisions,
@@ -1065,6 +1086,98 @@ async def categories(request: Request) -> dict[str, Any]:
     }
 
 
+class ScanConfigUpdate(BaseModel):
+    categories: list[str] = Field(default_factory=list)
+    min_price: float = Field(default=0, ge=0, le=MAX_BUDGET)
+    max_price: float = Field(default=100, ge=0, le=MAX_BUDGET)
+    marketplaces: dict[str, bool] = Field(default_factory=dict)
+    active_preset: str = Field(default="custom", max_length=80)
+    confirmed: bool = True
+
+
+class ScanPresetCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    base_slug: str | None = Field(default=None, max_length=80)
+    config: dict[str, Any] | None = None
+
+
+class ScanPresetUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    config: dict[str, Any] | None = None
+
+
+@router.get("/scan-config")
+async def get_scan_config(request: Request) -> dict[str, Any]:
+    db = _db(request)
+    return config_payload(db, load_scan_config(db))
+
+
+@router.put("/scan-config")
+async def update_scan_config(request: Request, body: ScanConfigUpdate) -> dict[str, Any]:
+    db = _db(request)
+    marketplaces = {
+        name: bool(body.marketplaces.get(name, True))
+        for name in ("vinted", "gumtree", "ebay")
+    }
+    try:
+        config = save_scan_config(
+            db,
+            categories=body.categories,
+            min_price=body.min_price,
+            max_price=body.max_price,
+            marketplaces=marketplaces,
+            active_preset=body.active_preset or "custom",
+            confirmed=body.confirmed,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    scanner = _scanner(request)
+    await scanner.apply_scan_config(config)
+    return config_payload(db, config)
+
+
+@router.get("/scan-config/coverage")
+async def scan_coverage(request: Request) -> dict[str, Any]:
+    db = _db(request)
+    return coverage_report(db, load_scan_config(db))
+
+
+@router.get("/scan-config/presets")
+async def scan_presets(request: Request) -> dict[str, Any]:
+    return {"presets": list_presets(_db(request))}
+
+
+@router.post("/scan-config/presets")
+async def create_scan_preset(request: Request, body: ScanPresetCreate) -> dict[str, Any]:
+    try:
+        preset = create_custom_preset(
+            _db(request), name=body.name, base_slug=body.base_slug, config=body.config
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {"preset": preset, "presets": list_presets(_db(request))}
+
+
+@router.put("/scan-config/presets/{preset_id}")
+async def edit_scan_preset(
+    request: Request, preset_id: int, body: ScanPresetUpdate
+) -> dict[str, Any]:
+    preset = update_custom_preset(
+        _db(request), preset_id, name=body.name, config=body.config
+    )
+    if not preset:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    return {"preset": preset, "presets": list_presets(_db(request))}
+
+
+@router.delete("/scan-config/presets/{preset_id}")
+async def remove_scan_preset(request: Request, preset_id: int) -> dict[str, Any]:
+    deleted = delete_custom_preset(_db(request), preset_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Preset not found")
+    return {"deleted": True, "presets": list_presets(_db(request))}
+
+
 class SettingsUpdate(BaseModel):
     min_profit: float | None = Field(default=None, ge=0, le=10000)
     min_roi: float | None = Field(default=None, ge=0, le=5)
@@ -1296,10 +1409,19 @@ async def trigger_scan(request: Request, body: ScanRequest | None = None) -> dic
     marketplace = (body.marketplace if body else None) or None
     if marketplace and marketplace not in scanner.collectors:
         raise HTTPException(status_code=404, detail="Unknown marketplace")
-    accepted = await scanner.trigger(marketplace)
+    try:
+        accepted = await scanner.trigger(marketplace)
+    except ScanConfigurationRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    if accepted:
+        message = "Scan started"
+    elif marketplace and not scanner.scan_config.marketplace_enabled(marketplace):
+        message = "That marketplace is disabled in Scan configuration"
+    else:
+        message = "No scan started — check the saved categories and marketplace toggles"
     return {
         "accepted": accepted,
-        "message": "Scan started" if accepted else "A scan is already running for that source",
+        "message": message,
         "time": iso(),
     }
 

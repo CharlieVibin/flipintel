@@ -5,6 +5,83 @@
 **Runtime:** Python 3.10, FastAPI, SQLite, React 18 + Vite + Tailwind
 **Live dashboard:** http://127.0.0.1:8765 (while the local server is running)
 
+## Session 2026-10-23 — Pre-scan category toggles, presets and budget controls
+
+This session added a persistent control plane in front of every automated
+category scan. It does not replace the category-first collectors, reset the
+database or change historical observations.
+
+### Taxonomy and persistence
+
+- `app/scan_taxonomy.py` defines **29 groups / 145 selectable leaves / 174 nodes**,
+  covering PC components, phones, computers, consoles, tablets, peripherals,
+  cameras, audio, TVs, networking/smart home, storage, wearables and a
+  deliberately broad Other Electronics group. Parent and leaf toggles are
+  independent, and a parent toggle controls the whole subtree.
+- The taxonomy keeps an explicit marketplace mapping for every leaf. Current
+  coverage: Vinted **99 discovered branches → 128 mapped leaves**, Gumtree **7 →
+  145**, eBay Browse **102 → 132**. The coverage endpoint reports
+  `unmapped_leaves: 0` and no live category without a taxonomy mapping.
+- `app/scan_config.py` persists the confirmed flag, budget, marketplace
+  switches, selected leaves and named presets in the `scan_config` table. The
+  schema is created idempotently on startup. The initial default is the Budget
+  Electronics preset: 21 leaves, £0–£100, all three marketplaces. A saved
+  configuration survives restarts and is reloaded by every scan loop.
+- Built-in presets: Budget Electronics, PC Components, Graphics Cards, Phones,
+  Laptops, Complete PCs, Consoles, Tablets & Displays, Gaming Peripherals,
+  Photography & Audio and All Electronics. Custom configurations can be saved,
+  renamed, duplicated and deleted. All Electronics covers all 145 leaves.
+
+### Enforcement and efficiency
+
+The scanner now requires a confirmed configuration. Before a scan it resolves
+enabled leaves to marketplace category IDs, sends server-side price filters
+where the source supports them, rejects disabled leaves and over-budget total
+costs before storage/enrichment, and deduplicates the resulting request set.
+A disabled category therefore cannot trigger comparable research or valuation.
+
+Measured request coverage on the current configuration (28 leaves selected):
+
+| Source | All catalogue branches | Selected requests |
+|---|---:|---:|
+| Vinted | 99 | 20 |
+| Gumtree | 7 | 2 |
+| eBay Browse | 102 | 25 |
+| **Total** | **208** | **47** |
+
+That is a **77% reduction** before broad-branch overcollection is filtered
+locally. Gumtree only exposes seven usable branches; its audio/headphone and
+peripheral mappings are intentionally broad and are documented in the coverage
+report. Buyer-protection fees and known delivery are included in the Vinted
+budget calculation; unknown costs are not treated as verified.
+
+### Dashboard
+
+`ScanConfigPage.tsx` adds the **Scan setup** workspace: red unconfigured banner,
+active preset, enabled leaf/group count, marketplace counts, min/max budget,
+scanner status, Save Configuration, Start Scan, search, parent Enable/Disable
+all controls, coverage report and preset create/rename/duplicate/delete actions.
+When the configuration has never been saved the scanner pauses before any
+marketplace request and the page stays in the red "not configured" state.
+
+### Verification
+
+- `python -m pytest -q`: **184 passed** (including `tests/test_scan_config.py`
+  for persistence, parent/child toggles, budget arithmetic, presets, request
+  reduction and confirmation gating).
+- `cd frontend && npm run build`: TypeScript and Vite build pass.
+- Live API and browser checks: `GET /api/scan-config`, save, preset selection,
+  category filters, dashboard red/green states, and scanner health.
+- A cold start with a confirmed configuration re-identifies and revalues the
+  existing database before uvicorn starts serving; on this 549 MB database that
+  takes about **9 minutes**. This is existing maintenance behaviour, not a
+  scanner request and not data loss. Subsequent restarts use the same path.
+
+Remaining limitation: existing eBay ending-soon auction monitoring is still a
+separate rotation and is not yet narrowed by the leaf selection. It remains
+preserved and budget-filtered at ingest; do not describe auction coverage as
+fully config-filtered.
+
 ## Session 2026-10-23 — Variant integrity and the Steam Deck LCD failure
 
 This session fixed a real valuation failure without resetting the database or

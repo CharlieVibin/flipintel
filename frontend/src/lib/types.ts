@@ -369,10 +369,21 @@ export interface Coverage {
   generated_at: string;
 }
 
+export interface ScanConfigHealth {
+  confirmed: boolean;
+  active_preset: string;
+  enabled_categories: number;
+  min_price: number;
+  max_price: number;
+  marketplaces: { vinted: boolean; gumtree: boolean; ebay: boolean };
+  confirmed_at: string | null;
+}
+
 export interface HealthResponse {
   status: string;
   time: string;
   version: string;
+  scan_config: ScanConfigHealth;
   scanner: {
     scanner_running: boolean;
     sources: SourceStatus[];
@@ -885,4 +896,98 @@ export interface ProductPricing {
     condition: string;
     observed_at: string;
   }[];
+}
+
+export interface ScanCategoryMapping {
+  marketplace: Marketplace | string;
+  category_id: string;
+  label: string;
+  path: string;
+  broad: boolean;
+}
+
+export interface ScanCategoryNode {
+  key: string;
+  label: string;
+  parent: string | null;
+  level: number;
+  description: string;
+  valued: boolean;
+  default_enabled: boolean;
+  enabled: boolean;
+  state: "all" | "some" | "none";
+  is_group: boolean;
+  mapped_marketplaces: string[];
+  mapping_count: number;
+  mappings: ScanCategoryMapping[];
+  keywords: string[];
+  kinds: string[];
+}
+
+export interface ScanPresetConfig {
+  slug: string;
+  name: string;
+  description: string;
+  min_price: number;
+  max_price: number;
+  marketplaces: { vinted: boolean; gumtree: boolean; ebay: boolean };
+  categories: string[];
+  builtin: boolean;
+  id?: number;
+}
+
+export interface ScanCoverageMarketplace {
+  discovered_categories: number;
+  mapped_leaves: number;
+  selected_categories: number;
+  live_scan_rows: number;
+  catalogue_count: number;
+  live_unmapped: string[];
+  not_yet_scanned: string[];
+  categories: { category_id: string; label: string; path: string; broad: boolean }[];
+  selected_ids: string[];
+}
+
+export interface ScanCoverage {
+  vinted: ScanCoverageMarketplace;
+  gumtree: ScanCoverageMarketplace;
+  ebay: ScanCoverageMarketplace;
+  summary: {
+    leaves: number;
+    groups: number;
+    valued_leaves: number;
+    unvalued_leaves: number;
+    unmapped_leaves: number;
+    unmapped_keys: string[];
+    unvalued_keys: string[];
+    total_requests_all: Record<string, number>;
+    total_requests_selected: Record<string, number>;
+  };
+  gaps: {
+    unmapped_leaves: string[];
+    unvalued_leaves: string[];
+    live_categories_without_taxonomy_mapping: Record<string, string[]>;
+  };
+  notes: string[];
+}
+
+export interface ScanConfiguration {
+  confirmed: boolean;
+  confirmed_at: string | null;
+  active_preset: string;
+  min_price: number;
+  max_price: number;
+  marketplaces: { vinted: boolean; gumtree: boolean; ebay: boolean };
+  categories: string[];
+  enabled_count: number;
+  nodes: ScanCategoryNode[];
+  presets: ScanPresetConfig[];
+  summary: {
+    enabled_leaves: number;
+    total_leaves: number;
+    enabled_groups: number;
+    valued_leaves: number;
+    selected_marketplaces: string[];
+  };
+  coverage: ScanCoverage;
 }

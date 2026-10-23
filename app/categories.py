@@ -1,82 +1,20 @@
-"""Keyword-free electronics category catalogue for each marketplace.
+"""Marketplace category catalogue, derived from the scan taxonomy.
 
-Every entry is a category browse endpoint that was checked against the live
-marketplace where possible. Keyword discovery still exists for comparables and
-miscategorised listings, but it is no longer the primary way listings are found.
-
-The catalogue deliberately targets device branches, not their parent
-"accessories" branches. The previous Vinted entries included the whole of
-electronics and audio, which produced thousands of phone cases, game discs,
-headphones and unrelated collectibles for every genuine machine. Narrow
-subcategories are cheaper to scan and their listings are relevant before the
-parser even runs.
-
-Notes:
-* Vinted exposes server-rendered ``/catalog/<id>-<slug>`` pages with 96 cards
-  per page. The IDs below come from Vinted's public UK catalogue sitemap and
-  were checked against their parent pages.
-* Gumtree exposes ``/for-sale/<slug>`` category pages with 30 cards per page,
-  ``?sort=newest`` ordering and ``/uk/pageN`` pagination. Only its three
-  hardware categories are scanned; games, audio, cameras and TVs are not
-  valued by this application.
-* eBay Browse search accepts a single non-top-level ``category_ids`` value with
-  no ``q``. Top-level categories are not used because eBay requires a keyword
-  for those. The IDs below are EBAY_GB leaf/branch categories documented by
-  eBay; they have not been exercised live because this workspace has no keys.
+The category IDs are data in :mod:`app.scan_taxonomy`. This module keeps the
+small lookup surface used by collectors, diagnostics and tests, and guarantees
+that a marketplace branch is never duplicated in the catalogue.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-
-@dataclass(frozen=True)
-class Category:
-    marketplace: str
-    category_id: str
-    label: str
-    path: str = ""
-    parent_id: str | None = None
-    coverage: str = "full"  # full | partial
-    priority: int = 1  # higher first when several categories are due
-
-    @property
-    def key(self) -> tuple[str, str]:
-        return (self.marketplace, self.category_id)
-
-
-VINTED: tuple[Category, ...] = (
-    Category("vinted", "3580", "Laptops", "/catalog/3580-electronics_comp_laptops", "3564", priority=3),
-    Category("vinted", "3581", "Desktop PCs", "/catalog/3581-electronics_comp_desktops", "3564", priority=3),
-    Category("vinted", "3602", "Graphics cards", "/catalog/3602-electronics_comp_graphicscards", "3582", priority=3),
-    Category("vinted", "3599", "Processors", "/catalog/3599-electronics_comp_cpus", "3582", priority=3),
-    Category("vinted", "3603", "Memory (RAM)", "/catalog/3603-electronics_comp_ram", "3582", priority=2),
-    Category("vinted", "3600", "Motherboards", "/catalog/3600-electronics_comp_motherboards", "3582", priority=2),
-    Category("vinted", "3605", "Internal hard drives", "/catalog/3605-electronics_comp_internal_hdd", "3582", priority=1),
-    Category("vinted", "3607", "Internal SSDs", "/catalog/3607-electronics_comp_internal_ssd", "3582", priority=2),
-    Category("vinted", "3637", "Monitors", "/catalog/3637-electronics_comp_monitors", "3564", priority=2),
-    Category("vinted", "3661", "Mobile phones", "/catalog/3661-electronics_phones_mobilephones", "3565", priority=3),
-    Category("vinted", "3728", "Tablets", "/catalog/3728-electronics_tab_tablets", "3567", priority=2),
-    Category("vinted", "3025", "Consoles", "/catalog/3025-electronics_vg_consoles", "3002", priority=3),
-    Category("vinted", "3642", "Routers", "/catalog/3642-electronics_comp_routers", "3594", priority=1),
-    Category("vinted", "3643", "Mesh Wi-Fi", "/catalog/3643-electronics_comp_mesh", "3594", priority=1),
-    Category("vinted", "3644", "Network switches", "/catalog/3644-electronics_comp_network_switches", "3594", priority=1),
+from .scan_taxonomy import (
+    Category,
+    MARKETPLACE_CATALOGUES,
+    catalogue_for,
 )
 
-GUMTREE: tuple[Category, ...] = (
-    Category("gumtree", "computers-software", "Computers & software", "/for-sale/computers-software", priority=3),
-    Category("gumtree", "phones", "Mobile phones", "/for-sale/phones", priority=3),
-    Category("gumtree", "video-games-consoles", "Video games & consoles", "/for-sale/video-games-consoles", priority=3),
-)
-
-EBAY: tuple[Category, ...] = (
-    Category("ebay", "177", "PC laptops & netbooks", coverage="partial", priority=3),
-    Category("ebay", "179", "PC desktops & all-in-ones", coverage="partial", priority=3),
-    Category("ebay", "175673", "Computer components & parts", coverage="partial", priority=2),
-    Category("ebay", "165", "Drives, storage & blank media", coverage="partial", priority=2),
-    Category("ebay", "171485", "Tablets & eReaders", coverage="partial", priority=2),
-    Category("ebay", "139971", "Video game consoles", coverage="partial", priority=3),
-    Category("ebay", "9355", "Mobile & smart phones", coverage="partial", priority=3),
-)
+VINTED: tuple[Category, ...] = catalogue_for("vinted")
+GUMTREE: tuple[Category, ...] = catalogue_for("gumtree")
+EBAY: tuple[Category, ...] = catalogue_for("ebay")
 
 CATALOGUES: dict[str, tuple[Category, ...]] = {
     "vinted": VINTED,

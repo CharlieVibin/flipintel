@@ -16,6 +16,8 @@ from app.collectors.ebay import EbayCollector
 from app.collectors.gumtree import GumtreeCollector
 from app.collectors.vinted import VintedCollector
 from app.db import Database
+from app.scan_config import save_scan_config
+from app.scan_taxonomy import all_leaf_keys
 from app.scanner import Scanner
 from app.utils import iso
 
@@ -192,7 +194,28 @@ def _category_scanner(db: Database, collector: FakeCategoryCollector) -> Scanner
         "keyword_supplement_queries": "0",
         "category_overlap_stop": "0.75",
     })
+    save_scan_config(
+        db,
+        categories=all_leaf_keys(),
+        min_price=0,
+        max_price=25000,
+        marketplaces={"vinted": True, "gumtree": True, "ebay": True},
+        active_preset="all-electronics",
+    )
     scanner = Scanner(db, collectors={"vinted": collector})
+    # The expanded catalogue has many categories; these tests exercise the
+    # scheduling mechanics on the laptop branch, so leave the rest out of the
+    # first due window instead of depending on catalogue ordering.
+    scanner._seed_categories("vinted")
+    db.execute(
+        "UPDATE category_scans SET next_due_at='2999-01-01T00:00:00+00:00' "
+        "WHERE marketplace='vinted' AND category_id<>'3580'"
+    )
+    db.execute(
+        "UPDATE category_scans SET next_due_at=? "
+        "WHERE marketplace='vinted' AND category_id='3580'",
+        (iso(),),
+    )
 
     async def noop(*args, **kwargs):
         return None

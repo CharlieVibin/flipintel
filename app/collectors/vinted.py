@@ -60,14 +60,16 @@ class VintedCollector(BaseCollector):
 
     async def category_page(self, category, page: int = 1) -> CategoryPage:
         """Keyword-free catalogue page, newest first."""
-        response = await self._request(
-            f"{self.base_url}{category.path}",
-            params={
-                "page": max(1, page),
-                "order": "newest_first",
-                "currency": "GBP",
-            },
-        )
+        params: dict[str, Any] = {
+            "page": max(1, page),
+            "order": "newest_first",
+            "currency": "GBP",
+        }
+        if getattr(self, "scan_price_min", 0) > 0:
+            params["price_from"] = round(self.scan_price_min, 2)
+        if getattr(self, "scan_price_max", 0) > 0:
+            params["price_to"] = round(self.scan_price_max, 2)
+        response = await self._request(f"{self.base_url}{category.path}", params=params)
         items = self.parse_search(response.text, f"category:{category.category_id}")
         if not items and not self._is_empty_page(response.text):
             raise CollectorError(
@@ -89,15 +91,17 @@ class VintedCollector(BaseCollector):
         pages = 0
         last_status: int | None = None
         for page in range(1, max(1, max_pages) + 1):
-            response = await self._request(
-                f"{self.base_url}/catalog",
-                params={
-                    "search_text": query,
-                    "page": page,
-                    "order": "newest_first",
-                    "currency": "GBP",
-                },
-            )
+            params: dict[str, Any] = {
+                "search_text": query,
+                "page": page,
+                "order": "newest_first",
+                "currency": "GBP",
+            }
+            if getattr(self, "scan_price_min", 0) > 0:
+                params["price_from"] = round(self.scan_price_min, 2)
+            if getattr(self, "scan_price_max", 0) > 0:
+                params["price_to"] = round(self.scan_price_max, 2)
+            response = await self._request(f"{self.base_url}/catalog", params=params)
             last_status = response.status_code
             page_items = self.parse_search(response.text, query)
             if not page_items and not self._is_empty_page(response.text):

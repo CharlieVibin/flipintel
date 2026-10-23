@@ -32,6 +32,7 @@ def create_app(db: Database | None = None, autostart: bool | None = None) -> Fas
             ),
         )
         should_start = settings.scanner_autostart if autostart is None else autostart
+        app.state.scanner.scheduled_enabled = should_start
         if should_start:
             await app.state.scanner.start()
         log.info("FlipIntel ready — database %s", database.path)

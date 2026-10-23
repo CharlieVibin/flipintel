@@ -5,6 +5,7 @@ import {
   CircleAlert,
   Database,
   LayoutGrid,
+  ListChecks,
   RefreshCw,
   Wallet,
   Radar,
@@ -20,10 +21,11 @@ import { DealsPage } from "./pages/DealsPage";
 import { EvidencePage } from "./pages/EvidencePage";
 import { FlipsPage } from "./pages/FlipsPage";
 import { SavedPage } from "./pages/SavedPage";
+import { ScanConfigPage } from "./pages/ScanConfigPage";
 import { ScannersPage } from "./pages/ScannersPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
-const TABS = ["deals", "saved", "flips", "evidence", "scanners", "settings"] as const;
+const TABS = ["deals", "saved", "flips", "evidence", "scanners", "scan-config", "settings"] as const;
 type Tab = (typeof TABS)[number];
 
 const TAB_META: Record<Tab, { label: string; title: string; subtitle: string; icon: typeof LayoutGrid }> = {
@@ -32,6 +34,7 @@ const TAB_META: Record<Tab, { label: string; title: string; subtitle: string; ic
   flips: { label: "My flips", title: "My flips", subtitle: "Purchases, price cuts and realised results", icon: Wallet },
   evidence: { label: "Evidence", title: "Evidence lab", subtitle: "Completed sales, imports and valuation calibration", icon: Database },
   scanners: { label: "Scanners", title: "Scanner health", subtitle: "Collection status, coverage and scan history", icon: Activity },
+  "scan-config": { label: "Scan setup", title: "Scan configuration", subtitle: "Choose categories, marketplaces and the purchase budget before scanning", icon: ListChecks },
   settings: { label: "Settings", title: "Settings", subtitle: "Deal thresholds, costs and scan cadence", icon: SlidersHorizontal },
 };
 
@@ -217,6 +220,24 @@ export default function App() {
         </header>
 
         <main className="mx-auto max-w-[1500px] px-4 pb-24 pt-5 lg:px-8 lg:pb-10">
+          {health && !health.scan_config.confirmed && (
+            <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-rose/45 bg-rose/[0.07] px-4 py-3 text-xs text-mist-200">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-rose/30 bg-rose/10 text-rose">
+                <CircleAlert className="h-4 w-4" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="font-medium text-rose">Scan configuration required.</span>{" "}
+                No marketplace scan or scheduled research will run until it is saved.
+              </span>
+              <button
+                className="rounded-lg border border-rose/35 bg-rose/10 px-2.5 py-1.5 text-[10px] font-medium text-rose transition hover:bg-rose/15"
+                onClick={() => navigate("scan-config")}
+              >
+                Configure now
+              </button>
+            </div>
+          )}
+
           {error && (
             <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-rose/25 bg-rose/[0.04] px-4 py-3 text-xs text-mist-300">
               <CircleAlert className="h-4 w-4 text-rose" />
@@ -274,6 +295,16 @@ export default function App() {
               refreshTick={refreshTick}
               onToast={pushToast}
               onRefresh={() => {
+                void fetchSummary();
+                setRefreshTick((value) => value + 1);
+              }}
+            />
+          )}
+          {tab === "scan-config" && (
+            <ScanConfigPage
+              health={health}
+              onToast={pushToast}
+              onRefreshSummary={() => {
                 void fetchSummary();
                 setRefreshTick((value) => value + 1);
               }}

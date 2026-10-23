@@ -19,6 +19,8 @@ import type {
   Overview,
   ProductPricing,
   ReviewGroupsResponse,
+  ScanConfiguration,
+  ScanPresetConfig,
   ScanRun,
   Settings,
 } from "./types";
@@ -131,6 +133,34 @@ export const api = {
     request<{ accepted: string[]; message: string }>("/scan", {
       method: "POST",
       body: JSON.stringify({ marketplace: marketplace ?? null }),
+    }),
+  scanConfig: () => request<ScanConfiguration>("/scan-config"),
+  updateScanConfig: (payload: {
+    categories: string[];
+    min_price: number;
+    max_price: number;
+    marketplaces: Record<string, boolean>;
+    active_preset: string;
+    confirmed: boolean;
+  }) =>
+    request<ScanConfiguration>("/scan-config", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+  scanCoverage: () => request<ScanConfiguration["coverage"]>("/scan-config/coverage"),
+  createScanPreset: (payload: { name: string; base_slug?: string; config?: Record<string, unknown> }) =>
+    request<{ preset: ScanPresetConfig; presets: ScanPresetConfig[] }>("/scan-config/presets", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateScanPreset: (id: number, payload: { name?: string; config?: Record<string, unknown> }) =>
+    request<{ preset: ScanPresetConfig; presets: ScanPresetConfig[] }>(`/scan-config/presets/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
+  deleteScanPreset: (id: number) =>
+    request<{ deleted: boolean; presets: ScanPresetConfig[] }>(`/scan-config/presets/${id}`, {
+      method: "DELETE",
     }),
   flips: (status = "all") => request<FlipsResponse>(`/flips${queryString({ status })}`),
   startFlip: (payload: Record<string, unknown>) =>

@@ -152,6 +152,11 @@ class BaseCollector:
         self.robots = RobotsGate(self.client, settings.user_agent)
         self.last_http_status: int | None = None
         self.last_latency_ms: int | None = None
+        # The scanner sets these before a pass. Collectors use them for a
+        # server-side price filter where the marketplace supports one; the
+        # scanner still applies the exact total-cost check locally.
+        self.scan_price_min: float = 0.0
+        self.scan_price_max: float = 0.0
 
     @property
     def available(self) -> tuple[bool, str | None]:

@@ -285,6 +285,35 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS scan_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    active_preset TEXT NOT NULL DEFAULT 'budget-electronics',
+    min_price REAL NOT NULL DEFAULT 0,
+    max_price REAL NOT NULL DEFAULT 100,
+    enabled_vinted INTEGER NOT NULL DEFAULT 1,
+    enabled_gumtree INTEGER NOT NULL DEFAULT 1,
+    enabled_ebay INTEGER NOT NULL DEFAULT 1,
+    categories TEXT NOT NULL DEFAULT '[]',
+    confirmed_at TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS scan_presets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    min_price REAL NOT NULL DEFAULT 0,
+    max_price REAL NOT NULL DEFAULT 100,
+    enabled_vinted INTEGER NOT NULL DEFAULT 1,
+    enabled_gumtree INTEGER NOT NULL DEFAULT 1,
+    enabled_ebay INTEGER NOT NULL DEFAULT 1,
+    categories TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scan_presets_name ON scan_presets(name COLLATE NOCASE);
+
 CREATE TABLE IF NOT EXISTS flips (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     listing_id INTEGER REFERENCES listings(id) ON DELETE SET NULL,
@@ -435,6 +464,7 @@ class Database:
             self._migrate()
             self._seed_settings()
             self._seed_marketplaces()
+            self._seed_scan_config()
             self.conn.commit()
 
     def _migrate(self) -> None:
@@ -546,6 +576,12 @@ class Database:
                 "INSERT OR IGNORE INTO marketplace_status(marketplace, state) VALUES (?, 'idle')",
                 (name,),
             )
+
+    def _seed_scan_config(self) -> None:
+        # Imported lazily: scan_config depends on the taxonomy, not on Database.
+        from .scan_config import ensure_scan_config
+
+        ensure_scan_config(self)
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> sqlite3.Cursor:
         with self._lock:

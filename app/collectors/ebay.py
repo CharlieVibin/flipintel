@@ -69,13 +69,23 @@ class EbayCollector(BaseCollector):
     # Browse category search is implemented from eBay's documented contract,
     # but this workspace has no eBay keys, so it is not marked verified.
     category_discovery_verified = False
-    BROWSE_FILTER = ",".join([
-        "buyingOptions:{FIXED_PRICE}",
-        "itemLocationCountry:GB",
-        "deliveryCountry:GB",
-        "priceCurrency:GBP",
-        "price:[5..25000]",
-    ])
+    def _browse_filter(self) -> str:
+        """Browse filter with the live purchase-budget window.
+
+        eBay supports a server-side GBP price range. The scanner still applies
+        the exact total-cost rule because listed postage is added separately.
+        """
+        low = max(1.0, float(getattr(self, "scan_price_min", 0) or 0))
+        high = float(getattr(self, "scan_price_max", 0) or 25000)
+        high = max(low, min(25000.0, high))
+        return ",".join([
+            "buyingOptions:{FIXED_PRICE}",
+            "itemLocationCountry:GB",
+            "deliveryCountry:GB",
+            "priceCurrency:GBP",
+            f"price:[{int(low) if low.is_integer() else low}.."
+            f"{int(high) if high.is_integer() else high}]",
+        ])
     # Browse API has no documented ending-time-window filter, so auctions are
     # requested sorted by "endingSoonest" and filtered to the window locally.
     # This is the documented contract, but it has not been verified live here.
@@ -562,7 +572,7 @@ class EbayCollector(BaseCollector):
                     "limit": limit,
                     "offset": offset,
                     "sort": "newlyListed",
-                    "filter": self.BROWSE_FILTER,
+                    "filter": self._browse_filter(),
                 },
                 query,
             )
@@ -588,7 +598,7 @@ class EbayCollector(BaseCollector):
                 "limit": limit,
                 "offset": offset,
                 "sort": "newlyListed",
-                "filter": self.BROWSE_FILTER,
+                "filter": self._browse_filter(),
             },
             f"category:{category.category_id}",
         )

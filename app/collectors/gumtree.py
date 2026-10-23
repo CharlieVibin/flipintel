@@ -48,7 +48,12 @@ class GumtreeCollector(BaseCollector):
 
     async def search_query(self, query: str, max_pages: int = 1) -> tuple[list[RawListing], int, int | None]:
         url = f"{self.base_url}/uk/srpsearch+{quote_plus(query)}"
-        response = await self._request(url, params={"sort": "relevance"})
+        params: dict[str, Any] = {"sort": "relevance"}
+        if getattr(self, "scan_price_min", 0) > 0:
+            params["min_price"] = round(self.scan_price_min, 2)
+        if getattr(self, "scan_price_max", 0) > 0:
+            params["max_price"] = round(self.scan_price_max, 2)
+        response = await self._request(url, params=params)
         items = self.parse_search(response.text, query)
         if not items and not self._is_empty_page(response.text):
             raise CollectorError("Gumtree page loaded but listing data could not be parsed", "parse")
@@ -64,7 +69,12 @@ class GumtreeCollector(BaseCollector):
         url = f"{self.base_url}{category.path}"
         if page > 1:
             url += f"/uk/page{page}"
-        response = await self._request(url, params={"sort": "newest"})
+        params: dict[str, Any] = {"sort": "newest"}
+        if getattr(self, "scan_price_min", 0) > 0:
+            params["min_price"] = round(self.scan_price_min, 2)
+        if getattr(self, "scan_price_max", 0) > 0:
+            params["max_price"] = round(self.scan_price_max, 2)
+        response = await self._request(url, params=params)
         items = self.parse_category(response.text, category.category_id)
         if not items and not self._is_empty_page(response.text):
             raise CollectorError(
