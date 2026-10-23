@@ -19,6 +19,12 @@ export interface Deal {
   product_key: string | null;
   product_name: string | null;
   identification_confidence: number;
+  identity_level?: "insufficient" | "limited" | "moderate" | "strong" | null;
+  identity_basis?: string[];
+  evidence_score?: number | null;
+  valuation_basis?: string | null;
+  rank_score?: number | null;
+  rank_tier?: "strong" | "decent" | "speculative" | "weak" | null;
   is_faulty: boolean;
   is_wanted: boolean;
   is_auction: boolean;
@@ -157,6 +163,13 @@ export interface Breakdown {
     max_bid?: number | null;
   };
   comps?: Comp[];
+  rejected_comps?: {
+    title: string;
+    price: number;
+    marketplace: string;
+    evidence: string;
+    reason: string;
+  }[];
   sample_size?: number;
   sold_count?: number;
   asking_count?: number;
@@ -170,12 +183,29 @@ export interface Breakdown {
     asking_count: number;
     method: string;
     level?: "insufficient" | "limited" | "moderate" | "strong";
+    basis?: string;
+    calibrated?: boolean;
     sources?: Record<string, number>;
     confidence: number;
+    score?: number;
     confidence_low?: number | null;
     confidence_high?: number | null;
     trend_pct?: number | null;
     trend_note?: string;
+    rejected_count?: number;
+  };
+  identity?: {
+    level: string;
+    confidence: number;
+    basis: string[];
+    product_key: string | null;
+    product_name: string | null;
+  };
+  ranking?: {
+    score: number;
+    tier: string;
+    components: Record<string, number>;
+    note: string;
   };
 }
 

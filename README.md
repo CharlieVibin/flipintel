@@ -35,7 +35,10 @@ clear a profit, ROI and confidence floor.
   faceplates, laptop mainboards, parts-only devices and wanted ads are excluded
   from deal recommendations; genuine console bundles remain identified as
   consoles. Titles are read structurally rather than by adding exclusion words:
-  a model name inside an accessory title is not evidence of the device.
+  a model name inside an accessory title is not evidence of the device. Each
+  listing also carries an **identity grade** (Strong / Moderate / Limited /
+  Insufficient) with the basis that earned it (exact model, capacity, VRAM,
+  variant, model number), separate from the price-evidence level.
 - **Comparable-market valuation** that prefers recently completed sales,
   keeps sold and asking evidence separate, uses weighted medians/quartiles,
   trims outliers and supports complete-PC component fallback. Confidence is
@@ -81,12 +84,18 @@ clear a profit, ROI and confidence floor.
   `valuation_snapshots` with its evidence and marketplaces. A product is reused
   for 7 days, then marked stale and scheduled for refresh, prioritising products
   attached to live deals and ending auctions. Concurrent research for the same
-  product is deduplicated, and history is never overwritten.
-- **Ending-soon auctions** through the official Browse API: auctions are
-  requested sorted by ending time and filtered locally to the configured window,
-  with current bid, bid count, postage, end time and a maximum profitable bid
-  that honours fees, postage, minimum profit and the ROI tier. Shortlisted
-  auctions are rechecked every five minutes while they are close to ending.
+  product is deduplicated, and history is never overwritten. If re-identification
+  moves a listing to another product key, the snapshot stored for the old key is
+  invalidated rather than served, and market observations filed under an identity
+  the listing no longer has stop feeding valuations; both rows are kept for audit.
+- **Ending-soon auctions** through the official Browse API: whole hardware
+  categories are requested sorted by ending time, rotating one category per
+  request, and filtered locally to the configured window. A keyword auction
+  search only saw titles matching its words; the same request budget now covers
+  every auction ending in the branch, with current bid, bid count, postage, end
+  time and a maximum profitable bid that honours fees, postage, minimum profit
+  and the ROI tier. Shortlisted auctions are rechecked every five minutes while
+  they are close to ending, and keyword search remains as a fallback.
   Nothing is bid automatically and ended auctions leave the feed.
 - **My Flips**: mark a detected deal as purchased, record actual costs, price
   cuts and the final sale, and compare the realised result with the original
@@ -172,8 +181,9 @@ All collectors can be repaired independently under `app/collectors/`.
 
 ## How a deal is calculated
 
-1. **Identify** the listing against hardware model patterns. Ambiguous items
-   are kept for market tracking but not valued.
+1. **Identify** the listing against hardware model patterns and grade how well
+   the title supports that identity. Ambiguous items are kept for market
+   tracking but not valued; identity grading is independent of price evidence.
 2. **Collect comparables** with the same canonical product key and kind.
    Completed sales are kept separate from asking prices. With two or more sold
    rows, the sold-only weighted median is used; with one, it is blended with
@@ -191,7 +201,9 @@ All collectors can be repaired independently under `app/collectors/`.
    dispersion, source diversity and freshness. Asking-only evidence has a
    computed ceiling that rises with the number of independent observations and
    marketplaces; it is displayed as Insufficient, Limited, Moderate or Strong,
-   and never presented as a completed sale.
+   and never presented as a completed sale. The deal also records its evidence
+   basis (`sold`, `asking_only` or a CeX retail anchor) so an asking-only
+   estimate cannot inherit the language of a completed sale.
 6. **Recommend only if all gates pass**: at least 4 comparables, 55% model
    match, minimum profit/ROI/confidence (a higher ROI above the high-value
    threshold), not faulty/wanted/bundle, not flagged for manual review, and
@@ -257,7 +269,7 @@ name is FlipIntel.
 .venv\Scripts\python.exe -m pytest -q
 ```
 
-The suite currently has **72 passing tests**. It covers grouped variant review
+The suite currently has **128 passing tests**. It covers grouped variant review
 and bounded bulk decisions, category catalogue and
 parser regressions, resumable backfill depth, overlap stopping, coverage
 diagnostics, eBay keyword-free category requests, CSV preview/import/
@@ -272,7 +284,16 @@ phone storage and MacBook variant handling, Gumtree JSON-LD versus promoted
 cards, Gumtree empty-result versus parser failure, deep-discount risk review,
 SSD/HDD keys, bundle detection, eBay missing credentials and parser edge cases,
 scan performance metrics, refresh invalidation, database migration
-compatibility, duplicate detection, settings and the HTTP API smoke path.
+compatibility, duplicate detection, settings and the HTTP API smoke path,
+identity grading and its regression fixture, comparable validation (accessories,
+compatibility qualifiers, console hardware versus the console), stale snapshot
+and observation invalidation, and category-first auction discovery.
+
+Three read-only maintenance scripts sit in `scripts/`: `audit_identity.py`
+reports identity drift and, with `--apply`, repairs it; `benchmark_identity.py`
+compares the previous classifier with the current one on the labelled fixture;
+`benchmark_auctions.py` measures auction discovery strategies against the live
+Browse API.
 
 ## API
 
@@ -343,10 +364,13 @@ Interactive docs: <http://127.0.0.1:8765/docs>
   review rather than valued as deals.
 - eBay auctions are requested with `sort=endingSoonest` because the Browse API
   has no documented ending-time filter; the 30-minute window is applied locally.
-  This means a very busy query could return fewer than 200 auctions before the
-  window ends, so two targeted queries are scanned per pass rather than relying
-  on one broad search. Missing credentials are still reported as
-  `not_configured`; token, quota, parser and authentication failures are tested.
+  On a 3-request budget measured from this machine, three hardware categories
+  returned 37 in-window auctions across 9 distinct products, against 18 auctions
+  from 1 product for the previous keyword queries. Coverage is still limited by
+  the request budget: one pass can only rotate through a few of the catalogue's
+  category branches, so a short auction can end before its branch comes round.
+  Missing credentials are still reported as `not_configured`; token, quota,
+  parser and authentication failures are tested.
 - A local single-process SQLite app, not a multi-user hosted service.
 
 ## Source reuse and licences

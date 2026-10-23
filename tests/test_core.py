@@ -415,20 +415,35 @@ def test_sold_evidence_produces_a_higher_confidence_valuation(tmp_path):
         db.close()
 
 
-def test_asking_only_evidence_is_capped_and_labelled(tmp_path):
+def test_asking_only_evidence_is_labelled_not_capped_at_63_percent(tmp_path):
+    """The old engine multiplied every asking-only estimate down to <= 0.63.
+
+    That ceiling was arithmetic, not uncertainty. Evidence is now disclosed via
+    ``valuation_basis`` and the descriptive evidence level, and the internal
+    evidence score is free to reflect a genuinely strong asking sample.
+    """
     db = Database(tmp_path / "asking.db")
     try:
         for index in range(6):
             _add_listing(db, "vinted", f"ask-{index}", f"RTX 4070 12GB ask {index}", 300)
+        for index in range(6):
+            _add_listing(db, "gumtree", f"g-ask-{index}", f"RTX 4070 12GB ask {index}", 305)
         candidate_id = _add_listing(db, "gumtree", "cheap", "RTX 4070 12GB bargain", 200)
         ValuationEngine(db).refresh(limit=100)
         row = db.query_one("SELECT * FROM deals WHERE listing_id=?", (candidate_id,))
         assert row is not None
         assert row["valuation_method"] == "live_asking_comps"
-        assert row["confidence"] <= 0.52
-        assert "no completed-sale evidence" in " ".join(
-            __import__("json").loads(row["breakdown"])["valuation_notes"]
-        ).lower()
+        assert row["valuation_basis"] == "asking_only"
+        assert row["evidence_level"] == "moderate"
+        # No completed sale exists, yet the evidence score is no longer pinned
+        # to the old 0.63 ceiling.
+        assert row["confidence"] > 0.63
+        assert row["confidence"] == row["evidence_score"]
+        notes = " ".join(__import__("json").loads(row["breakdown"])["valuation_notes"]).lower()
+        assert "no verified completed sale" in notes
+        assert "asking-price estimate" in notes
+        assert row["rank_score"] is not None
+        assert row["identity_level"] in {"limited", "moderate", "strong"}
     finally:
         db.close()
 

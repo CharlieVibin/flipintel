@@ -111,6 +111,8 @@ CREATE TABLE IF NOT EXISTS market_observations (
     observed_at TEXT NOT NULL,
     observed_day TEXT NOT NULL,
     created_at TEXT NOT NULL,
+    invalidated_at TEXT,
+    invalid_reason TEXT,
     UNIQUE (marketplace, source_id, observed_day)
 );
 CREATE INDEX IF NOT EXISTS idx_market_obs_key ON market_observations(product_key, observed_at DESC);
@@ -191,7 +193,9 @@ CREATE TABLE IF NOT EXISTS valuation_snapshots (
     sold_count INTEGER NOT NULL DEFAULT 0,
     sources TEXT,
     method TEXT,
-    refreshed_at TEXT NOT NULL
+    refreshed_at TEXT NOT NULL,
+    invalidated_at TEXT,
+    invalid_reason TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_valuation_snapshots_key ON valuation_snapshots(product_key, refreshed_at DESC);
 
@@ -443,6 +447,8 @@ class Database:
                 "current_bid": "REAL",
                 "bid_count": "INTEGER",
                 "min_next_bid": "REAL",
+                "identity_level": "TEXT",
+                "identity_basis": "TEXT",
             },
             "market_comps": {
                 "postage": "REAL NOT NULL DEFAULT 0",
@@ -464,6 +470,14 @@ class Database:
                 "sample_count": "INTEGER NOT NULL DEFAULT 0",
                 "checked_at": "TEXT",
             },
+            "valuation_snapshots": {
+                "invalidated_at": "TEXT",
+                "invalid_reason": "TEXT",
+            },
+            "market_observations": {
+                "invalidated_at": "TEXT",
+                "invalid_reason": "TEXT",
+            },
             "deals": {
                 "needs_review": "INTEGER NOT NULL DEFAULT 0",
                 "review_reason": "TEXT",
@@ -481,6 +495,11 @@ class Database:
                 "max_bid": "REAL",
                 "estimated_days": "REAL",
                 "valuation_refreshed_at": "TEXT",
+                "identity_level": "TEXT",
+                "valuation_basis": "TEXT",
+                "evidence_score": "REAL",
+                "rank_score": "REAL",
+                "rank_tier": "TEXT",
             },
             "scan_runs": {
                 "duplicates": "INTEGER NOT NULL DEFAULT 0",
@@ -504,6 +523,14 @@ class Database:
         )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_comps_import ON market_comps(import_id)"
+        )
+        # A listing's identity is not allowed to change while old price memory
+        # keeps being served under the previous identity. The scanner fills
+        # these columns for new rows; existing rows get them on the next
+        # re-identification pass.
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_snapshots_live "
+            "ON valuation_snapshots(product_key, invalidated_at, id DESC)"
         )
 
     def _seed_settings(self) -> None:

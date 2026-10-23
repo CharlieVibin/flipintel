@@ -120,6 +120,7 @@ class Scanner:
             "facebook": FacebookCollector(db),
         }
         self.valuation = ValuationEngine(db)
+        self.pricing = self.valuation.pricing
         self.cex = CexPricing(db)
         self.notifier = Notifier(db)
         self._locks = {name: asyncio.Lock() for name in self.collectors}
@@ -177,11 +178,13 @@ class Scanner:
     def _reidentify_existing(self) -> int:
         rows = self.db.query(
             "SELECT id, title, description, condition_raw, category, product_key, product_name, "
-            "identification_confidence, is_faulty, is_wanted, is_bundle, listing_kind, flags, attrs "
+            "identification_confidence, is_faulty, is_wanted, is_bundle, listing_kind, flags, attrs, "
+            "identity_level, identity_basis "
             "FROM listings WHERE id NOT IN ("
             "SELECT listing_id FROM review_decisions WHERE decision='corrected')"
         )
         changed = 0
+        stale_keys: set[str] = set()
         for row in rows:
             ident = identify_listing(
                 row["title"] or "",
@@ -200,19 +203,38 @@ class Scanner:
                 and row["listing_kind"] == ident.kind
                 and row["flags"] == flags_json
                 and row["attrs"] == attrs_json
+                and row.get("identity_level") == ident.identity_level
+                and row.get("identity_basis") == json_dumps(ident.identity_basis)
             ):
                 continue
+            previous_key = row.get("product_key")
+            if previous_key and previous_key != ident.product_key:
+                stale_keys.add(str(previous_key))
             self.db.execute(
                 "UPDATE listings SET category=?, product_key=?, product_name=?, "
                 "identification_confidence=?, is_faulty=?, is_wanted=?, is_bundle=?, "
-                "listing_kind=?, flags=?, attrs=? WHERE id=?",
+                "listing_kind=?, flags=?, attrs=?, identity_level=?, identity_basis=? WHERE id=?",
                 (
                     ident.category, ident.product_key, ident.product_name, ident.confidence,
                     int(ident.is_faulty), int(ident.is_wanted), int(ident.is_bundle),
-                    ident.kind, flags_json, attrs_json, row["id"],
+                    ident.kind, flags_json, attrs_json, ident.identity_level,
+                    json_dumps(ident.identity_basis), row["id"],
                 ),
             )
             changed += 1
+        if stale_keys:
+            # A cached price produced under an identity that has now changed is
+            # not allowed to survive for the rest of its seven-day window.
+            invalidated = self.pricing.invalidate(
+                sorted(stale_keys), "listing identity revised by identification fix"
+            )
+            log.info(
+                "Invalidated %d cached valuation(s) for %d superseded product key(s)",
+                invalidated, len(stale_keys),
+            )
+        retired = self.pricing.invalidate_contaminated_observations()
+        if retired:
+            log.info("Retired %d market observation(s) filed under an old identity", retired)
         return changed
 
     async def _sleep(self, seconds: float) -> bool:
@@ -1007,7 +1029,8 @@ class Scanner:
                 """
                 SELECT l.id, l.price, l.last_price, l.category, l.product_key, l.product_name,
                        l.listing_kind, l.identification_confidence, l.is_faulty, l.is_wanted,
-                       l.is_bundle, l.flags, l.attrs, COALESCE(r.decision, '') AS review_decision
+                       l.is_bundle, l.flags, l.attrs, l.identity_level, l.identity_basis,
+                       COALESCE(r.decision, '') AS review_decision
                 FROM listings l LEFT JOIN review_decisions r ON r.listing_id=l.id
                 WHERE l.marketplace=? AND l.external_id=?
                 """,
@@ -1029,6 +1052,8 @@ class Scanner:
                 is_bundle = existing["is_bundle"]
                 flags_json = existing["flags"]
                 attrs_json = existing["attrs"]
+                identity_level = existing.get("identity_level")
+                identity_basis = existing.get("identity_basis")
             else:
                 category = ident.category
                 kind = ident.kind
@@ -1038,6 +1063,8 @@ class Scanner:
                 is_faulty = int(ident.is_faulty)
                 is_wanted = int(ident.is_wanted)
                 is_bundle = int(ident.is_bundle)
+                identity_level = ident.identity_level
+                identity_basis = json_dumps(ident.identity_basis)
             condition = ident.condition
             if not condition or condition == "unknown":
                 raw_condition = normalise_text(item.condition_raw).lower()
@@ -1061,7 +1088,8 @@ class Scanner:
                         is_faulty=?, is_wanted=?, is_bundle=?, is_auction=?,
                         auction_end_at=?, current_bid=?, bid_count=?, min_next_bid=?, posted_at=?,
                         last_seen=?, last_price=?, previous_price=?, price_dropped_at=?,
-                        status='active', search_query=?, raw_json=?, flags=?, attrs=?, updated_at=?
+                        status='active', search_query=?, raw_json=?, flags=?, attrs=?,
+                        identity_level=?, identity_basis=?, updated_at=?
                     WHERE id=?
                     """,
                     (
@@ -1073,7 +1101,8 @@ class Scanner:
                         item.bid_count, item.min_next_bid, item.posted_at, now, item.price,
                         old_price if price_dropped else None,
                         now if price_dropped else None,
-                        item.search_query, raw_json, flags_json, attrs_json, now,
+                        item.search_query, raw_json, flags_json, attrs_json,
+                        identity_level, identity_basis, now,
                         existing["id"],
                     ),
                 )
@@ -1098,10 +1127,11 @@ class Scanner:
                         identification_confidence, is_faulty, is_wanted, is_bundle, is_auction,
                         auction_end_at, current_bid, bid_count, min_next_bid,
                         posted_at, first_seen, last_seen, last_price, status, search_query,
-                        raw_json, flags, attrs, created_at, updated_at)
+                        raw_json, flags, attrs, created_at, updated_at,
+                        identity_level, identity_basis)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'GBP',
                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        'active', ?, ?, ?, ?, ?, ?)
+                        'active', ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         marketplace, item.external_id, item.url, title, description,
@@ -1112,7 +1142,8 @@ class Scanner:
                         item.auction_end_at, item.current_bid, item.bid_count,
                         item.min_next_bid,
                         item.posted_at, now, now, item.price, item.search_query,
-                        raw_json, flags_json, attrs_json, now, now,
+                        raw_json, flags_json, attrs_json, identity_level, identity_basis,
+                        now, now,
                     ),
                 )
                 listing_id = int(cursor.lastrowid)
@@ -1290,9 +1321,12 @@ class Scanner:
     async def scan_auctions(self) -> SearchOutcome | None:
         """Scan ending-soon auctions and revalue anything newly collected.
 
-        The eBay Browse API is asked for auctions sorted by ending time, then
-        filtered locally to the configured window. Nothing is bid on; the sale
-        remains a manual decision.
+        Category-first discovery replaced keyword auction searches. A keyword
+        query only returns titles containing those words, so two queries per
+        pass covered a tiny slice of the auctions ending in the next half hour.
+        Rotating whole hardware categories sees every auction in the branch and
+        still enforces the end-time window locally. The same request budget now
+        covers the market instead of a phrase list. Nothing is bid on.
         """
         collector = self.collectors.get("ebay")
         if collector is None or not hasattr(collector, "search_auctions"):
@@ -1300,17 +1334,63 @@ class Scanner:
         if not self.db.setting_bool("auction_alerts_enabled", True):
             return None
         window = self.db.setting_int("auction_window_minutes", 30)
-        cursor = self.db.setting_int("auction_query_cursor", 0) % len(AUCTION_QUERIES)
-        queries = [
-            AUCTION_QUERIES[(cursor + offset) % len(AUCTION_QUERIES)]
-            for offset in range(2)
+        budget = max(1, min(6, self.db.setting_int("auction_requests_per_pass", 4)))
+        catalogue = [
+            category for category in categories_for("ebay") if category.priority >= 2
         ]
-        self.db.set_settings({"auction_query_cursor": str((cursor + 2) % len(AUCTION_QUERIES))})
+        if not catalogue:
+            catalogue = list(categories_for("ebay"))
         started = utcnow()
-        outcome = await collector.search_auctions(queries, ending_within_minutes=window)
+        queries: list[str] = []
+        outcome: SearchOutcome
+        if catalogue and hasattr(collector, "search_auction_categories"):
+            cursor = self.db.setting_int("auction_category_cursor", 0) % len(catalogue)
+            selected = [
+                catalogue[(cursor + offset) % len(catalogue)]
+                for offset in range(min(budget, len(catalogue)))
+            ]
+            queries = [f"category:{category.label}" for category in selected]
+            self.db.set_settings(
+                {
+                    "auction_category_cursor": str(
+                        (cursor + len(selected)) % len(catalogue)
+                    )
+                }
+            )
+            outcome = await collector.search_auction_categories(
+                [(category.category_id, category.label) for category in selected],
+                ending_within_minutes=window,
+                max_requests=budget,
+            )
+            if not outcome.ok:
+                log.info("Category auction scan unavailable: %s", outcome.error)
+        else:
+            cursor = self.db.setting_int("auction_query_cursor", 0) % len(AUCTION_QUERIES)
+            queries = [
+                AUCTION_QUERIES[(cursor + offset) % len(AUCTION_QUERIES)]
+                for offset in range(2)
+            ]
+            self.db.set_settings(
+                {"auction_query_cursor": str((cursor + 2) % len(AUCTION_QUERIES))}
+            )
+            outcome = await collector.search_auctions(queries, ending_within_minutes=window)
         if not outcome.ok:
-            log.info("Auction scan unavailable: %s", outcome.error)
-            return outcome
+            # A category request can be rejected by the API while the keyword
+            # path still works. Never let one strategy leave auctions unmonitored.
+            fallback = await collector.search_auctions(
+                AUCTION_QUERIES[:2], ending_within_minutes=window
+            )
+            if fallback.ok:
+                fallback.detail = {
+                    **(fallback.detail or {}),
+                    "strategy": "keyword_fallback",
+                    "category_error": outcome.error,
+                }
+                outcome = fallback
+                queries = AUCTION_QUERIES[:2]
+            else:
+                log.info("Auction scan unavailable: %s", outcome.error)
+                return outcome
         run_id = self.db.execute(
             "INSERT INTO scan_runs(marketplace, started_at, status, queries) "
             "VALUES ('ebay', ?, 'running', ?)",

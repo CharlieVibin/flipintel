@@ -1,0 +1,188 @@
+[
+  {
+    "title": "SanDisk microSD Express Card for Nintendo Switch 2 - 512GB",
+    "note": "Confirmed failure: a storage card compatible with a console was valued as the console.",
+    "kind": "other",
+    "no_key": true,
+    "flags_include": ["storage_media"],
+    "max_confidence": 0.0
+  },
+  {
+    "title": "Microsoft Surface Pro 7+ 12.3\" i5-1135G7 8GB RAM 256GB NVMe Grade D Cracked LCD",
+    "note": "Confirmed failure: a damaged tablet was valued as a loose i5 processor.",
+    "kind": "tablet",
+    "key_prefix": "tablet:surface-pro-7",
+    "condition": "fair",
+    "min_confidence": 0.6,
+    "max_confidence": 0.85
+  },
+  {
+    "title": "Dell Pro Max Tower T2 FCT2250 Intel Ultra 5 235 32GB DDR5 RAM 512GB SSD",
+    "note": "Confirmed failure: a complete desktop was valued as a standalone Ultra 5 CPU.",
+    "kind": "pc",
+    "key_prefix": "pc:",
+    "flags_include": ["complete_system"],
+    "max_confidence": 0.75
+  },
+  {
+    "title": "Dell Pro Max Tower T2, Core Ultra 5 235 14C, 32GB, 5.5TB Storage, RTX PRO 4000",
+    "note": "The same desktop in a comma-separated configuration list without the word RAM.",
+    "kind": "pc",
+    "key_prefix": "pc:",
+    "flags_include": ["complete_system"]
+  },
+  {
+    "title": "Microsoft Surface Pro 7 + | Intel Core i5-1035G7 CPU | 8GB | 128GB SSD",
+    "note": "A processor named inside a full tablet specification.",
+    "kind": "tablet",
+    "key_prefix": "tablet:surface-pro-7",
+    "flags_include": ["complete_system"]
+  },
+  {
+    "title": "Dell OptiPlex 7060 i5-8500 16GB 256GB SSD Windows 11",
+    "note": "Business desktop; the CPU must not become the product.",
+    "kind": "pc",
+    "key_prefix": "pc:",
+    "flags_include": ["complete_system"]
+  },
+  {
+    "title": "PS5 Faceplate Cover White",
+    "note": "Console accessory, not a console.",
+    "kind": "console",
+    "no_key": true,
+    "flags_include": ["accessory_or_box"],
+    "max_confidence": 0.0
+  },
+  {
+    "title": "Xbox One Kinect Sensor",
+    "note": "Accessory for a console line.",
+    "no_key": true,
+    "max_confidence": 0.0
+  },
+  {
+    "title": "PS5 DualSense Controller White",
+    "note": "Controller, not a console.",
+    "no_key": true,
+    "max_confidence": 0.0
+  },
+  {
+    "title": "Cyberpunk 2077 PS5",
+    "note": "Console game, not a console.",
+    "no_key": true,
+    "flags_include": ["console_game"],
+    "max_confidence": 0.0
+  },
+  {
+    "title": "Mad Max for Xbox One/Series X",
+    "note": "Game whose platform name appears only after a compatibility phrase.",
+    "no_key": true,
+    "max_confidence": 0.0
+  },
+  {
+    "title": "Gigabyte RTX 4070 12GB Graphics Card",
+    "note": "Genuine desktop graphics card.",
+    "kind": "gpu",
+    "key_prefix": "gpu:rtx-4070-12gb",
+    "min_confidence": 0.8
+  },
+  {
+    "title": "RTX 3060 laptop GPU 6GB",
+    "note": "A laptop GPU is a different product from a desktop card.",
+    "kind": "laptop",
+    "key_prefix": "laptop:gpu:rtx-3060",
+    "flags_include": ["laptop_gpu"]
+  },
+  {
+    "title": "Gaming PC RTX 4060 i5 12400F 16GB 1TB",
+    "note": "Complete PC containing a named GPU.",
+    "kind": "pc",
+    "key_prefix": "pc:gpu:rtx-4060",
+    "flags_include": ["complete_system"]
+  },
+  {
+    "title": "MSI Katana 15 RTX 4060 i7 16GB 512GB Gaming Laptop",
+    "note": "Laptop model line, not a desktop card.",
+    "kind": "laptop",
+    "key_prefix": "laptop:msi-katana",
+    "flags_include": ["laptop_gpu"]
+  },
+  {
+    "title": "HP OMEN MAX 16-ah0005na Gaming Intel Ultra 7 255HX 32GB RAM +1TB SSD RTX 5070 Ti",
+    "note": "A gaming laptop whose GPU is only a component of the machine.",
+    "kind": "laptop",
+    "key_prefix": "laptop:hp-omen",
+    "flags_include": ["laptop_gpu"]
+  },
+  {
+    "title": "Corsair Vengeance LPX DDR4 8GB RAM Memory Stick 2400Mhz",
+    "note": "'Memory stick' wording on a RAM module must stay RAM.",
+    "kind": "ram",
+    "key_prefix": "ram:ddr4:8gb"
+  },
+  {
+    "title": "64GB Memory Card",
+    "note": "Removable media is not RAM and is not a console.",
+    "no_key": true,
+    "flags_include": ["storage_media"]
+  },
+  {
+    "title": "Apple iPhone 15 Pro 128GB Unlocked",
+    "note": "Exact phone model and capacity.",
+    "kind": "phone",
+    "key_prefix": "phone:iphone-15-pro-128gb"
+  },
+  {
+    "title": "iPhone 15 Pro Max Phone Case",
+    "note": "Accessory-first phone listing.",
+    "no_key": true,
+    "flags_include": ["accessory_or_box"]
+  },
+  {
+    "title": "Nintendo Switch OLED 64GB White",
+    "note": "Genuine console.",
+    "kind": "console",
+    "key_prefix": "console:switch-oled",
+    "min_confidence": 0.8
+  },
+  {
+    "title": "Lenovo Legion Go S Z2 SteamOS. 2tb NVME 16gb Ram. Excellent Condition",
+    "note": "A handheld console must not become a desktop PC because it has RAM and storage.",
+    "kind": "console",
+    "key_prefix": "console:legion-go"
+  },
+  {
+    "title": "Xbox Series S console",
+    "note": "Generic-but-exact console family.",
+    "kind": "console",
+    "key_prefix": "console:xbox-series-s",
+    "max_confidence": 0.7
+  },
+  {
+    "title": "PlayStation 5 Slim Digital 1TB",
+    "note": "Slim digital edition.",
+    "kind": "console",
+    "key_prefix": "console:ps5-slim"
+  },
+  {
+    "title": "Broken iPhone 13 128GB cracked screen",
+    "note": "Damaged phone stays a phone but is faulty.",
+    "kind": "phone",
+    "key_prefix": "phone:iphone-13-128gb",
+    "condition": "faulty",
+    "is_faulty": true
+  },
+  {
+    "title": "AMD Ryzen 5600X",
+    "note": "Genuine standalone processor.",
+    "kind": "cpu",
+    "key_prefix": "cpu:amd:ryzen-5-5600x",
+    "min_confidence": 0.8
+  },
+  {
+    "title": "Samsung 980 Pro 1TB NVMe SSD",
+    "note": "Genuine storage component.",
+    "kind": "ssd",
+    "key_prefix": "ssd:nvme",
+    "min_confidence": 0.7
+  }
+]

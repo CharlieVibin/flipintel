@@ -116,6 +116,237 @@ COMPATIBILITY_RE = re.compile(
 )
 OEM_RE = re.compile(r"\b(oem|tray\s+cpu|bulk\s+cpu)\b", re.I)
 ES_RE = re.compile(r"\b(engineering\s+sample|qualification\s+sample|\bqs\b|\bes\s+cpu\b)\b", re.I)
+
+# ---------------------------------------------------------------------------
+# Sold-item resolution: what is being sold, not which names appear
+# ---------------------------------------------------------------------------
+# A marketplace title describes two things at once: the item on sale and the
+# device it fits ("SanDisk microSD Express Card for Nintendo Switch 2").
+# Reading every recognisable name as the product is what turned a memory card
+# into a console and a complete desktop into a loose processor. These rules
+# separate the subject of the title from its compatibility qualifiers, and they
+# describe product classes rather than listing every accessory ever sold.
+COMPATIBILITY_TAIL_RE = re.compile(
+    r"\b(?:compatible\s+with|compatible\s+for|compatibility\s+with|fits?|fitting|"
+    r"suitable\s+for|designed\s+for|made\s+for|works?\s+with|use\s+with|"
+    r"replacement\s+for|upgrade\s+for|for)\s+"
+    r"(?:the\s+|a\s+|an\s+)?"
+    r"(?:nintendo|switch|ps[1-5]\b|playstation|xbox|steam\s+deck|macbook|ipad|iphone|"
+    r"surface|galaxy|pixel|oneplus|xiaomi|rtx|gtx|rx\s*\d|nvidia|geforce|amd|radeon|"
+    r"intel|dell|hp\b|lenovo|asus|msi|acer|samsung|google)\b",
+    re.I,
+)
+# Removable/expandable storage media is a product class in its own right. It is
+# never the console, phone or camera it is advertised as compatible with.
+MEDIA_CARD_RE = re.compile(
+    r"\b(?:micro\s*sd|microsd|sd\s*card|sdxc|sduc|memory\s+card|express\s+card|"
+    r"cfexpress|compact\s*flash|memory\s+stick|usb\s+flash\s+drive|"
+    r"flash\s+memory\s+card|storage\s+card)\b",
+    re.I,
+)
+# Nouns that describe assembled hardware rather than a component. They are the
+# difference between "Dell Pro Max Tower ... Ultra 5" (a computer) and "Intel
+# Core Ultra 5 235 CPU" (a processor).
+DEVICE_CHASSIS_RE = re.compile(
+    r"\b(?:tower|desktop|small\s+form\s+factor|sff|mini\s*pc|micro\s*pc|"
+    r"all[-\s]?in[-\s]?one|workstation|chromebook|ultrabook|"
+    r"2[-\s]?in[-\s]?1|touchscreen|convertible|"
+    r"optiplex|precision|elitedesk|prodesk|thinkcentre|thinkstation|"
+    r"pro\s+max\s+tower|pro\s+micro(?:\s+plus)?|micro\s+form\s+factor|mff|"
+    r"surface\s+(?:pro|go|laptop|book)|latitude|elitebook|probook|"
+    r"inspiron|vostro|ideacentre|aspire\s+(?:tc|desktop)|pavilion\s+desktop)\b",
+    re.I,
+)
+SYSTEM_RAM_RE = re.compile(
+    r"\b\d{1,3}\s*gb\s+(?:ddr[45]\s+)?(?:ram|memory)\b|"
+    r"\b(?:ram|memory)\s*[:\-]?\s*\d{1,3}\s*gb\b|"
+    r"\bddr[45][^|,;]{0,18}\b\d{1,3}\s*gb\b|"
+    r"\b\d{1,3}\s*gb\s+ddr[45]\b",
+    re.I,
+)
+SYSTEM_STORAGE_RE = re.compile(
+    r"\b(?:\d{3,4}\s*gb|\d(?:\.\d)?\s*tb)\s+"
+    r"(?:nvme|ssd|hdd|pcie|storage|solid\s+state)\b|"
+    r"\b(?:nvme|ssd|hdd)\b[^|,;]{0,12}\b(?:\d{3,4}\s*gb|\d(?:\.\d)?\s*tb)\b",
+    re.I,
+)
+# Explicit evidence that a *component* is the item on sale. It overrides the
+# RAM+storage pattern, which otherwise looks identical on a boxed CPU listing.
+COMPONENT_SALE_RE = re.compile(
+    r"\b(?:cpu|processor|socket|lga\s*\d{3,4}\s*\w*|am[45]\b|tray\s+cpu|"
+    r"graphics\s+card|gpu|gddr[567]x?|founders\s+edition|pcie\s*[45](\.0)?|"
+    r"vram|bare\s+drive|internal\s+ssd|nvme\s+drive|heatsink\s+only)\b",
+    re.I,
+)
+CONSOLE_HARDWARE_NOUN_RE = re.compile(
+    r"\b(?:console|handheld|controller|joy[-\s]?cons?|charging\s+dock|"
+    r"disc\s+edition|digital\s+edition|blu[-\s]?ray\s+edition)\b",
+    re.I,
+)
+
+
+def subject_phrase(title: str) -> str:
+    """The part of a title that describes the item itself.
+
+    "SanDisk microSD Express Card for Nintendo Switch 2" sells a card; the
+    Switch 2 appears only as a compatibility target. Model matching must run on
+    the subject, otherwise any accessory inherits the value of the device it
+    fits. The full title is still used for condition and risk signals.
+    """
+    match = COMPATIBILITY_TAIL_RE.search(title)
+    if not match:
+        return title
+    head = title[: match.start()].strip(" -–—,;:|\t")
+    # "For Nintendo Switch 2 controller" has no subject before the qualifier;
+    # keep the full title so the accessory noun can still be read.
+    return head if head else title
+
+
+def system_assembly_evidence(title: str) -> bool:
+    """True when the title describes an assembled machine, not a spare part.
+
+    A processor or graphics card named alongside memory, storage, a chassis or
+    an operating system is a specification of the machine being sold. This is
+    the structural distinction behind the Surface Pro and Dell desktop
+    misclassifications; it does not rely on a list of specific models.
+    """
+    # Compact configuration lists write the two capacities together with no
+    # nouns at all: "Ultra 5 235 16GB 512GB Win11 Pro".
+    bare_config = bool(
+        re.search(r"\b\d{1,3}\s*gb\s+(?:ddr[45]\s+)?\d{3,4}\s*gb\b", title, re.I)
+    )
+    ram = bool(SYSTEM_RAM_RE.search(title)) or bare_config
+    storage = bool(SYSTEM_STORAGE_RE.search(title)) or bare_config
+    chassis = bool(DEVICE_CHASSIS_RE.search(title)) or bool(SCREEN_RE.search(title))
+    os_cue = bool(re.search(r"\b(?:windows|win\s*1[01]|macos|chrome\s*os)\b", title, re.I))
+    component_only = bool(COMPONENT_SALE_RE.search(title))
+    if component_only and not chassis:
+        # "Intel Core i5-12400F CPU, supports 32GB DDR5" is a processor listing.
+        return False
+    # Memory alone ("32GB DDR5 desktop RAM") is the part being sold. A machine
+    # is only inferred when storage is also part of the stated configuration.
+    component = bool(_cpu(title.lower()) or _gpu(title.lower()))
+    device_cue = component or chassis or os_cue
+    return bool(
+        # Memory and storage alone can be a component bundle ("8GB DDR4 RAM and
+        # 256GB NVMe SSD"), so one device cue must also be present.
+        (ram and storage and device_cue)
+        # Configuration lists often omit the word RAM: "32GB, 5.5TB Storage".
+        or (storage and chassis and component)
+    )
+
+
+def _identity_level(score: float) -> str:
+    if score >= 0.85:
+        return "strong"
+    if score >= 0.68:
+        return "moderate"
+    if score >= 0.45:
+        return "limited"
+    return "insufficient"
+
+
+def identity_level_for(score: float) -> str:
+    """Describe a stored identification score without re-reading the title."""
+    return _identity_level(clamp(float(score or 0.0), 0.0, 1.0))
+
+
+def identity_reliability(
+    kind: str,
+    product_key: str | None,
+    attrs: dict[str, Any],
+    flags: list[str],
+    condition: str,
+) -> tuple[float, str, list[str]]:
+    """Score how well the title supports *this exact product identity*.
+
+    The score is built from what was actually parsed, not from the product
+    class. A console key with no capacity or edition, or a phone with no
+    storage, is a family guess and stays limited however familiar the name is.
+    This is why a correctly-read accessory cannot inherit a high score: it has
+    no identity at all, and a wrongly-read one is caught upstream.
+    """
+    if not product_key:
+        return 0.0, "insufficient", ["no_exact_model"]
+    basis = ["exact_model"]
+    score = 0.55
+    if kind == "console":
+        specifics = {
+            "console:ps5-pro", "console:ps5-slim", "console:ps5-digital",
+            "console:ps4-pro", "console:ps4-slim", "console:switch-2",
+            "console:switch-oled", "console:switch-lite", "console:steam-deck-oled",
+            "console:xbox-one-x", "console:xbox-one-s", "console:xbox-360-s",
+            "console:xbox-360-elite", "console:rog-ally-x", "console:new-3ds-xl",
+            "console:3ds-xl", "console:new-3ds", "console:2ds-xl", "console:dsi-xl",
+            "console:ds-lite", "console:gameboy-advance-sp", "console:gameboy-color",
+            "console:gameboy-pocket", "console:wii-u", "console:master-system",
+            "console:playstation-portal", "console:legion-go", "console:rog-ally",
+        }
+        score = 0.80 if product_key in specifics else 0.62
+        if attrs.get("storage_gb"):
+            basis.append("capacity_parsed")
+            score += 0.05
+    elif kind == "gpu":
+        score = 0.74
+        if attrs.get("vram_gb"):
+            basis.append("vram_parsed")
+            score += 0.09
+        if attrs.get("suffix"):
+            basis.append("variant_parsed")
+            score += 0.04
+    elif kind == "cpu":
+        score = 0.82
+        basis.append("model_number")
+        if attrs.get("suffix"):
+            score += 0.04
+    elif kind == "phone":
+        score = 0.60
+        if attrs.get("storage_gb"):
+            basis.append("capacity_parsed")
+            score = 0.82
+    elif kind == "tablet":
+        score = 0.60
+        if attrs.get("storage_gb"):
+            basis.append("capacity_parsed")
+            score = 0.80
+        if attrs.get("chip") or attrs.get("generation"):
+            basis.append("generation_parsed")
+            score += 0.04
+    elif kind == "laptop":
+        score = 0.52
+        if attrs.get("gpu_key") or attrs.get("cpu_key"):
+            basis.append("cpu_or_gpu_parsed")
+            score += 0.12
+        if attrs.get("storage_gb") or attrs.get("ram_gb"):
+            basis.append("spec_parsed")
+            score += 0.08
+    elif kind == "pc":
+        score = 0.55
+        if attrs.get("gpu_key") or attrs.get("cpu_key"):
+            basis.append("cpu_or_gpu_parsed")
+            score += 0.08
+    elif kind in {"ram", "ssd"}:
+        score = 0.68
+        if attrs.get("speed_mhz") or attrs.get("kit_count") or attrs.get("capacity_gb"):
+            basis.append("capacity_parsed")
+            score += 0.08
+    elif kind in {"monitor", "motherboard", "networking"}:
+        score = 0.70
+    else:
+        score = 0.40
+
+    if "model_unclear" in flags:
+        score = min(score, 0.25)
+        basis.append("model_ambiguous")
+    if "variant_unclear" in flags:
+        score = min(score, 0.55)
+        basis.append("variant_unknown")
+    if "contents_incomplete" in flags:
+        score -= 0.03
+    if condition in {"fair", "poor", "faulty"}:
+        score -= 0.05
+    score = clamp(score, 0.0, 1.0)
+    return round(score, 3), _identity_level(score), basis
 CONSOLE_BUNDLE_RE = re.compile(
     r"(?:\b(?:with|plus|and)\b|\+)\s+(?:an?\s+)?(?:"
     r"\d+\s+(?:extra\s+)?games?"
@@ -482,6 +713,9 @@ LAPTOP_MODEL_PATTERNS: tuple[tuple[str, str, re.Pattern], ...] = (
     ("surface-laptop", "Microsoft Surface Laptop", re.compile(r"\bsurface\s+laptop\b", re.I)),
     ("hp-elitebook", "HP EliteBook", re.compile(r"\belitebook\b", re.I)),
     ("hp-probook", "HP ProBook", re.compile(r"\bprobook\b", re.I)),
+    ("hp-omen", "HP OMEN laptop", re.compile(r"\b(?:hp\s+)?omen\b", re.I)),
+    ("hp-victus", "HP Victus laptop", re.compile(r"\b(?:hp\s+)?victus\b", re.I)),
+    ("hp-zbook", "HP ZBook laptop", re.compile(r"\b(?:hp\s+)?zbook\b", re.I)),
     ("hp-spectre", "HP Spectre", re.compile(r"\b(?:hp\s+)?spectre\b", re.I)),
     ("hp-envy", "HP Envy", re.compile(r"\b(?:hp\s+)?envy\b", re.I)),
     ("dell-latitude", "Dell Latitude", re.compile(r"\blatitude\b", re.I)),
@@ -565,6 +799,10 @@ class Identification:
     is_bundle: bool = False
     flags: list[str] = field(default_factory=list)
     attrs: dict[str, Any] = field(default_factory=dict)
+    # How strongly the title supports the exact identity, separate from the
+    # valuation's price evidence. Never presented as a probability.
+    identity_level: str = "insufficient"
+    identity_basis: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -573,6 +811,8 @@ class Identification:
             "category": self.category,
             "kind": self.kind,
             "confidence": round(self.confidence, 3),
+            "identity_level": self.identity_level,
+            "identity_basis": self.identity_basis,
             "condition": self.condition,
             "condition_factor": self.condition_factor,
             "is_faulty": self.is_faulty,
@@ -947,7 +1187,16 @@ def _console(text: str) -> tuple[str, str, dict[str, Any]] | None:
                     len(extra) > 2 or not set(extra) <= allowed_extra
                 ):
                     continue
-        return key, name, {}
+        capacity = None
+        cap_match = re.search(r"\b(64|128|256|512|825|1000)\s*gb\b", text, re.I)
+        if cap_match:
+            capacity = int(cap_match.group(1))
+        else:
+            tb_match = re.search(r"\b(1|2)\s*tb\b", text, re.I)
+            if tb_match:
+                capacity = int(tb_match.group(1)) * 1024
+        attrs = {"storage_gb": capacity} if capacity else {}
+        return key, name, attrs
     return None
 
 
@@ -1376,7 +1625,13 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     # Model and category cues come from the title only: descriptions often
     # mention compatibility ("works with PS5", "4K display") and would otherwise
     # misclassify accessories as consoles or monitors.
-    text = lower_text(title_clean)
+    #
+    # The subject is the title with a compatibility qualifier removed. A title
+    # is allowed to name the device an accessory fits; that mention must never
+    # become the accessory's identity.
+    subject_clean = normalise_text(subject_phrase(title_clean))
+    subject_text = subject_clean or title_clean
+    text = lower_text(subject_text)
     full_text = lower_text(f"{title_clean} {desc_clean[:600]}")
     cleaned_fault_text = FAULT_NEGATION_RE.sub(" ", full_text)
 
@@ -1537,8 +1792,8 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         flags.append("accessory_or_box")
     # System-shape cues are read from the title only. Descriptions often mention
     # "gaming PC" or "laptop" when selling a loose graphics card.
-    title_gpu = _gpu(title_clean)
-    title_cpu = _cpu(title_clean)
+    title_gpu = _gpu(subject_text)
+    title_cpu = _cpu(subject_text)
     cpu_family = re.search(
         r"\b(ryzen\s*[3579]|core\s*i[3579]|i[3579][\s-]?\d{0,5}|intel\s+core|athlon)\b",
         title_clean,
@@ -1548,12 +1803,23 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         re.search(r"\byoga\s+tab\b", title_clean, re.I)
     )
     monitor_ident = _monitor(text)
+    tablet_ident = _tablet(text, full_text)
+    # An explicitly named tablet family is the device being sold, even when the
+    # title also states a processor, memory and storage ("Surface Pro 7+
+    # i5-1135G7 8GB 256GB"). Those are its specifications, not loose parts.
+    # Any tablet family that produced an exact key is the device being sold.
+    # The key parser already refuses generic "tablet" wording, so this does
+    # not reopen the door to a PC title that merely mentions an iPad.
+    tablet_explicit = bool(tablet_ident and tablet_ident[0])
     # A monitor title may contain "PC" or a system brand ("Dell ... Computer
     # Monitor"). Only let a system cue override the monitor when the title also
     # carries actual system specifications such as a CPU, RAM or storage.
     monitor_system_spec = bool(
         _cpu(text) or _gpu(text) or _ram(text) or _ssd(text) or _hdd(text)
     )
+    # A complete desktop or tablet is not the processor named in its own spec
+    # list. This is the structural version of that rule; the component branches
+    # below are skipped when the title describes assembled hardware.
     monitor_wins = (
         bool(monitor_ident)
         and not explicit_laptop
@@ -1567,9 +1833,51 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     ):
         pc_cue = True
     system_combo = bool(title_gpu and (title_cpu or cpu_family))
+    # A model line can name a laptop, a desktop tower, a monitor or a spare
+    # part. These cues decide which one it is before the model list is trusted.
+    laptop_excluded = bool(
+        not explicit_laptop
+        and re.search(
+            r"\b(?:monitor|desktop|tower|25l|30l|35l|40l|45l|"
+            r"top\s+lid|bottom\s+case|palmrest|bezel|webcam|chassis|shell\s+only)\b",
+            title_clean,
+            re.I,
+        )
+    )
     is_laptop = (
         explicit_laptop or (bool(LAPTOP_CUE_RE.search(title_clean)) and not pc_cue)
-    ) and not monitor_wins and not bool(re.search(r"\byoga\s+tab\b", title_clean, re.I))
+    ) and not monitor_wins and not laptop_excluded and not bool(
+        re.search(r"\byoga\s+tab\b", title_clean, re.I)
+    )
+    system_assembly = system_assembly_evidence(subject_text)
+    # "Memory stick" is also how sellers describe a RAM module. DDR, DIMM and
+    # explicit RAM wording keep that listing in the memory category.
+    ram_wording = bool(DDR_RE.search(title_clean)) or bool(
+        re.search(r"\b(?:ram|dimm|so-?dimm)\b", title_clean, re.I)
+    )
+    media_card = (
+        bool(MEDIA_CARD_RE.search(title_clean))
+        and not ram_wording
+        and not any(
+            (
+                explicit_laptop,
+                monitor_wins,
+                bool(console and CONSOLE_HARDWARE_NOUN_RE.search(subject_text)),
+            )
+        )
+    )
+    handheld_console = bool(
+        console
+        and console[0]
+        in {
+            "console:steam-deck", "console:steam-deck-oled", "console:rog-ally",
+            "console:rog-ally-x", "console:legion-go", "console:switch",
+            "console:switch-2", "console:switch-oled", "console:switch-lite",
+            "console:vita", "console:psp", "console:3ds", "console:3ds-xl",
+            "console:new-3ds", "console:new-3ds-xl", "console:2ds", "console:2ds-xl",
+            "console:ds", "console:ds-lite", "console:dsi", "console:dsi-xl",
+        }
+    )
     # A GPU plus RAM is still a component bundle, not a complete computer.
     # Only infer a system when there is an actual system cue or several
     # independent system components alongside the GPU.
@@ -1581,6 +1889,7 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     ))
     is_pc = (
         pc_cue
+        or system_assembly
         or system_combo
         or bool(title_gpu and _ram(title_clean) and system_component_cue)
         # "3070 FE | Ryzen 9 | 32GB DDR4 | ... pc" names a complete machine
@@ -1602,7 +1911,7 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
             )
             and re.search(r"\b(?:windows|win\s*1[01])\b", title_clean, re.I)
         )
-    ) and not is_laptop and not monitor_wins
+    ) and not is_laptop and not monitor_wins and not handheld_console
     has_gpu_context = bool(gpu) and bool(
         re.search(r"\b(rtx|gtx|rx|radeon|geforce|nvidia|amd|arc|gpu|graphics|card)\b", text)
     )
@@ -1638,6 +1947,14 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         category, kind = "motherboard", "other"
         flags.append("parts_only")
         confidence = 0.0
+    elif handheld_console and console:
+        category, kind = "console", "console"
+        product_key, product_name, attrs = console
+        confidence = 0.8
+    elif tablet_explicit and not explicit_laptop and not console:
+        category, kind = "tablet", "tablet"
+        product_key, product_name, attrs = tablet_ident  # type: ignore[misc]
+        confidence = 0.0
     elif is_laptop:
         category, kind = "laptop", "laptop"
         product_key, product_name, attrs, confidence = _laptop(text, gpu, cpu)
@@ -1646,6 +1963,14 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     elif is_pc:
         category, kind = "pc", "pc"
         product_key, product_name, attrs, confidence = _pc(text, gpu, cpu)
+    elif media_card:
+        # A memory card, USB flash drive or other removable media is its own
+        # product class. It has no supported comparable pool, so it is kept for
+        # market tracking but never valued against the device it fits.
+        category, kind = "other", "other"
+        product_key, product_name = None, "Removable storage media"
+        flags.append("storage_media")
+        confidence = 0.0
     elif has_gpu_context:
         category, kind = "gpu", "gpu"
         product_key, product_name, attrs = gpu
@@ -1856,6 +2181,11 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         flags.append("laptop_gpu")
     if is_pc:
         flags.append("complete_system")
+    if system_assembly and not is_pc and not is_laptop and not tablet_explicit:
+        # Memory, storage and a chassis were stated but no assembled machine
+        # identity was reached; keep the component but record that its context
+        # looked like a full system.
+        flags.append("system_context")
     bundle = bool(re.search(
         r"\b(bundle|job\s*lot|joblot|lot\s+of|multi[-\s]?pack|pair\s+of|full\s+setup|with\s+monitor|"
         r"aio\s+cooler)\b",
@@ -1873,6 +2203,17 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     if bundle:
         flags.append("bundle")
 
+    # Final calibration. The class of the item never decides the score: what was
+    # actually parsed does. A familiar product name with no variant is a family
+    # guess, and an item with no identity cannot score at all.
+    if not product_key:
+        confidence = 0.0
+    identity_conf, identity_level, identity_basis = identity_reliability(
+        kind, product_key, attrs, flags, condition
+    )
+    if product_key:
+        confidence = min(identity_conf, 1.0)
+
     return Identification(
         product_key=product_key,
         product_name=product_name,
@@ -1886,4 +2227,6 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         is_bundle=bundle,
         flags=list(dict.fromkeys(flags)),
         attrs=attrs,
+        identity_level=identity_level,
+        identity_basis=identity_basis,
     )

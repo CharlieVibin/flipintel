@@ -79,11 +79,63 @@ class PricingDatabase:
         return True
 
     def latest(self, product_key: str) -> dict[str, Any] | None:
+        """The newest snapshot still valid for this identity.
+
+        A snapshot produced for a product identity that later turned out to be
+        wrong is marked invalid rather than deleted: the history stays for audit
+        and trend work, but it can never price another listing again.
+        """
         return self.db.query_one(
             "SELECT * FROM valuation_snapshots WHERE product_key = ? "
-            "ORDER BY id DESC LIMIT 1",
+            "AND invalidated_at IS NULL ORDER BY id DESC LIMIT 1",
             (product_key,),
         )
+
+    def invalidate(self, product_keys: Iterable[str], reason: str) -> int:
+        """Invalidate every live snapshot for the given identities.
+
+        Idempotent: already-invalidated rows are left untouched, and no history
+        is removed.
+        """
+        keys = [str(key) for key in dict.fromkeys(product_keys) if key]
+        if not keys:
+            return 0
+        marked = 0
+        now = iso()
+        for start in range(0, len(keys), 400):
+            chunk = keys[start : start + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor = self.db.execute(
+                f"UPDATE valuation_snapshots SET invalidated_at=?, invalid_reason=? "
+                f"WHERE product_key IN ({placeholders}) AND invalidated_at IS NULL",
+                [now, reason[:200], *chunk],
+            )
+            marked += max(0, cursor.rowcount or 0)
+        return marked
+
+    def invalidate_contaminated_observations(self) -> int:
+        """Retire observations filed under an identity the listing no longer has.
+
+        Raw rows are kept (they are evidence of what was observed) but they stop
+        feeding valuations. Running this repeatedly is safe.
+        """
+        cursor = self.db.execute(
+            """
+            UPDATE market_observations
+            SET invalidated_at = ?, invalid_reason = 'listing identity changed'
+            WHERE invalidated_at IS NULL
+              AND source_id LIKE 'listing:%'
+              AND EXISTS (
+                  SELECT 1 FROM listings l
+                  WHERE ('listing:' || l.id) = market_observations.source_id
+                    AND (l.product_key IS NULL
+                         OR l.product_key != market_observations.product_key
+                         OR COALESCE(l.listing_kind, '') != COALESCE(market_observations.kind, ''))
+              )
+            """,
+            (iso(),),
+        )
+        return max(0, cursor.rowcount or 0)
 
     def history(self, product_key: str, limit: int = 24) -> list[dict[str, Any]]:
         rows = self.db.query(
@@ -155,6 +207,7 @@ class PricingDatabase:
             FROM valuation_snapshots s
             JOIN (
                 SELECT product_key, MAX(id) AS id FROM valuation_snapshots
+                WHERE invalidated_at IS NULL
                 GROUP BY product_key
             ) latest ON latest.id = s.id
             """
@@ -228,7 +281,8 @@ class PricingDatabase:
         row = self.db.query_one(
             """
             SELECT COUNT(*) AS snapshots, COUNT(DISTINCT product_key) AS products,
-                   MAX(refreshed_at) AS latest
+                   MAX(refreshed_at) AS latest,
+                   SUM(CASE WHEN invalidated_at IS NOT NULL THEN 1 ELSE 0 END) AS invalidated
             FROM valuation_snapshots
             """
         )
@@ -242,6 +296,7 @@ class PricingDatabase:
             "snapshots": int(row["snapshots"] or 0) if row else 0,
             "products": int(row["products"] or 0) if row else 0,
             "latest_snapshot_at": row["latest"] if row else None,
+            "invalidated_snapshots": int(row["invalidated"] or 0) if row else 0,
             "running_research": int(pending["n"] or 0) if pending else 0,
             "reuse_days": self.reuse_days(),
         }

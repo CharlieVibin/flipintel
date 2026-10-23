@@ -210,6 +210,7 @@ class EbayCollector(BaseCollector):
         items: list[RawListing] = []
         seen: set[str] = set()
         ok = failed = 0
+        scanned = 0
         error_text = None
         for query in queries[: max(1, max_queries)]:
             try:
@@ -229,6 +230,7 @@ class EbayCollector(BaseCollector):
                     break
                 continue
             ok += 1
+            scanned += len(raw_items)
             for item in raw_items:
                 if item.external_id in seen:
                     continue
@@ -256,8 +258,118 @@ class EbayCollector(BaseCollector):
             error=error_text if failed else None,
             detail={
                 "kind": "ending_soon",
+                "strategy": "keyword",
                 "window_minutes": ending_within_minutes,
                 "queries": queries[: max(1, max_queries)],
+                "requests": ok,
+                "scanned": scanned,
+                "in_window": len(items),
+            },
+        )
+
+    async def search_auction_categories(
+        self,
+        categories: list[tuple[str, str]],
+        *,
+        ending_within_minutes: int = 30,
+        max_requests: int = 3,
+        page_size: int = 200,
+    ) -> SearchOutcome:
+        """Ending-soon auctions from whole hardware categories.
+
+        Keyword auction searches only see listings whose titles happen to match
+        the words. A category search with ``endingSoonest`` sees everything
+        ending in that branch, so the same request budget covers far more of the
+        market. The window is still enforced locally from the real end time.
+        """
+        available, reason = self.available
+        if not available:
+            return SearchOutcome(
+                marketplace=self.marketplace, status="not_configured", error=reason
+            )
+        now = datetime.now(timezone.utc)
+        horizon = now + timedelta(minutes=max(5, ending_within_minutes))
+        items: list[RawListing] = []
+        seen: set[str] = set()
+        ok = failed = 0
+        requests = 0
+        scanned = 0
+        error_text = None
+        used_categories: list[str] = []
+        for category_id, label in categories:
+            if requests >= max_requests:
+                break
+            pages_for_category = 0
+            offset = 0
+            while requests < max_requests and pages_for_category < 2:
+                try:
+                    raw_items, _count, _status = await self._browse_request(
+                        {
+                            "category_ids": str(category_id),
+                            "limit": page_size,
+                            "offset": offset,
+                            "sort": "endingSoonest",
+                            "filter": self.AUCTION_FILTER,
+                        },
+                        f"auction-category:{label}",
+                    )
+                except CollectorError as exc:
+                    failed += 1
+                    error_text = exc.message
+                    if exc.kind in {"auth", "rate_limited"}:
+                        break
+                    break
+                requests += 1
+                pages_for_category += 1
+                ok += 1
+                if label not in used_categories:
+                    used_categories.append(label)
+                scanned += len(raw_items)
+                last_end: datetime | None = None
+                for item in raw_items:
+                    end = item.auction_end_at
+                    if not end:
+                        continue
+                    try:
+                        when = datetime.fromisoformat(end.replace("Z", "+00:00"))
+                    except ValueError:
+                        continue
+                    if when.tzinfo is None:
+                        when = when.replace(tzinfo=timezone.utc)
+                    last_end = when
+                    if when <= now or when > horizon:
+                        continue
+                    if item.external_id in seen:
+                        continue
+                    seen.add(item.external_id)
+                    items.append(item)
+                # With endingSoonest ordering, a full page whose last end time
+                # is still inside the window means more in-window auctions
+                # exist. Anything else is the end of the relevant set.
+                if len(raw_items) < page_size:
+                    break
+                if last_end is None or last_end > horizon:
+                    break
+                offset += page_size
+            if failed and not ok:
+                break
+        status = "ok" if ok and not failed else "degraded" if ok else "failed"
+        return SearchOutcome(
+            marketplace=self.marketplace,
+            status=status,
+            items=items,
+            queries_ok=ok,
+            queries_failed=failed,
+            pages=requests,
+            error=error_text if failed else None,
+            detail={
+                "kind": "ending_soon",
+                "strategy": "category",
+                "window_minutes": ending_within_minutes,
+                "categories": used_categories,
+                "requests": requests,
+                "scanned": scanned,
+                "in_window": len(items),
             },
         )
 

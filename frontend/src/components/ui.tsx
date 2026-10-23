@@ -148,6 +148,49 @@ export function ConfidenceMeter({ value, compact = false }: { value: number; com
   );
 }
 
+const EVIDENCE_META = {
+  insufficient: { label: "Insufficient", width: 22, text: "text-rose", bar: "bg-rose" },
+  limited: { label: "Limited", width: 46, text: "text-ember", bar: "bg-ember" },
+  moderate: { label: "Moderate", width: 72, text: "text-lime-300", bar: "bg-lime-300" },
+  strong: { label: "Strong", width: 94, text: "text-lime-400", bar: "bg-lime-400" },
+} as const;
+
+/**
+ * Descriptive valuation-evidence grade.
+ *
+ * A percentage is deliberately not shown: FlipIntel has no empirically
+ * calibrated completed-sale model, so a number would read as a probability of
+ * selling when it is only a description of the asking evidence.
+ */
+export function EvidenceMeter({
+  level,
+  compact = false,
+  label = "Valuation evidence",
+}: {
+  level?: string | null;
+  compact?: boolean;
+  label?: string;
+}) {
+  const meta = EVIDENCE_META[(level as keyof typeof EVIDENCE_META) ?? "insufficient"];
+  return (
+    <div
+      className="w-full"
+      title="How much evidence supports the resale estimate. This is a descriptive grade, not a probability of selling."
+    >
+      <div className="mb-1 flex items-center justify-between gap-2">
+        {!compact && <span className="text-[11px] text-mist-400">{label}</span>}
+        <span className={cn("text-[11px] font-medium", meta.text)}>{meta.label}</span>
+      </div>
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-ink-700">
+        <div
+          className={cn("h-full rounded-full transition-all duration-500", meta.bar)}
+          style={{ width: `${meta.width}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
 export function ScoreRing({ score, size = 44 }: { score: number; size?: number }) {
   const radius = (size - 6) / 2;
   const circumference = 2 * Math.PI * radius;

@@ -1,7 +1,7 @@
 import { ArrowUpRight, Bookmark, BookmarkCheck, CircleAlert, Clock3, MapPin, RotateCcw, TrendingUp, X } from "lucide-react";
 import type { Deal } from "../lib/types";
 import { cn } from "./ui";
-import { ConfidenceMeter, MarketBadge, ProductImage, ScoreRing } from "./ui";
+import { EvidenceMeter, MarketBadge, ProductImage, ScoreRing } from "./ui";
 import { CATEGORY_LABELS, conditionLabel, daysAgo, methodLabel, money, pct } from "../lib/format";
 
 interface Props {
@@ -186,11 +186,12 @@ export function DealCard({ deal, onOpen, onSave, onDismiss, onRestore, archived 
           </div>
           <span className="numeric shrink-0 text-[10px] text-mist-500">
             {deal.sample_size} comps · {methodLabel(deal.valuation_method)}
+            {deal.identity_level && deal.identity_level !== "strong" ? ` · identity ${deal.identity_level}` : ""}
           </span>
         </div>
 
         <div className="mt-3">
-          <ConfidenceMeter value={deal.confidence} compact />
+          <EvidenceMeter level={deal.evidence_level} compact />
         </div>
 
         <div className="mt-3 flex items-center justify-between border-t border-ink-700/70 pt-3">

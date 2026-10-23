@@ -5,6 +5,94 @@
 **Runtime:** Python 3.10, FastAPI, SQLite, React 18 + Vite + Tailwind
 **Live dashboard:** http://127.0.0.1:8765 (while the local server is running)
 
+## Session 2026-10-23 — Identity integrity and honest evidence
+
+This session made the identity behind every valuation defensible. The deal
+numbers below were measured after the repair pass, not projected.
+
+### Identity is now graded and structurally parsed
+
+- Every listing stores `identity_level` (strong / moderate / limited /
+  insufficient) and `identity_basis` (`exact_model`, `capacity_parsed`,
+  `vram_parsed`, `variant_parsed`, `model_number`, `cpu_or_gpu_parsed`). The
+  grade describes how well the title supports the key; it is separate from the
+  old confidence number and is never presented as a probability.
+- The classifier reads the subject phrase, so a compatibility qualifier
+  ("for Nintendo Switch 2", "fits Dell Optiplex") can no longer donate its
+  device to an accessory. Console hardware nouns (controller, dock, faceplate,
+  game, media card) win over the console name; complete systems built from a
+  component list ("Ultra 5 235 16GB 512GB Win11") are PCs, not CPUs; named
+  tablets are devices, not a CPU + RAM + SSD bundle; monitors, network gear and
+  bare model lines have their own branches instead of folding into PCs.
+- `app/comparables.py` now validates each comparable against the candidate
+  before it can price it, and records a rejection reason. Capacity mismatches,
+  Ti/non-Ti and Digital variants, accessories, parts-only and compatibility
+  listings are rejected instead of blended.
+- Regression fixture `tests/fixtures/identity_regression.json` holds 27
+  collected titles. The previous classifier scores 18/27 (66.7%); the current
+  one 27/27 (100%). `scripts/benchmark_identity.py` reproduces this against
+  `HEAD:app/identification.py`.
+- `scripts/audit_identity.py` re-applies the classifier to stored rows. Report
+  mode is read-only; `--apply` rewrites identities, invalidates snapshots for
+  superseded product keys and retires observations filed under an identity the
+  listing no longer has. Raw rows are never deleted. Re-running it now reports
+  0 pending changes.
+
+### Valuation says what it is based on
+
+- Deals expose `valuation_basis` (`sold`, `asking_only`, `cex_anchor`),
+  `evidence_score`, `rank_score` and `rank_tier`, alongside the existing
+  evidence level. An asking-only estimate reads as asking-only in the API and
+  the drawer.
+- The flat asking-only ceiling is gone. It capped every opportunity at 63% by
+  arithmetic, so nothing could ever rank higher however strong its sample was.
+  Disclosure is now the basis plus the evidence level; the UI never converts
+  either into a sale probability.
+- A "new" premium is scaled by whether the comparable pool actually contains
+  new stock, so a new RTX 4060 cannot be priced from eight used cards.
+- `valuation_snapshots` and `market_observations` gained `invalidated_at` /
+  `invalid_reason`. `PricingDatabase.latest()` only returns live snapshots, and
+  the startup re-identification pass invalidates the old key's cache when a
+  listing changes identity. History stays for audit.
+
+### Auction discovery moved to categories
+
+- `EbayCollector.search_auction_categories` requests whole hardware categories
+  with `endingSoonest`, rotates one category per request and enforces the
+  window locally. Keyword search remains the fallback when the API refuses the
+  category filter.
+- Measured live with the same 3-request budget: keyword returned 18 in-window
+  auctions from 1 distinct product; categories returned 37 from 9 products,
+  3 of them at moderate identity or better. Coverage is still budget-bound —
+  one pass rotates through only a few of the seven catalogue branches.
+
+### Measured state
+
+- 72,848 listings stored across 3,655 product keys; 18,932 have a usable
+  identity (1,020 strong, 9,596 moderate, 8,316 limited); 53,916 remain
+  insufficient and are not valued.
+- The repair pass retired 1,486 market observations that were filed under an
+  identity the listing no longer has and invalidated 136 snapshots on those
+  keys; 3,668 snapshots remain live. Nothing was deleted.
+- 66 active promoted deals at the time of the check, all identity-verified
+  against a fresh classifier pass, confidence 0.589–0.860, sample ≥ 5, all
+  asking-only evidence (37 moderate, 29 limited). Rank tiers: 43 decent, 13
+  speculative, 10 strong. Live scans keep changing these counts; the ratios are
+  what matter.
+- 962 listings await review. They are mostly missing-variant or deep-discount
+  rows, not parser failures; bulk decisions remain explicit-ID and capped.
+
+### Verification
+
+- `pytest -q`: 128 passed. `npm run build` (tsc + vite): clean.
+- Live server (`run.py`) serves the dashboard and `/api/deals` with the new
+  fields; a fresh classifier pass over all promoted deals found 0 mismatched
+  identities, bundles or faulty rows.
+- The identity audit is idempotent, and both benchmarks run read-only against
+  the current database.
+- Still true: no completed-sale evidence exists locally, so every current
+  estimate is asking-only and should be read as such.
+
 ## Session 2026-10-23 — CeX, price memory, auctions and personal flips
 
 This session implemented the intelligence layer on top of the existing deal
@@ -615,25 +703,26 @@ delete listings or reset the database.
 
 | Metric | Value |
 | --- | --- |
-| Active listings in local DB | 39,125 |
-| Qualifying deals | 1 |
-| Manual review queue (pending) | 2,067 |
-| Missing-storage phone variants | 968 across 60 models |
-| Probable cross-market duplicates | 41 |
-| Tracked product keys | 1,664 |
-| Category-discovered listings | 17,574 |
+| Active listings in local DB | 72,820 |
+| Qualifying deals | 66 |
+| Manual review queue (pending) | 962 |
+| Missing-storage phone variants | see grouped review |
+| Probable cross-market duplicates | 63 |
+| Tracked product keys | 3,655 |
+| Category-discovered listings | 50,969 |
 | Completed-sale evidence rows | 0 |
-| Sources healthy | Vinted, Gumtree |
-| eBay | Live with production keys (category BIN + auctions verified) |
+| Sources healthy | Vinted, Gumtree, eBay |
+| eBay | Live with production keys (category BIN + category auctions verified) |
 | CeX | Live via the public search index; retail/cash/voucher stored |
 | Facebook | Unavailable; requires authenticated session |
-| Tests | 90 passed, 0 failed |
+| Tests | 128 passed, 0 failed |
 | Frontend build | Passing |
 
-The current deal is a £200 PlayStation 5 console supported by live asking
-prices, around 29% below the modelled resale. It is capped at 52% confidence
-and labelled "Asking only". The remaining deep discounts are in the review queue
-rather than being presented as top-ranked profit.
+The strongest current deal is a PlayStation 5 Pro 2TB at £500 with a £833
+resale estimate, 86% evidence score and moderate evidence, labelled
+"Asking only" with a strong identity. Deals range from 59% to 86% evidence;
+none claims a completed sale. Deep discounts that fail a gate stay in the review
+queue rather than being presented as top-ranked profit.
 
 ## Valuation evidence status
 
@@ -643,10 +732,10 @@ rather than being presented as top-ranked profit.
 | Bulk CSV completed sales | Yes | Evidence lab → choose CSV → preview → commit. Validated, idempotent, provenance retained. |
 | Manual verified sold prices | Yes | Deal drawer → Verified sold evidence, or `POST /api/comps`; valuation refreshes immediately. |
 | Category calibration | Ready, inactive | No matched sold evidence yet. API reports `insufficient` and keeps the 85% fallback. |
-| eBay Browse API active listings | Code complete, needs keys | Active asks only; Browse API does not supply completed sales. |
+| eBay Browse API active listings | Live | Active asks and auctions from production keys; Browse API does not supply completed sales. |
 | eBay Marketplace Insights (sold items) | Not available | eBay documents the API as restricted and not open to new users; no bypass is attempted. |
 | eBay UK completed-sales pages | Not implemented | eBay directs automated access to its API and protects sold-search HTML. |
-| CeX retail anchor | Usually blocked here | HTTP 403 in this network; optional fallback only. |
+| CeX retail anchor | Live | Public search index; converted to private-resale level and labelled a retail anchor, never a sale. |
 
 No automated, legitimate, free sold-price source is available to this workspace.
 The honest automatic path is robust asking-price evidence plus confidence caps and
@@ -658,9 +747,9 @@ review. Manual CSV remains optional and is not required for scanning or valuatio
 | --- | --- | --- |
 | Vinted UK | Working | Category browse verified on all 10 branches; up to 96 cards/page, newest first, marketplace cap at page 10. |
 | Gumtree UK | Working | Category browse verified on all 6 branches; 30 cards/page. JSON-LD is authoritative on search pages, per-card anchors on category pages. |
-| eBay UK | Code complete, needs keys | Official Browse API category search (`category_ids`, no keyword), 200/page, 4 requests/cycle, quota/backoff. Not exercised live. |
+| eBay UK | Working | Official Browse API category search (`category_ids`, no keyword), 200/page, 4 requests/cycle, quota/backoff; category auction search rotates one branch per request. |
 | Facebook Marketplace | Unsupported | Login required; automated collection is not attempted. |
-| CeX UK | Blocked here | Optional anchor only. Cloudflare 403 in this workspace. |
+| CeX UK | Working | Undocumented public search index; retail/cash/voucher by grade, paused on 403/429. |
 
 ## Measured scan performance (keyword-cycle baseline, before category discovery)
 
@@ -686,7 +775,8 @@ a fresh full recomputation exactly (0 differences).
 
 1. **No saved sold evidence yet.** The evidence and calibration systems are ready,
    but this database has zero completed sales. All current deals are asking-only
-   at 52% confidence. Import real sales to change that.
+   at Limited or Moderate evidence (59–86% evidence score). Import real sales to
+   change that.
 2. **Deep discounts intentionally go to review.** A listing below 65% of its
    comparable median, or with missing storage/RAM/chip details, is not called a
    top deal automatically. This is a deliberate precision-over-volume choice; the
@@ -694,10 +784,13 @@ a fresh full recomputation exactly (0 differences).
 3. **Calibration needs volume.** At least 2 sold observations and 4 recent asks per
    matched product, at least 5 products per category and held-out error below 15%.
    Otherwise it stays inactive and explains why.
-4. **eBay has not been exercised end-to-end** because no API keys are configured.
-   Token, missing-credential, parser, quota and authentication paths are tested.
-5. **CeX is unavailable from this network.** The app reports the 403 rather than
-   pretending the anchor worked.
+4. **eBay is live but rotation-bound.** Category fixed-price search and category
+   auctions were exercised against production keys. Auction coverage is limited
+   by the request budget, so one pass only reaches a few category branches and a
+   short auction can end before its branch comes round.
+5. **CeX is live but unverified by contract.** It is an undocumented public
+   search index; when it is blocked or changes shape the quote is marked failed
+   and valuations continue from live comparables.
 6. **Vinted descriptions are not exposed** in catalogue cards, so condition and
    contents detection there relies on titles and card condition. Gumtree now
    supplies descriptions.
@@ -725,7 +818,7 @@ cd frontend
 npm run build
 ```
 
-Last verified: **90 passed, 0 failed**; frontend `tsc -b && vite build` passes.
+Last verified: **128 passed, 0 failed**; frontend `tsc -b && vite build` passes.
 
 ## Exact next tasks (in order)
 

@@ -15,8 +15,9 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
+from .comparables import split_pool
 from .db import Database
-from .identification import CONDITION_FACTORS
+from .identification import CONDITION_FACTORS, identity_level_for
 from .pricing import PricingDatabase
 from .risk import RiskAssessment, assess_listing
 from .utils import (
@@ -84,7 +85,8 @@ def _listing_fingerprint(listing: dict[str, Any]) -> str:
             listing.get("id"), listing.get("marketplace"), listing.get("price"),
             listing.get("shipping"), listing.get("condition_norm"),
             listing.get("product_key"), listing.get("listing_kind"),
-            listing.get("identification_confidence"), listing.get("is_faulty"),
+            listing.get("identification_confidence"), listing.get("identity_level"),
+            listing.get("identity_basis"), listing.get("is_faulty"),
             listing.get("is_wanted"), listing.get("is_bundle"),
             listing.get("is_auction"), listing.get("auction_end_at"),
             listing.get("current_bid"), listing.get("bid_count"),
@@ -186,6 +188,68 @@ class MarketEstimate:
     evidence_level: str = "insufficient"
     strategies: dict[str, Any] = field(default_factory=dict)
     sources: dict[str, int] = field(default_factory=dict)
+    # How the resale figure was evidenced. "asking_only" means no completed
+    # sale supports it and the UI must say so rather than imply a probability.
+    confidence_basis: str = "asking_only"
+    calibration_active: bool = False
+    rejected: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _rank_opportunity(
+    *,
+    net_profit: float,
+    roi: float | None,
+    expected_resale: float,
+    purchase_total: float,
+    net_profit_conservative: float | None,
+    evidence_level: str,
+    identity_confidence: float,
+    risk_score: float,
+    holding_days: float,
+) -> tuple[float, str, dict[str, float]]:
+    """Capital-adjusted attractiveness, separate from any confidence measure.
+
+    £30 on a £300 console is not the same opportunity as £30 on a £60 part, so
+    the score weighs absolute profit, return on the capital actually tied up,
+    evidence, identity, risk, resale time and the conservative downside. It is
+    a ranking, never a probability of a successful sale.
+    """
+    profit = clamp(net_profit / max(60.0, expected_resale * 0.25), 0.0, 1.0)
+    roi_score = clamp((roi or 0.0) / 0.60, 0.0, 1.0)
+    capital = clamp(1.0 - purchase_total / 600.0, 0.0, 1.0)
+    if net_profit_conservative is not None:
+        downside = clamp(
+            net_profit_conservative / max(30.0, expected_resale * 0.15), 0.0, 1.0
+        )
+    else:
+        # Without a supported range, the downside is unknown. Score it as half
+        # of the central case rather than pretending it is risk-free.
+        downside = profit * 0.5
+    evidence = {
+        "strong": 1.0, "moderate": 0.8, "limited": 0.55, "insufficient": 0.2,
+    }.get(evidence_level, 0.2)
+    risk_factor = 1.0 - clamp(risk_score / 100.0, 0.0, 1.0)
+    speed = clamp(1.0 - holding_days / 60.0, 0.0, 1.0)
+    components = {
+        "profit": round(24.0 * profit, 2),
+        "roi": round(18.0 * roi_score, 2),
+        "low_capital": round(8.0 * capital, 2),
+        "conservative_downside": round(16.0 * downside, 2),
+        "evidence": round(16.0 * evidence, 2),
+        "identity": round(8.0 * clamp(identity_confidence, 0.0, 1.0), 2),
+        "risk": round(6.0 * risk_factor, 2),
+        "resale_speed": round(4.0 * speed, 2),
+    }
+    score = round(clamp(sum(components.values()), 0.0, 100.0), 1)
+    if score >= 70 and evidence_level in {"moderate", "strong"}:
+        tier = "strong"
+    elif score >= 50:
+        tier = "decent"
+    elif score >= 30:
+        tier = "speculative"
+    else:
+        tier = "weak"
+    return score, tier, components
 
 
 def _log_stats(values: list[float]) -> tuple[float, float]:
@@ -581,6 +645,31 @@ def _estimate_from_rows(
                 notes.append(trend_note)
 
     condition_factor = CONDITION_FACTORS.get(candidate_condition, 0.95)
+    # A "new" premium is only believable if the comparable market actually
+    # contains stock in that condition. A new RTX 4060 priced from eight used
+    # cards cannot carry a full +20% uplift; that produced the questionable
+    # £327 estimate. Scale the uplift by observed condition support instead of
+    # assuming it.
+    condition_support = 0.0
+    if condition_factor > 1.0 and kept:
+        candidate_floor = condition_factor - 0.03
+        total_weight = sum(float(c["weight"]) for c in kept) or 1.0
+        supported = sum(
+            float(c["weight"])
+            for c in kept
+            if CONDITION_FACTORS.get(str(c.get("condition_norm") or "unknown"), 0.95)
+            >= candidate_floor
+        )
+        condition_support = supported / total_weight
+        support_scale = min(1.0, condition_support / 0.30)
+        raw_factor = condition_factor
+        condition_factor = 1.0 + (raw_factor - 1.0) * (0.25 + 0.75 * support_scale)
+        if condition_factor < raw_factor - 0.005:
+            notes.append(
+                f"The {candidate_condition.replace('_', ' ')} condition uplift was reduced from "
+                f"{raw_factor:.2f}× to {condition_factor:.2f}× because only "
+                f"{condition_support:.0%} of the comparable pool is in that condition."
+            )
     # A falling market should lower a conservative estimate, but only modestly:
     # one short-term move is not proof of a new price level. Rising markets are
     # not used to inflate an estimate.
@@ -629,18 +718,24 @@ def _estimate_from_rows(
         notes.append(
             "All completed-sale evidence is user-supplied; it is not independently confirmed."
         )
-    if sold_count == 0:
-        # Asking prices cannot prove a sale, so the ceiling depends on how much
-        # asking evidence there is instead of one arbitrary percentage. It
-        # varies with sample size and independent marketplaces, and it is shown
-        # as a descriptive evidence level rather than fake precision.
-        asking_ceiling = (
-            0.45
-            + 0.10 * min(len(asking_pool), 10) / 10
-            + (0.05 if len(distinct_sources) >= 2 else 0.0)
-            + (0.03 if has_cex else 0.0)
+    # There is deliberately no flat asking-only ceiling. The previous engine
+    # capped every estimate at 0.45 + 0.10 + 0.05 + 0.03 = 0.63, which is why no
+    # opportunity in the feed could ever exceed 63%: it was arithmetic, not
+    # uncertainty. The honest disclosure is the evidence *basis* (completed
+    # sales vs asking prices vs a CeX retail anchor) plus the evidence level,
+    # and the UI must not present either as a probability of resale.
+    confidence_basis = {
+        "sold_comps": "completed_sales",
+        "mixed_comps": "one_completed_sale",
+        "live_asking_comps": "asking_only",
+        "cex_anchor": "cex_retail_only",
+        "component_model": "modelled_component",
+    }.get(method, "asking_only")
+    if confidence_basis == "asking_only":
+        notes.append(
+            "The resale estimate is an asking-price estimate with no verified completed sale; "
+            "it is not a prediction of a guaranteed sale price."
         )
-        confidence = min(confidence, asking_ceiling)
     if len(kept) < 5:
         confidence *= 0.90
         notes.append("Small evidence set — treat this estimate cautiously.")
@@ -754,6 +849,8 @@ def _estimate_from_rows(
         trend_pct=round(trend_pct, 4) if trend_pct is not None else None,
         trend_note=trend_note,
         market_values=[round(value, 2) for value in values],
+        confidence_basis=confidence_basis,
+        calibration_active=bool(getattr(config, "calibration_active", False)),
     )
 
 
@@ -762,6 +859,7 @@ class ValuationEngine:
         self.db = db
         self.pricing = PricingDatabase(db)
         self._comp_cache: dict[tuple[str, str], list[dict[str, Any]]] | None = None
+        self._rejected_cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
         self._estimates: dict[tuple[str, str], Any] = {}
         self._snapshot_at: dict[str, str] = {}
         self._snapshot_cache: dict[str, str | None] = {}
@@ -804,7 +902,7 @@ class ValuationEngine:
             LEFT JOIN listings l ON l.marketplace=o.marketplace
                 AND ('listing:' || l.id)=o.source_id
             WHERE o.product_key = ? AND (o.kind = ? OR o.kind IS NULL)
-              AND o.observed_at >= ?
+              AND o.observed_at >= ? AND o.invalidated_at IS NULL
               AND COALESCE(l.is_bundle, 0)=0 AND COALESCE(l.is_faulty, 0)=0
               AND COALESCE(l.is_wanted, 0)=0
               AND COALESCE(l.condition_norm, 'unknown') != 'faulty'
@@ -826,9 +924,13 @@ class ValuationEngine:
             (product_key, kind, hours_ago(24 * 180)),
         )
         combined = rows + observations + external
+        # Identity is checked before any price can influence the estimate. A
+        # similar title is not evidence that the same product is being sold.
+        accepted, rejected = split_pool(combined, kind=kind, product_key=product_key)
         if self._comp_cache is not None:
-            self._comp_cache[cache_key] = combined
-        return combined
+            self._comp_cache[cache_key] = accepted
+            self._rejected_cache[cache_key] = rejected
+        return accepted
 
     def _gpu_fallback_comps(self, gpu_key: str) -> list[dict[str, Any]]:
         return self.db.query(
@@ -878,9 +980,16 @@ class ValuationEngine:
         price = float(listing.get("price") or 0)
         marketplace = listing.get("marketplace") or ""
         flags = listing.get("flags_list") or []
+        identity_confidence = float(listing.get("identification_confidence") or 0)
+        identity_level = str(
+            listing.get("identity_level") or identity_level_for(identity_confidence)
+        )
         method = "insufficient_data"
         notes: list[str] = []
         estimate: MarketEstimate | None = None
+        score = 0.0
+        rank_tier = "weak"
+        rank_components: dict[str, float] = {}
 
         unvaluable = (
             not product_key
@@ -908,6 +1017,7 @@ class ValuationEngine:
             )
             method = estimate.method
             notes = estimate.notes
+            estimate.rejected = self._rejected_cache.get((str(product_key), str(kind)), [])[:20]
             if kind == "laptop":
                 # Laptop comparables depend heavily on exact spec, so cap confidence.
                 estimate.confidence = min(estimate.confidence, 0.66)
@@ -1047,6 +1157,8 @@ class ValuationEngine:
         )
         score = 0.0
         is_deal = False
+        rank_tier = "weak"
+        rank_components = {}
         review_decision = str(listing.get("review_decision") or "")
         review_resolved = review_decision in {"approved", "corrected"}
         needs_review = (suspicious_price or (
@@ -1128,14 +1240,8 @@ class ValuationEngine:
                 net_profit_optimistic = net_at(estimate.high)
             roi = round(net_profit / purchase_total, 4) if purchase_total > 0 else None
             gap = (expected_resale - purchase_total) / expected_resale
-            age = age_hours(listing.get("first_seen")) or 0
-            profit_component = clamp(net_profit / max(45.0, expected_resale * 0.35), 0, 1) * 30
-            roi_component = clamp((roi or 0) / 0.55, 0, 1) * 30
-            gap_component = clamp(gap / 0.40, 0, 1) * 15
-            freshness_component = math.exp(-age / 72.0) * 10
-            base_score = profit_component + roi_component + gap_component + freshness_component
             confidence = estimate.confidence if estimate else 0.0
-            score = round(clamp(base_score * (0.55 + 0.45 * confidence), 0, 100), 1)
+            score = 0.0
 
             if suspicious_price:
                 # The review penalty stays after approval: approving a listing
@@ -1160,6 +1266,26 @@ class ValuationEngine:
                 reasons.append(
                     f"Risk assessment {risk.score:.0f}/100 ({risk.level}); see the review reasons before buying"
                 )
+            score, rank_tier, rank_components = _rank_opportunity(
+                net_profit=net_profit,
+                roi=roi,
+                expected_resale=expected_resale,
+                purchase_total=purchase_total,
+                net_profit_conservative=net_profit_conservative,
+                evidence_level=estimate.evidence_level if estimate else "insufficient",
+                identity_confidence=float(listing.get("identification_confidence") or 0),
+                risk_score=risk.score,
+                holding_days=float(holding_days),
+            )
+            if net_profit_conservative is not None and net_profit_conservative <= 0:
+                reasons.append(
+                    f"Conservative downside is a loss of £{abs(net_profit_conservative):,.0f} "
+                    "at the lower end of the supported resale range"
+                )
+            if estimate and estimate.confidence_basis == "asking_only":
+                reasons.append(
+                    "Resale is estimated from live asking prices, not verified completed sales"
+                )
             is_deal = (
                 net_profit >= config.min_profit
                 and (roi or 0) >= required_roi
@@ -1169,6 +1295,8 @@ class ValuationEngine:
                 and expected_resale > purchase_total
                 and (estimate.sample_size if estimate else 0) >= 4
                 and float(listing.get("identification_confidence") or 0) >= 0.55
+                and identity_level in {"limited", "moderate", "strong"}
+                and risk.level != "high"
                 and not listing.get("is_bundle")
                 # An unstated storage, memory or chip variant cannot be valued
                 # precisely, so it never enters the automatic feed even when
@@ -1267,6 +1395,7 @@ class ValuationEngine:
                 "other": config.other_costs,
             },
             "comps": estimate.comps if estimate else [],
+            "rejected_comps": estimate.rejected if estimate else [],
             "sample_size": estimate.sample_size if estimate else 0,
             "sold_count": estimate.sold_count if estimate else 0,
             "asking_count": estimate.asking_count if estimate else 0,
@@ -1290,12 +1419,35 @@ class ValuationEngine:
                 "asking_count": estimate.asking_count if estimate else 0,
                 "method": method,
                 "level": estimate.evidence_level if estimate else "insufficient",
+                "basis": estimate.confidence_basis if estimate else "asking_only",
+                "calibrated": bool(estimate.calibration_active) if estimate else False,
                 "sources": estimate.sources if estimate else {},
+                # An internal evidence score used for gating and ordering. It is
+                # not a probability and the UI shows the level instead unless a
+                # calibration against completed sales is active.
+                "score": estimate.confidence if estimate else 0.0,
                 "confidence": estimate.confidence if estimate else 0.0,
                 "confidence_low": estimate.ci_low if estimate else None,
                 "confidence_high": estimate.ci_high if estimate else None,
                 "trend_pct": estimate.trend_pct if estimate else None,
                 "trend_note": estimate.trend_note if estimate else "",
+                "rejected_count": len(estimate.rejected) if estimate else 0,
+            },
+            "identity": {
+                "level": identity_level,
+                "confidence": round(identity_confidence, 3),
+                "basis": list(listing.get("identity_basis") or []),
+                "product_key": product_key,
+                "product_name": listing.get("product_name"),
+            },
+            "ranking": {
+                "score": score,
+                "tier": rank_tier,
+                "components": rank_components,
+                "note": (
+                    "Ranking weighs profit, capital, evidence, identity, risk and resale "
+                    "time. It is not a probability of selling."
+                ),
             },
         }
 
@@ -1332,6 +1484,12 @@ class ValuationEngine:
             "resale_balanced": (estimate.strategies.get("balanced", {}) or {}).get("expected") if estimate else None,
             "resale_max": (estimate.strategies.get("max", {}) or {}).get("expected") if estimate else None,
             "evidence_level": estimate.evidence_level if estimate else "insufficient",
+            "valuation_basis": estimate.confidence_basis if estimate else "asking_only",
+            "evidence_score": round(estimate.confidence, 3) if estimate else 0.0,
+            "identity_level": identity_level,
+            "identity_confidence": round(identity_confidence, 3),
+            "rank_tier": rank_tier,
+            "rank_score": score,
             "estimated_days": holding_days if expected_resale else None,
             "valuation_refreshed_at": self._snapshot_at.get(str(product_key or "")),
             "computed_at": iso(),
@@ -1423,7 +1581,7 @@ class ValuationEngine:
             SELECT product_key, COALESCE(kind, '') AS kind,
                    COUNT(*) AS n, ROUND(SUM(price), 2) AS total
             FROM market_observations
-            WHERE observed_at >= ?
+            WHERE observed_at >= ? AND invalidated_at IS NULL
             GROUP BY product_key, kind
             """,
             (hours_ago(24 * 90),),
@@ -1552,6 +1710,7 @@ class ValuationEngine:
 
         evaluated = deals = review = 0
         self._comp_cache = {}
+        self._rejected_cache = {}
         self._estimates = {}
         self._snapshot_cache = {}
         self._snapshot_at = {}
@@ -1566,8 +1725,9 @@ class ValuationEngine:
                     needs_review, review_reason, risk_score, risk_level, risk_reasons,
                     reasons, breakdown, computed_at, input_fingerprint,
                     resale_strategy, resale_quick, resale_balanced, resale_max,
-                    evidence_level, max_bid, estimated_days, valuation_refreshed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    evidence_level, max_bid, estimated_days, valuation_refreshed_at,
+                    identity_level, valuation_basis, evidence_score, rank_score, rank_tier)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(listing_id) DO UPDATE SET
                     product_key=excluded.product_key, kind=excluded.kind,
                     expected_resale=excluded.expected_resale, resale_low=excluded.resale_low,
@@ -1593,7 +1753,12 @@ class ValuationEngine:
                     evidence_level=excluded.evidence_level,
                     max_bid=excluded.max_bid,
                     estimated_days=excluded.estimated_days,
-                    valuation_refreshed_at=excluded.valuation_refreshed_at
+                    valuation_refreshed_at=excluded.valuation_refreshed_at,
+                    identity_level=excluded.identity_level,
+                    valuation_basis=excluded.valuation_basis,
+                    evidence_score=excluded.evidence_score,
+                    rank_score=excluded.rank_score,
+                    rank_tier=excluded.rank_tier
                 """,
                 (
                     result["listing_id"], result["product_key"], result["kind"],
@@ -1612,6 +1777,8 @@ class ValuationEngine:
                     result["resale_balanced"], result["resale_max"],
                     result["evidence_level"], result["max_bid"],
                     result["estimated_days"], result["valuation_refreshed_at"],
+                    result["identity_level"], result["valuation_basis"],
+                    result["evidence_score"], result["rank_score"], result["rank_tier"],
                 ),
             )
             evaluated += 1
@@ -1633,11 +1800,13 @@ class ValuationEngine:
                 UPDATE deals SET valuation_refreshed_at = (
                     SELECT s.refreshed_at FROM valuation_snapshots s
                     WHERE s.product_key = deals.product_key
+                      AND s.invalidated_at IS NULL
                     ORDER BY s.id DESC LIMIT 1
                 )
                 WHERE product_key IN (
                     SELECT s.product_key FROM valuation_snapshots s
                     WHERE s.product_key = deals.product_key
+                      AND s.invalidated_at IS NULL
                 )
                 """
             )

@@ -96,6 +96,8 @@ def _listing_row(row: dict[str, Any]) -> dict[str, Any]:
         "product_key": row.get("product_key"),
         "product_name": row.get("product_name"),
         "identification_confidence": row.get("identification_confidence") or 0,
+        "identity_level": row.get("identity_level") or None,
+        "identity_basis": _parse_json(row.get("identity_basis"), []),
         "is_faulty": bool(row.get("is_faulty")),
         "is_wanted": bool(row.get("is_wanted")),
         "is_auction": bool(row.get("is_auction")),
@@ -126,8 +128,12 @@ def _deal_row(row: dict[str, Any]) -> dict[str, Any]:
         "resale_high": row.get("resale_high"),
         "confidence": row.get("confidence") or 0,
         "evidence_level": row.get("evidence_level"),
+        "evidence_score": row.get("evidence_score"),
+        "valuation_basis": row.get("valuation_basis") or "asking_only",
         "sample_size": row.get("sample_size") or 0,
         "valuation_method": row.get("valuation_method"),
+        "rank_score": row.get("rank_score"),
+        "rank_tier": row.get("rank_tier"),
         "valuation_refreshed_at": row.get("valuation_refreshed_at"),
         "resale_strategy": row.get("resale_strategy"),
         "resale_quick": row.get("resale_quick"),
@@ -405,6 +411,8 @@ async def list_deals(
                d.risk_reasons, d.reasons, d.computed_at, d.evidence_level,
                d.resale_strategy, d.resale_quick, d.resale_balanced, d.resale_max,
                d.max_bid, d.estimated_days, d.valuation_refreshed_at,
+               d.valuation_basis, d.evidence_score,
+               d.rank_score, d.rank_tier,
                r.decision AS review_decision, r.decided_at AS review_decided_at
         {joins}
         WHERE {where_sql}

@@ -21,8 +21,8 @@ import {
 } from "lucide-react";
 import { api, ApiError } from "../lib/api";
 import type { CompsResponse, DealDetail } from "../lib/types";
-import { CATEGORY_LABELS, conditionLabel, confidenceTone, methodLabel, money, pct, timeAgo, timeUntil } from "../lib/format";
-import { cn, ConfidenceMeter, MarketBadge, ProductImage, ScoreRing } from "./ui";
+import { CATEGORY_LABELS, conditionLabel, methodLabel, money, pct, timeAgo, timeUntil } from "../lib/format";
+import { cn, EvidenceMeter, MarketBadge, ProductImage, ScoreRing } from "./ui";
 
 interface Props {
   dealId: number;
@@ -272,8 +272,17 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
     }
   }
 
-  const tone = confidenceTone(deal?.confidence ?? 0);
   const breakdown = deal?.breakdown;
+  const basisLabel =
+    deal?.valuation_basis === "completed_sales"
+      ? "completed sales"
+      : deal?.valuation_basis === "one_completed_sale"
+        ? "one completed sale blended with asking prices"
+        : deal?.valuation_basis === "cex_retail_only"
+          ? "a CeX retail anchor only"
+          : deal?.valuation_basis === "modelled_component"
+            ? "a model built from the installed component"
+            : "live asking prices, not completed sales";
   const purchase = breakdown?.purchase;
   const resale = breakdown?.resale;
   const risk = breakdown?.risk;
@@ -477,7 +486,7 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
                       </p>
                     </div>
                     <div className="w-28 shrink-0">
-                      <ConfidenceMeter value={deal.confidence} />
+                      <EvidenceMeter level={deal.evidence_level} />
                     </div>
                   </div>
                   <ul className="mt-3 space-y-2">
@@ -488,7 +497,15 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
                       </li>
                     ))}
                   </ul>
-                  <p className="mt-3 text-[11px] text-mist-400">
+                  <p className="mt-3 text-[11px] leading-relaxed text-mist-400">
+                    Identity: <span className="font-medium text-mist-200">{deal.identity_level ?? "insufficient"}</span>
+                    {deal.identity_basis && deal.identity_basis.length > 0 && (
+                      <> ({deal.identity_basis.map((item) => item.replace(/_/g, " ")).join(", ")})</>
+                    )}
+                    {" · "}Resale basis: {basisLabel}
+                    {deal.rank_tier ? ` · opportunity ranking: ${deal.rank_tier}` : ""}
+                  </p>
+                  <p className="mt-1 text-[11px] text-mist-400">
                     Evidence: <span className="font-medium text-mist-200">{deal.evidence_level ?? "insufficient"}</span>
                     {evidenceInfo?.sources && Object.keys(evidenceInfo.sources).length > 0 && (
                       <> from {Object.entries(evidenceInfo.sources).map(([name, count]) => `${name} ${count}`).join(", ")}</>
@@ -508,11 +525,11 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
                       {deal.max_bid ? ` Maximum profitable bid ${money(deal.max_bid)} — bid yourself before it ends.` : " No profitable bid ceiling at this price."}
                     </p>
                   )}
-                  <p className={cn("mt-3 text-[11px]", tone.text)}>
-                    {tone.label}
+                  <p className="mt-3 text-[11px] text-mist-400">
                     {resale?.range_supported && deal.resale_low != null && deal.resale_high != null
-                      ? ` · supported range ${money(deal.resale_low)}–${money(deal.resale_high)}`
-                      : " · resale range unavailable: evidence is too thin or dispersed"}
+                      ? `Supported resale range ${money(deal.resale_low)}–${money(deal.resale_high)}.`
+                      : "Resale range unavailable: evidence is too thin or dispersed."}
+                    {breakdown?.ranking?.note ? ` ${breakdown.ranking.note}` : ""}
                   </p>
                   {resale?.range_supported && (
                     <p className="mt-1 text-[10px] leading-relaxed text-mist-500">
@@ -521,7 +538,7 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
                   )}
                   {evidenceInfo?.confidence_low != null && evidenceInfo?.confidence_high != null && (
                     <p className="mt-1 text-[10px] leading-relaxed text-mist-500">
-                      80% evidence interval {money(evidenceInfo.confidence_low)}–{money(evidenceInfo.confidence_high)} from {evidenceInfo.sold_evidence ? "completed sales" : "live asking prices"}.
+                      Middle 80% of comparable prices: {money(evidenceInfo.confidence_low)}–{money(evidenceInfo.confidence_high)} ({evidenceInfo.sold_evidence ? "completed sales" : "live asking prices"}).
                       {evidenceInfo.trend_note ? ` ${evidenceInfo.trend_note}` : ""}
                     </p>
                   )}
@@ -616,6 +633,21 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
                       </div>
                     )}
                   </div>
+                  {(breakdown?.rejected_comps ?? []).length > 0 && (
+                    <details className="mt-3 rounded-lg border border-ink-700/60 bg-ink-850/40 px-3 py-2">
+                      <summary className="cursor-pointer text-[11px] font-medium text-mist-400">
+                        Rejected comparables ({breakdown?.rejected_comps?.length}) — excluded before pricing
+                      </summary>
+                      <ul className="mt-2 space-y-1.5">
+                        {breakdown?.rejected_comps?.map((comp, index) => (
+                          <li key={`${comp.title}-${index}`} className="text-[11px] leading-relaxed text-mist-500">
+                            <span className="text-mist-300">{comp.title}</span> · {money(comp.price)} · {comp.marketplace}
+                            <span className="block text-amber-300/80">{comp.reason}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
                   {breakdown?.valuation_notes && breakdown.valuation_notes.length > 0 && (
                     <ul className="mt-3 space-y-1.5">
                       {breakdown.valuation_notes.map((note, index) => (
