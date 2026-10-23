@@ -44,7 +44,19 @@ FULL_REFRESH_HOURS = 6
 
 # Bump when evaluation logic changes so the next refresh cannot reuse deals
 # computed by the previous rules.
-VALUATION_REVISION = 4
+VALUATION_REVISION = 7
+
+
+def _identity_basis(raw: Any) -> list[str]:
+    if isinstance(raw, list):
+        return [str(item) for item in raw]
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return [str(item) for item in parsed] if isinstance(parsed, list) else []
 
 
 def _fingerprint(payload: Any) -> str:
@@ -195,6 +207,26 @@ class MarketEstimate:
     confidence_basis: str = "asking_only"
     calibration_active: bool = False
     rejected: list[dict[str, Any]] = field(default_factory=list)
+    # Comparables that actually contribute to the central estimate, separate
+    # from observations kept only as market context.
+    basis_size: int = 0
+    context_comps: list[dict[str, Any]] = field(default_factory=list)
+    cex_reference: dict[str, Any] | None = None
+    uncertain_count: int = 0
+
+
+def _provisional_evidence_ok(sample_size: int, uncertain_count: int) -> bool:
+    """Whether uncertain variants are a small enough minority to recommend.
+
+    Zero tolerance rejected genuinely supported deals with 90+ exact comps and
+    a handful of titles that omitted storage. A few provisional rows may support
+    context, but they must never dominate the pool or stand in for an exact
+    match.
+    """
+    exact = max(0, int(sample_size) - int(uncertain_count))
+    if exact < MIN_COMPS:
+        return False
+    return int(uncertain_count) <= max(2, int(exact * 0.25))
 
 
 def _rank_opportunity(
@@ -335,6 +367,28 @@ def _clean_and_weight(
             adjusted *= asking_factor
             weight = 0.62 if row.get("marketplace") != row.get("candidate_marketplace") else 0.55
             weight *= recency * seller_weight(row.get("raw_json"))
+        if str(row.get("match_quality") or "exact") == "uncertain":
+            # A provisional variant match contributes, but never at the same
+            # strength as a confirmed one.
+            weight *= 0.55
+        if source == "cex":
+            adjustment_reason = (
+                "CeX retail converted to a private-resale level using this "
+                "product's observed asking market"
+            )
+        elif is_sold:
+            adjustment_reason = "Completed sale used at face value"
+        else:
+            adjustment_reason = (
+                f"Asking price adjusted for negotiation (x{asking_factor:.2f})"
+                + (
+                    f" and normalised from {condition} condition (x{1 / factor:.2f})"
+                    if abs(factor - 1.0) > 0.005
+                    else ""
+                )
+            )
+        if str(row.get("match_quality") or "exact") == "uncertain":
+            adjustment_reason += "; variant match provisional"
         cleaned.append(
             {
                 **row,
@@ -344,6 +398,7 @@ def _clean_and_weight(
                 "weight": max(0.05, weight),
                 "is_sold": is_sold,
                 "cex_retail": price if source == "cex" else None,
+                "adjustment_reason": adjustment_reason,
                 "seller": row.get("seller") or row.get("source") or "",
             }
         )
@@ -679,6 +734,9 @@ def _estimate_from_rows(
     kept = sold_pool + asking_pool + cex_pool
     if not kept:
         return MarketEstimate(None, None, None, 0.0, 0, "insufficient_data")
+    uncertain_count = sum(
+        1 for comp in kept if str(comp.get("match_quality") or "exact") == "uncertain"
+    )
     distinct_sources = sorted(
         {
             str(comp.get("marketplace") or comp.get("source") or "")
@@ -871,6 +929,12 @@ def _estimate_from_rows(
     if len(kept) < MIN_COMPS:
         confidence = min(confidence, 0.28)
         notes.append("Fewer than three usable comparables: insufficient evidence for a confident estimate.")
+    if uncertain_count:
+        confidence *= 0.85
+        notes.append(
+            f"{uncertain_count} comparable(s) had an unstated or ambiguous variant and were "
+            "weighted provisionally; they are not exact matches."
+        )
     if iqr_ratio > 2.5:
         confidence *= 0.72
         notes.append("Comparable prices are widely dispersed; the lower quartile is used to avoid inflation.")
@@ -891,11 +955,14 @@ def _estimate_from_rows(
             f"for {kind} validated on held-out products."
         )
 
-    range_supported = len(kept) >= 3 and spread <= 0.75
+    range_supported = len(kept) >= 3 and spread <= 0.75 and uncertain_count == 0
     range_basis = (
         "Interquartile range of condition-normalised comparable prices; not a guaranteed sale price."
-        if range_supported else
-        "Too few comparable observations or dispersion is too wide for a defensible range."
+        if range_supported else (
+            "The range is withheld because at least one comparable has an unstated variant."
+            if uncertain_count else
+            "Too few comparable observations or dispersion is too wide for a defensible range."
+        )
     )
 
     level = _evidence_level(
@@ -905,6 +972,8 @@ def _estimate_from_rows(
         sources=len(distinct_sources),
         freshness=freshness,
     )
+    if uncertain_count and level in {"moderate", "strong"}:
+        level = "limited"
     notes.append(_evidence_sentence(level, sold_count, len(kept), distinct_sources))
 
     # Prepared/tested items genuinely attract more than untested ones, but the
@@ -966,27 +1035,74 @@ def _estimate_from_rows(
             strategy["expected"] = round(min(float(strategy["expected"]), new_ceiling), 2)
             strategy["ask"] = round(min(float(strategy["ask"]), new_ceiling), 2)
 
-    public_comps = []
-    for comp in sorted(kept, key=lambda c: (not bool(c["is_sold"]), -float(c["weight"])))[:12]:
+    basis_ids = {id(comp) for comp in basis}
+
+    def public_comp(comp: dict[str, Any], *, role: str, context_reason: str = "") -> dict[str, Any]:
         evidence = "manual_sold" if comp["is_sold"] and comp.get("source") == "manual" else (
             "sold" if comp["is_sold"] else ("cex" if comp.get("source") == "cex" else "asking")
         )
-        public_comps.append(
-            {
-                "title": comp.get("title"),
-                "price": round(float(comp.get("price") or 0), 2),
-                "adjusted_price": comp["adjusted_price"],
-                "marketplace": comp.get("marketplace") or comp.get("source"),
-                "condition": comp.get("condition_norm") or "unknown",
-                "is_sold": bool(comp.get("is_sold")),
-                "evidence": evidence,
-                "source": comp.get("source"),
-                "postage": round(float(comp.get("postage") or 0), 2),
-                "notes": comp.get("notes"),
-                "url": comp.get("url"),
-                "observed_at": comp.get("observed_at") or comp.get("last_seen"),
-            }
+        return {
+            "title": comp.get("title"),
+            "price": round(float(comp.get("price") or 0), 2),
+            "adjusted_price": comp["adjusted_price"],
+            "marketplace": comp.get("marketplace") or comp.get("source"),
+            "condition": comp.get("condition_norm") or "unknown",
+            "is_sold": bool(comp.get("is_sold")),
+            "evidence": evidence,
+            "source": comp.get("source"),
+            "postage": round(float(comp.get("postage") or 0), 2),
+            "notes": comp.get("notes"),
+            "url": comp.get("url"),
+            "observed_at": comp.get("observed_at") or comp.get("last_seen"),
+            "identified_variant": comp.get("identified_variant"),
+            "match_quality": comp.get("match_quality") or "exact",
+            "match_reason": comp.get("match_reason") or "",
+            "weight": round(float(comp.get("weight") or 0), 3),
+            "adjusted": abs(float(comp["adjusted_price"]) - float(comp.get("price") or 0)) > 0.005,
+            "adjustment_reason": comp.get("adjustment_reason") or "",
+            "contributes": role == "basis",
+            "role": role,
+            "context_reason": context_reason,
+        }
+
+    public_comps = [
+        public_comp(comp, role="basis")
+        for comp in sorted(
+            basis, key=lambda c: (not bool(c["is_sold"]), -float(c["weight"]))
+        )[:12]
+    ]
+    context_reason = (
+        "Completed-sale comparables set the central estimate; this observation is context only."
+        if sold_count >= 2
+        else "This observation is not part of the central estimate's evidence basis."
+    )
+    context_comps = [
+        public_comp(
+            comp,
+            role="context",
+            context_reason=(
+                "CeX is a shop retail/trade-in reference, not completed-sale evidence."
+                if comp.get("source") == "cex"
+                else context_reason
+            ),
         )
+        for comp in sorted(
+            (item for item in kept if id(item) not in basis_ids),
+            key=lambda c: (not bool(c["is_sold"]), -float(c["weight"])),
+        )[:12]
+    ]
+    cex_reference = None
+    if cex_pool:
+        cex_first = cex_pool[0]
+        cex_reference = {
+            "retail": round(float(cex_first.get("cex_retail") or cex_first.get("price") or 0), 2),
+            "cash": cex_first.get("cex_cash"),
+            "voucher": cex_first.get("cex_voucher"),
+            "grade": cex_first.get("cex_grade"),
+            "url": cex_first.get("url"),
+            "checked_at": cex_first.get("observed_at"),
+            "used_in_estimate": id(cex_first) in basis_ids,
+        }
 
     # The range must respect the same ceiling as the central value. A new
     # PS5 Pro capped at £790 retail must not still show a £944 upper bound.
@@ -1026,6 +1142,10 @@ def _estimate_from_rows(
         market_values=[round(value, 2) for value in values],
         confidence_basis=confidence_basis,
         calibration_active=bool(getattr(config, "calibration_active", False)),
+        basis_size=len(basis),
+        context_comps=context_comps,
+        cex_reference=cex_reference,
+        uncertain_count=uncertain_count,
     )
 
 
@@ -1033,17 +1153,32 @@ class ValuationEngine:
     def __init__(self, db: Database) -> None:
         self.db = db
         self.pricing = PricingDatabase(db)
-        self._comp_cache: dict[tuple[str, str], list[dict[str, Any]]] | None = None
-        self._rejected_cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self._comp_cache: dict[tuple[str, str, str], list[dict[str, Any]]] | None = None
+        self._rejected_cache: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        self._last_rejected: list[dict[str, Any]] = []
         self._estimates: dict[tuple[str, str], Any] = {}
         self._estimate_conditions: dict[tuple[str, str], str] = {}
         self._snapshot_at: dict[str, str] = {}
         self._snapshot_cache: dict[str, str | None] = {}
 
     # --- data gathering -----------------------------------------------------
-    def _market_comps(self, product_key: str, kind: str, exclude_id: int) -> list[dict[str, Any]]:
-        cache_key = (product_key, kind)
+    def _market_comps(
+        self,
+        product_key: str,
+        kind: str,
+        exclude_id: int,
+        candidate: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        signature = _fingerprint(
+            {
+                "key": product_key,
+                "kind": kind,
+                "attrs": candidate.get("attrs") or candidate.get("attrs_json"),
+            }
+        )
+        cache_key = (product_key, kind, signature)
         if self._comp_cache is not None and cache_key in self._comp_cache:
+            self._last_rejected = self._rejected_cache.get(cache_key, [])
             return self._comp_cache[cache_key]
         excluded = exclude_id if self._comp_cache is None else 0
         rows = self.db.query(
@@ -1092,7 +1227,7 @@ class ValuationEngine:
             SELECT id, title, price, condition_norm, marketplace, url, observed_at,
                    is_sold, source, '' AS candidate_marketplace, postage, notes, verified,
                    evidence_confidence, source_id, COALESCE(seller, '') AS seller,
-                   NULL AS raw_json
+                   NULL AS raw_json, product_key
             FROM market_comps
             WHERE product_key = ? AND (kind = ? OR kind IS NULL) AND observed_at >= ?
             ORDER BY is_sold DESC, observed_at DESC LIMIT 120
@@ -1102,7 +1237,10 @@ class ValuationEngine:
         combined = rows + observations + external
         # Identity is checked before any price can influence the estimate. A
         # similar title is not evidence that the same product is being sold.
-        accepted, rejected = split_pool(combined, kind=kind, product_key=product_key)
+        accepted, rejected = split_pool(
+            combined, kind=kind, product_key=product_key, candidate=candidate
+        )
+        self._last_rejected = rejected
         if self._comp_cache is not None:
             self._comp_cache[cache_key] = accepted
             self._rejected_cache[cache_key] = rejected
@@ -1146,6 +1284,9 @@ class ValuationEngine:
             "verified": 0,
             "evidence_confidence": 1.0,
             "source_id": f"cex:{product_key}",
+            "cex_cash": row.get("cash_price"),
+            "cex_voucher": row.get("voucher_price"),
+            "cex_grade": row.get("grade"),
         }
 
     # --- per-listing evaluation --------------------------------------------
@@ -1175,7 +1316,7 @@ class ValuationEngine:
         if unvaluable:
             notes.append("Model could not be identified confidently enough for a resale estimate.")
         else:
-            rows = self._market_comps(product_key, kind, listing_id)
+            rows = self._market_comps(product_key, kind, listing_id, listing)
             rows = [
                 row for row in rows
                 if str(row.get("source_id") or "") != f"listing:{listing_id}"
@@ -1193,7 +1334,7 @@ class ValuationEngine:
             )
             method = estimate.method
             notes = estimate.notes
-            estimate.rejected = self._rejected_cache.get((str(product_key), str(kind)), [])[:20]
+            estimate.rejected = (self._last_rejected or [])[:20]
             if kind == "laptop":
                 # Laptop comparables depend heavily on exact spec, so cap confidence.
                 estimate.confidence = min(estimate.confidence, 0.66)
@@ -1485,6 +1626,12 @@ class ValuationEngine:
                 # the price is attractive. The listing is still visible with
                 # its variant warning; it is no longer a manual-review chore.
                 and "variant_unclear" not in flags
+                # Provisional variant matches are useful context but cannot
+                # dominate an automatic recommendation.
+                and (
+                    estimate is not None
+                    and _provisional_evidence_ok(estimate.sample_size, estimate.uncertain_count)
+                )
                 and not needs_review
                 and (
                     estimate.sold_count >= 1
@@ -1512,6 +1659,11 @@ class ValuationEngine:
                 if estimate.sold_count == 0:
                     reasons.append(
                         "No completed-sale evidence — this is an asking-price estimate, not a verified resale value"
+                    )
+                if estimate.uncertain_count:
+                    reasons.append(
+                        f"{estimate.uncertain_count} comparable(s) have an unstated variant; "
+                        "this is provisional evidence, not an exact match"
                     )
                 if estimate.confidence < 0.5:
                     reasons.append("Lower-confidence valuation — check the exact model and condition")
@@ -1585,8 +1737,12 @@ class ValuationEngine:
                 "other": config.other_costs,
             },
             "comps": estimate.comps if estimate else [],
+            "context_comps": estimate.context_comps if estimate else [],
+            "cex_reference": estimate.cex_reference if estimate else None,
             "rejected_comps": estimate.rejected if estimate else [],
             "sample_size": estimate.sample_size if estimate else 0,
+            "basis_size": estimate.basis_size if estimate else 0,
+            "uncertain_count": estimate.uncertain_count if estimate else 0,
             "sold_count": estimate.sold_count if estimate else 0,
             "asking_count": estimate.asking_count if estimate else 0,
             "dispersion": estimate.dispersion if estimate else None,
@@ -1607,6 +1763,8 @@ class ValuationEngine:
                 "sold_evidence": bool(estimate and estimate.sold_count),
                 "sold_count": estimate.sold_count if estimate else 0,
                 "asking_count": estimate.asking_count if estimate else 0,
+                "basis_size": estimate.basis_size if estimate else 0,
+                "uncertain_count": estimate.uncertain_count if estimate else 0,
                 "method": method,
                 "level": estimate.evidence_level if estimate else "insufficient",
                 "basis": estimate.confidence_basis if estimate else "asking_only",
@@ -1626,7 +1784,7 @@ class ValuationEngine:
             "identity": {
                 "level": identity_level,
                 "confidence": round(identity_confidence, 3),
-                "basis": list(listing.get("identity_basis") or []),
+                "basis": _identity_basis(listing.get("identity_basis")),
                 "product_key": product_key,
                 "product_name": listing.get("product_name"),
             },
@@ -1918,6 +2076,7 @@ class ValuationEngine:
         evaluated = deals = review = 0
         self._comp_cache = {}
         self._rejected_cache = {}
+        self._last_rejected = []
         self._estimates = {}
         self._estimate_conditions = {}
         self._snapshot_cache = {}
@@ -2058,6 +2217,7 @@ class ValuationEngine:
             state_values,
         )
         self._comp_cache = None
+        self._last_rejected = []
         return {
             "evaluated": evaluated,
             "deals": deals,

@@ -21,6 +21,13 @@ from .identification import (
     subject_phrase,
     system_assembly_evidence,
 )
+from .variants import (
+    INCOMPATIBLE,
+    Variant,
+    compare_variants,
+    variant_from_listing,
+    variant_from_title,
+)
 
 _PARTS_RE = re.compile(
     r"\b(?:for\s+parts|spares?\s+or\s+repairs?|faulty|not\s+working|broken|"
@@ -97,7 +104,8 @@ def comparable_rejection(
         re.search(
             r"\b(?:faceplates?|controllers?|gamepads?|kinect|headsets?|carry\s+case|"
             r"travel\s+case|charger|power\s+supply|cable|memory\s+card|sd\s+card|"
-            r"cartridge|disc\s+only|game\s+disc|video\s+game)\b",
+            r"cartridge|disc\s+only|game\s+disc|video\s+game|joysticks?|thumbsticks?|"
+            r"analog\s+stick|hall\s+effect|backplates?|buttons?|triggers?|grips?)\b",
             subject,
             re.I,
         )
@@ -147,12 +155,43 @@ def comparable_rejection(
     return None
 
 
+def _cex_variant(
+    row: dict[str, Any], candidate: Variant | None
+) -> tuple[str, str, str, str]:
+    """CeX quotes are already keyed to the product; only reject a contradictory title."""
+    if candidate is None:
+        return "exact", "", "", ""
+    comp = variant_from_title(str(row.get("title") or ""))
+    if not comp.key:
+        return "exact", "", "", comp.label
+    def without_refurb(value: str | None) -> str:
+        text = value or ""
+        return text[: -len(":refurbished")] if text.endswith(":refurbished") else text
+
+    if without_refurb(comp.key) != without_refurb(candidate.key):
+        match = compare_variants(candidate, comp)
+        if match.status == INCOMPATIBLE:
+            return match.status, match.reason, match.field, match.comparable_variant
+    return "exact", "", "", comp.label
+
+
 def split_pool(
-    rows: list[dict[str, Any]], *, kind: str, product_key: str
+    rows: list[dict[str, Any]],
+    *,
+    kind: str,
+    product_key: str,
+    candidate: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Partition a comparable pool into usable and rejected rows."""
+    """Partition a comparable pool into usable and rejected rows.
+
+    Product-class checks run first, then the structured variant comparison. A
+    conflicting model, generation, display, capacity, VRAM, form factor or
+    condition is rejected outright. An unstated attribute is accepted with an
+    ``uncertain`` marker so it can never be mistaken for an exact match.
+    """
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
+    candidate_variant = variant_from_listing(candidate) if candidate else None
     for row in rows:
         reason = comparable_rejection(row, kind=kind, product_key=product_key)
         if reason:
@@ -163,8 +202,63 @@ def split_pool(
                     "marketplace": row.get("marketplace") or row.get("source"),
                     "evidence": "sold" if row.get("is_sold") else "asking",
                     "reason": reason,
+                    "conflict": "capacity" if reason.startswith("capacity") else None,
+                    "match_quality": INCOMPATIBLE,
+                    "identified_variant": None,
                 }
             )
             continue
-        accepted.append(row)
+        quality = "exact"
+        match_reason = ""
+        conflict = ""
+        identified_variant = None
+        if candidate_variant is not None:
+            source = str(row.get("source") or row.get("marketplace") or "").lower()
+            if source == "cex":
+                quality, match_reason, conflict, identified_variant = _cex_variant(
+                    row, candidate_variant
+                )
+            else:
+                comp_variant = variant_from_title(str(row.get("title") or ""))
+                if (
+                    comp_variant.key is None
+                    and row.get("is_sold")
+                    and row.get("product_key") == product_key
+                ):
+                    # A completed sale explicitly filed under this product key
+                    # is keyed evidence, not a title-similarity guess. The key
+                    # itself is audited separately; its title may be terse.
+                    quality = "exact"
+                    match_reason = "completed sale explicitly keyed to this product"
+                    conflict = ""
+                    identified_variant = candidate_variant.label
+                else:
+                    match = compare_variants(candidate_variant, comp_variant)
+                    quality = match.status
+                    match_reason = match.reason
+                    conflict = match.field
+                    identified_variant = match.comparable_variant
+            if quality == INCOMPATIBLE:
+                rejected.append(
+                    {
+                        "title": row.get("title"),
+                        "price": row.get("price"),
+                        "marketplace": row.get("marketplace") or row.get("source"),
+                        "evidence": "sold" if row.get("is_sold") else "asking",
+                        "reason": match_reason or "incompatible product variant",
+                        "conflict": conflict,
+                        "match_quality": quality,
+                        "identified_variant": identified_variant,
+                    }
+                )
+                continue
+        accepted.append(
+            {
+                **row,
+                "match_quality": quality,
+                "match_reason": match_reason,
+                "variant_conflict": conflict or None,
+                "identified_variant": identified_variant,
+            }
+        )
     return accepted, rejected

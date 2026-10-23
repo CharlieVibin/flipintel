@@ -357,7 +357,11 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                   <Metric label="Asking" value={money(deal.price)} />
                   <Metric label="Landing cost" value={money(deal.purchase_total)} />
-                  <Metric label="Resale estimate" value={money(deal.expected_resale)} tone="accent" />
+                  <Metric
+                    label="Resale estimate"
+                    value={deal.evidence_level === "insufficient" ? "Insufficient" : money(deal.expected_resale)}
+                    tone={deal.evidence_level === "insufficient" ? "muted" : "accent"}
+                  />
                   <Metric
                     label="Net profit"
                     value={`${(deal.net_profit ?? 0) > 0 ? "+" : ""}${money(deal.net_profit)}`}
@@ -601,44 +605,105 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
                       <ShieldCheck className="h-4 w-4 text-mist-400" /> Comparable evidence
                     </h3>
                     <span className="chip border-ink-600 bg-ink-800 text-mist-400">
-                      {breakdown?.sold_count ? `${breakdown.sold_count} sold` : "Asking prices only"}
+                      {breakdown?.sold_count ? `${breakdown.sold_count} sold` : "Asking prices only"} ·{" "}
+                      {breakdown?.basis_size ?? 0} priced
                     </span>
                   </div>
-                  {(breakdown?.comps ?? []).some((comp) => comp.evidence === "cex") && (
-                    <p className="mb-2 text-[10px] leading-relaxed text-mist-500">
-                      CeX is a shop retail and trade-in reference, not a completed private sale. Its retail price is
-                      converted to private-resale level before it contributes to the estimate.
-                    </p>
+                  <p className="mb-2 text-[10px] leading-relaxed text-mist-500">
+                    Only the accepted comparables below contribute to the reported resale estimate. Each row has
+                    passed a structured variant check; a conflicting model, display, capacity, VRAM, form factor or
+                    condition is rejected before pricing.
+                  </p>
+                  {breakdown?.cex_reference && (
+                    <div className="mb-2 rounded-lg border border-ink-700/60 bg-ink-850/40 px-3 py-2">
+                      <p className="text-[10px] font-medium uppercase tracking-wide text-mist-500">CeX shop reference</p>
+                      <p className="mt-1 text-[11px] text-mist-400">
+                        Retail <span className="numeric text-mist-200">{money(breakdown.cex_reference.retail)}</span>
+                        {" · "}Cash {breakdown.cex_reference.cash ? money(breakdown.cex_reference.cash) : "—"}
+                        {" · "}Voucher {breakdown.cex_reference.voucher ? money(breakdown.cex_reference.voucher) : "—"}
+                      </p>
+                      <p className="mt-0.5 text-[10px] text-mist-500">
+                        {breakdown.cex_reference.used_in_estimate
+                          ? "Used as the private-resale anchor, not as a completed sale."
+                          : "Reference only; it is not part of this estimate's evidence basis."}
+                      </p>
+                    </div>
                   )}
                   <div className="space-y-1.5">
-                    {(breakdown?.comps ?? []).slice(0, 8).map((comp, index) => (
-                      <a
+                    {(breakdown?.comps ?? []).slice(0, 12).map((comp, index) => (
+                      <div
                         key={`${comp.url}-${index}`}
-                        href={comp.url ?? "#"}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="group flex items-center justify-between gap-3 rounded-lg border border-ink-700/60 bg-ink-850/50 px-3 py-2 transition hover:border-ink-500 hover:bg-ink-800/70"
+                        className="rounded-lg border border-ink-700/60 bg-ink-850/50 px-3 py-2"
                       >
-                        <div className="min-w-0">
-                          <p className="truncate text-[12px] text-mist-200">{comp.title}</p>
-                          <p className="mt-0.5 text-[10px] text-mist-500">
-                            {comp.marketplace} · {conditionLabel(comp.condition)} ·{" "}
-                            {comp.evidence === "cex" ? "CeX retail reference" : comp.is_sold ? "completed sale" : "live ask"} · {timeAgo(comp.observed_at)}
-                          </p>
+                        <div className="flex items-start justify-between gap-3">
+                          <a
+                            href={comp.url ?? "#"}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="group min-w-0 flex-1"
+                          >
+                            <p className="truncate text-[12px] text-mist-200">{comp.title}</p>
+                            <p className="mt-0.5 truncate text-[10px] text-mist-400">
+                              {comp.identified_variant || "Exact variant not resolved"}
+                            </p>
+                            <p className="mt-0.5 text-[10px] text-mist-500">
+                              {comp.marketplace} · {conditionLabel(comp.condition)} ·{" "}
+                              {comp.evidence === "cex" ? "CeX retail reference" : comp.is_sold ? "completed sale" : "live ask"} ·{" "}
+                              {comp.observed_at
+                                ? new Date(comp.observed_at).toLocaleDateString("en-GB", { day: "2-digit", month: "short" })
+                                : "date unknown"}
+                            </p>
+                            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[9px] text-mist-500">
+                              <span
+                                className={cn(
+                                  "rounded border px-1.5 py-0.5",
+                                  comp.match_quality === "uncertain"
+                                    ? "border-amber-400/30 bg-amber-400/10 text-amber-200"
+                                    : "border-lime-400/25 bg-lime-400/5 text-lime-200",
+                                )}
+                              >
+                                {comp.match_quality === "uncertain" ? "Provisional variant" : "Exact variant"}
+                              </span>
+                              <span>weight {Number(comp.weight ?? 0).toFixed(2)}</span>
+                              {comp.adjusted ? <span>adjusted</span> : null}
+                            </div>
+                            {comp.match_quality === "uncertain" && comp.match_reason && (
+                              <p className="mt-1 text-[10px] text-amber-200/80">{comp.match_reason}</p>
+                            )}
+                            {comp.adjusted && comp.adjustment_reason && (
+                              <p className="mt-1 text-[10px] text-mist-500">{comp.adjustment_reason}</p>
+                            )}
+                          </a>
+                          <div className="shrink-0 text-right">
+                            <p className="numeric text-[12.5px] font-medium text-mist-100">{money(comp.price)}</p>
+                            <p className="numeric text-[9px] text-mist-500">adj. {money(comp.adjusted_price)}</p>
+                          </div>
+                          <ExternalLink className="mt-1 h-3 w-3 shrink-0 text-mist-600" />
                         </div>
-                        <div className="shrink-0 text-right">
-                          <p className="numeric text-[12.5px] font-medium text-mist-100">{money(comp.price)}</p>
-                          <p className="numeric text-[9px] text-mist-500">adj. {money(comp.adjusted_price)}</p>
-                        </div>
-                        <ExternalLink className="h-3 w-3 shrink-0 text-mist-600 transition group-hover:text-mist-300" />
-                      </a>
+                      </div>
                     ))}
                     {(breakdown?.comps ?? []).length === 0 && (
                       <div className="rounded-lg border border-ink-700 bg-ink-850/50 p-4 text-xs text-mist-400">
-                        No comparables were available for this model. This listing is not recommended.
+                        No exact-variant comparables were available. This listing is not recommended and remains a
+                        research candidate until compatible evidence exists.
                       </div>
                     )}
                   </div>
+                  {(breakdown?.context_comps ?? []).length > 0 && (
+                    <details className="mt-3 rounded-lg border border-ink-700/60 bg-ink-850/40 px-3 py-2">
+                      <summary className="cursor-pointer text-[11px] font-medium text-mist-400">
+                        Market context ({breakdown?.context_comps?.length}) — not included in the estimate
+                      </summary>
+                      <ul className="mt-2 space-y-1.5">
+                        {breakdown?.context_comps?.map((comp, index) => (
+                          <li key={`${comp.title}-${index}`} className="text-[11px] leading-relaxed text-mist-500">
+                            <span className="text-mist-300">{comp.title}</span> · {money(comp.price)} · {comp.marketplace}
+                            <span className="block text-mist-500">{comp.context_reason}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
                   {(breakdown?.rejected_comps ?? []).length > 0 && (
                     <details className="mt-3 rounded-lg border border-ink-700/60 bg-ink-850/40 px-3 py-2">
                       <summary className="cursor-pointer text-[11px] font-medium text-mist-400">
@@ -648,7 +713,12 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
                         {breakdown?.rejected_comps?.map((comp, index) => (
                           <li key={`${comp.title}-${index}`} className="text-[11px] leading-relaxed text-mist-500">
                             <span className="text-mist-300">{comp.title}</span> · {money(comp.price)} · {comp.marketplace}
-                            <span className="block text-amber-300/80">{comp.reason}</span>
+                            {comp.identified_variant && (
+                              <span className="block text-[10px] text-mist-500">Identified as {comp.identified_variant}</span>
+                            )}
+                            <span className="block text-amber-300/80">
+                              {comp.conflict ? `${comp.conflict}: ` : ""}{comp.reason}
+                            </span>
                           </li>
                         ))}
                       </ul>

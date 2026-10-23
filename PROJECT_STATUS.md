@@ -5,6 +5,183 @@
 **Runtime:** Python 3.10, FastAPI, SQLite, React 18 + Vite + Tailwind
 **Live dashboard:** http://127.0.0.1:8765 (while the local server is running)
 
+## Session 2026-10-23 — Variant integrity and the Steam Deck LCD failure
+
+This session fixed a real valuation failure without resetting the database or
+removing any historical observation. The target was a live Gumtree listing,
+`Steam deck 1tb lcd`, asking £180. The old pipeline valued it at £290.42 and
+promoted it with £66.23 estimated profit.
+
+### What actually happened
+
+1. The listing was identified as `console:steam-deck`, not an LCD 1TB. Its title
+   said `1tb` but the identifier had no display or storage-origin attribute, so
+   it fell back to the generic Steam Deck key.
+2. That generic key held 66 recent active asks: 54 non-OLED and **12 OLED**,
+   spanning 64GB, 256GB, 512GB and 1TB. The old comparable validator checked
+   product class, capacity and accessories, but had no structured display or
+   variant check, so every OLED row was accepted into the pool.
+3. The valuation was a lower-quartile asking-price estimate over that mixed
+   pool. The £290.42 was **not** an average OLED price, but the OLED asks were
+   accepted evidence, contributed weight and widened the distribution. The
+   result was not an LCD 1TB valuation under any interpretation.
+4. The drawer displayed the same accepted pool, including the OLED rows, so the
+   interface was accurately showing contaminated evidence.
+
+The corrected identity is `console:steam-deck-lcd:1tb:upgraded` with strong
+identity (exact model, display and capacity parsed). It now has **one** exact
+compatible ask: a Vinted `Steam Deck LCD with 1tb` at £79.88, adjusted to £69.28.
+That is marked **insufficient evidence**, has no supported range, and is not a
+deal (`net_profit` -£125.68). The single cheap ask is preserved but cannot be
+used to claim a confident profit. The old generic `console:steam-deck` bucket
+still exists for titles that state no display; it is flagged `variant_unclear`
+and is not used to value the exact LCD listing.
+
+### Structured variant identities
+
+New `app/variants.py` derives a category-specific identity from the title and
+stored attributes. It is not a list of product-name exceptions:
+
+- Steam Deck: LCD/OLED, 64/256/512GB/1TB, factory versus user-upgraded storage.
+- NVIDIA/AMD GPUs: model, Ti/Super/XT/XTX suffix, VRAM, desktop versus laptop.
+  Unique factory VRAM capacities are inferred when omitted (RTX 4070 = 12GB);
+  multi-capacity models (RTX 3060 8/12GB, RTX 4060 Ti 8/16GB, RTX 3080
+  10/12GB) stay unknown and therefore uncertain.
+- Consoles: PS5 base/Slim/Pro, Digital versus Disc, Xbox Series S/X, Switch /
+  OLED / Switch 2, PS4 Pro/Slim. Console storage is compared when both titles
+  state it.
+- Phones/tablets: exact model, Pro/Plus/Max/Ultra suffix and storage.
+- RAM: DDR4 versus DDR5, total capacity, module form factor, ECC, speed and
+  single-stick versus 2x/4x kit arrangement.
+- Storage: capacity, NVMe/SATA/USB interface and form factor.
+- Condition: faulty and refurbished stock cannot price working used hardware.
+
+### Compatibility before pricing
+
+`split_pool` now returns `exact`, `uncertain` or `incompatible` for every row.
+A conflicting critical attribute is rejected regardless of title similarity,
+price or seller. An unstated attribute is accepted only provisionally and is
+never treated as exact. The interface shows the identified variant, the match
+quality, the reason, the weight, the adjustment reason, the date, the source and
+the link. Rejected rows are listed separately. CeX retail/cash/voucher is a
+separate reference, never completed-sale evidence.
+
+The promotion gate allows uncertain rows only as a small minority: at least 3
+exact comps and no more than 25% uncertain (with a floor of 2). This restored
+support for products with 90+ exact comps and a handful of titles that omitted
+storage, while still rejecting generic PS5 pools where 65 of 133 rows had an
+unstated disc/digital edition.
+
+### Database repair and revaluation
+
+All changes are additive; raw listings, observations and snapshots were kept.
+
+| Repair measure | Result |
+| --- | ---: |
+| Listings audited | 74,489 |
+| Listings whose identity changed | 609 |
+| Affected product keys | 449 |
+| Market observations reassigned | 429 |
+| Market observations invalidated but retained | 15 |
+| Cached valuation snapshots newly invalidated | 305 (291 first pass + 14 RAM grouping) |
+| Total invalidated snapshots retained | 672 |
+| Completed-sale comps reassigned (none exist) | 0 |
+| Second audit after repair | 0 changes, idempotent |
+
+Largest identity corrections: 25 PS5 Slim listings moved to the Digital key,
+32 generic Steam Deck LCD listings and 25 generic OLED listings gained their
+display/capacity key, and 187 titles previously classed as laptops were
+reclassified as RAM. Five of the old promoted deals sat on affected keys; two
+had their product key rewritten (the Steam Deck target and a 256GB Steam Deck).
+A full revaluation evaluated 74,395 active listings after the repair.
+
+### Before/after measurements
+
+| Product key | Before | After | Evidence |
+| --- | ---: | ---: | --- |
+| Steam Deck LCD 1TB upgraded (target) | £290.42 mixed pool, 53 comps | £69.28, **insufficient**, 1 exact ask | One Vinted LCD 1TB ask at £79.88; no promotion |
+| Steam Deck LCD 64GB | generic £284.61–290.42 | £255.00 | 6 exact asks, limited |
+| Steam Deck LCD 256GB | generic £284.61–290.42 | £290.42 | 12 exact asks, moderate |
+| Steam Deck LCD 512GB | generic £284.61–290.42 | £323.00 | 2 exact asks, insufficient |
+| Steam Deck OLED 512GB | generic £284.61–290.42 | £374.70 | 17 exact asks, moderate |
+| Steam Deck OLED 1TB | generic £284.61–290.42 | £467.50 | 8 exact asks, moderate |
+| RTX 4060 8GB | £267.48 | £267.48 | 8 comps; key unchanged |
+| RTX 4060 Ti 8GB | £527.00 | £527.00 | 1 comp; insufficient |
+| RTX 4070 12GB | £441.99 | £441.99 | 7 comps; key unchanged |
+| RTX 4070 Ti 12GB | £546.43 | £546.43 | 1 comp; insufficient |
+| RTX 4070 Super 12GB | £577.92 | £577.92 | 3 comps; key unchanged |
+| RTX 4070 Ti Super 16GB | £366.52 | £366.52 | 2 comps; insufficient |
+| RTX 3060 12GB | £158.66 | £158.66 | 10 comps; key unchanged |
+
+The live database had already separated the common GPU suffixes by product key,
+so the audit found no GPU key to rewrite and the GPU estimates did not change.
+That is the measured result; the new validator is regression-tested against the
+GPU conflicts so future title-similarity matches cannot enter those pools.
+
+Promoted deals went from **74 to 67** after correction: 11 old promotions no
+longer pass the gate and 4 became eligible. The 11 demotions are the Steam Deck
+LCD target, seven generic PS5 listings and one PS5 Slim with an unstated
+disc/digital edition, an Xbox Series S 1TB whose corrected margin fell below
+£20, and an HP desktop whose margin fell below £20. The seven generic PS5s are
+held as candidates, not deleted; the edition must be confirmed before they can
+be called opportunities. Three RTX 5070 complete PCs and a PS5 Digital became
+eligible through the corrected valuation. No incompatible comparable remains in
+any promoted deal.
+
+### Evidence uncertainty after the fix
+
+- 5,445 live product snapshots: 2,493 limited, 965 moderate, **1,987
+  insufficient**. 1,841 keys have only one or two comparable observations.
+- 67 promoted deals: 35 limited and 32 moderate; all are asking-only because the
+  database still has zero completed sales.
+- 14 promoted deals include a small uncertain minority; no promoted deal is
+  dominated by uncertain evidence, and every displayed accepted comparable has
+  `contributes=true`. Across all 74,395 active deal rows, no displayed accepted
+  comparable had `contributes=false`.
+- The target's single £79.88 ask is a candidate for targeted research, not a
+  resale estimate. The UI now displays "Insufficient" instead of a prominent
+  resale figure for insufficient-evidence rows.
+
+### Tests and holdout benchmark
+
+- `pytest -q`: **175 passed**.
+- `frontend`: `tsc -b && vite build` passes.
+- Independent hand-labelled holdout: **69 pairs** (52 incompatible, 15 exact, 2
+  uncertain; Steam Deck, NVIDIA/AMD, consoles, phones/tablets, RAM, storage,
+  complete systems, faulty and refurbished). Rejection precision/recall 1.00 and
+  exact precision/recall 1.00 on this set. This is a 69-pair sample, not a claim
+  of universal accuracy.
+- The end-to-end test simulates the old contamination by filing six OLED
+  listings under the LCD key, proves all six are rejected, then adds six genuine
+  LCD asks and proves the resulting estimate uses only them.
+- A separate pipeline test proves an OLED-only LCD candidate has no valuation,
+  is not promoted, and sends **zero** Discord notifications.
+- The audit is idempotent: a second report run after all repairs showed zero
+  identity changes, zero reassignments and zero unresolved evidence.
+
+### Remaining limitations
+
+1. **No completed sales.** All automatic valuations are asking-price estimates.
+   The calibration path remains ready but inactive.
+2. **The LCD 1TB target has one exact ask.** The system correctly refuses to
+   promote it, but it cannot invent a market. Targeted research is needed.
+3. **Console edition ambiguity still blocks generic PS5s.** Seven previously
+   promoted PS5s are held because their titles do not state Disc or Digital.
+   That is a precision choice; review can correct the identity.
+4. **Many thin products remain.** 1,841 product keys have one or two comps and
+   are labelled insufficient. This is disclosure, not a hidden confidence score.
+5. **The holdout is hand-labelled and finite.** It covers 69 pairs; it does not
+   prove every future marketplace title will parse correctly.
+
+### Verification performed
+
+- `GET /api/deals/2594` returns the exact LCD 1TB key, one contributing comparable,
+  `evidence_level=insufficient`, `is_deal=false` and no rejected OLED rows (they
+  were reassigned to OLED keys before pricing, so they never entered the pool).
+- SQLite `PRAGMA integrity_check`: `ok`; `foreign_key_check`: clean; journal WAL.
+- The repaired database still has 74,489 listings, 3,978 tracked product keys and
+  113 CeX quotes; no historical table was reset.
+
 ## Session 2026-10-23 — Resale evidence, auction profitability and a 240-listing benchmark
 
 This phase tested whether the resale numbers are real instead of assuming a
@@ -820,24 +997,24 @@ delete listings or reset the database.
 
 | Metric | Value |
 | --- | --- |
-| Active listings in local DB | 72,820 |
-| Qualifying deals | 66 |
-| Manual review queue (pending) | 962 |
+| Active listings in local DB | 74,395 |
+| Qualifying deals | 67 |
+| Manual review queue (pending) | 937 |
 | Missing-storage phone variants | see grouped review |
 | Probable cross-market duplicates | 63 |
-| Tracked product keys | 3,655 |
+| Tracked product keys | 3,978 |
 | Category-discovered listings | 50,969 |
 | Completed-sale evidence rows | 0 |
 | Sources healthy | Vinted, Gumtree, eBay |
 | eBay | Live with production keys (category BIN + category auctions verified) |
 | CeX | Live via the public search index; retail/cash/voucher stored |
 | Facebook | Unavailable; requires authenticated session |
-| Tests | 128 passed, 0 failed |
+| Tests | 175 passed, 0 failed |
 | Frontend build | Passing |
 
-The strongest current deal is a PlayStation 5 Pro 2TB at £500 with a £833
-resale estimate, 86% evidence score and moderate evidence, labelled
-"Asking only" with a strong identity. Deals range from 59% to 86% evidence;
+The highest-ranked current promotion is an ASUS ProArt RTX 5090 32GB with a
+£5,515 resale estimate from 7 comps (limited evidence); it is still an asking-only
+estimate, not a completed sale. All 67 promotions are labelled Asking only and
 none claims a completed sale. Deep discounts that fail a gate stay in the review
 queue rather than being presented as top-ranked profit.
 
@@ -935,7 +1112,7 @@ cd frontend
 npm run build
 ```
 
-Last verified: **142 passed, 0 failed**; frontend `tsc -b && vite build` passes.
+Last verified: **175 passed, 0 failed**; frontend `tsc -b && vite build` passes.
 
 ## Exact next tasks (in order)
 

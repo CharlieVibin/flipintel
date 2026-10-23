@@ -127,7 +127,9 @@ export function DealCard({ deal, onOpen, onSave, onDismiss, onRestore, archived 
           </div>
           <div>
             <p className="eyebrow">Resale est.</p>
-            <p className="numeric mt-1 text-base font-semibold text-mist-200">{money(deal.expected_resale)}</p>
+            <p className="numeric mt-1 text-base font-semibold text-mist-200">
+              {deal.evidence_level === "insufficient" ? "—" : money(deal.expected_resale)}
+            </p>
           </div>
           <div>
             <p className="eyebrow">Deal</p>

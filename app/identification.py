@@ -116,6 +116,9 @@ COMPATIBILITY_RE = re.compile(
 )
 OEM_RE = re.compile(r"\b(oem|tray\s+cpu|bulk\s+cpu)\b", re.I)
 ES_RE = re.compile(r"\b(engineering\s+sample|qualification\s+sample|\bqs\b|\bes\s+cpu\b)\b", re.I)
+REFURBISHED_RE = re.compile(
+    r"\b(?:refurbished|refurb|renewed|reconditioned|seller\s+refurbished)\b", re.I
+)
 
 # ---------------------------------------------------------------------------
 # Sold-item resolution: what is being sold, not which names appear
@@ -294,11 +297,25 @@ def identity_reliability(
         return 0.0, "insufficient", ["no_exact_model"]
     basis = ["exact_model"]
     score = 0.55
-    if kind == "console":
+    if kind == "console" and product_key.startswith("console:steam-deck"):
+        display = str(attrs.get("display") or "").lower()
+        storage = attrs.get("storage_gb")
+        if display in {"lcd", "oled"}:
+            basis.append("display_parsed")
+            score = 0.78
+        else:
+            score = 0.58
+        if storage:
+            basis.append("capacity_parsed")
+            score += 0.10
+        if display in {"lcd", "oled"} and storage:
+            score = 0.90
+    elif kind == "console":
         specifics = {
-            "console:ps5-pro", "console:ps5-slim", "console:ps5-digital",
+            "console:ps5-pro", "console:ps5-slim", "console:ps5-slim-digital",
+            "console:ps5-digital",
             "console:ps4-pro", "console:ps4-slim", "console:switch-2",
-            "console:switch-oled", "console:switch-lite", "console:steam-deck-oled",
+            "console:switch-oled", "console:switch-lite",
             "console:xbox-one-x", "console:xbox-one-s", "console:xbox-360-s",
             "console:xbox-360-elite", "console:rog-ally-x", "console:new-3ds-xl",
             "console:3ds-xl", "console:new-3ds", "console:2ds-xl", "console:dsi-xl",
@@ -635,6 +652,11 @@ CONSOLE_PATTERNS = (
         r"\b(?:playstation\s+portal|ps5\s+portal|ps\s+portal)\b", re.I
     )),
     ("console:ps5-pro", "PlayStation 5 Pro", re.compile(r"\b(?:ps5|playstation\s*5)\s*pro\b", re.I)),
+    ("console:ps5-slim-digital", "PlayStation 5 Slim Digital", re.compile(
+        r"\b(?:ps5|playstation\s*5)\s*slim\s*(?:digital|disc[- ]?less)\b|"
+        r"\b(?:ps5|playstation\s*5)\s*(?:digital|disc[- ]?less)\s*slim\b",
+        re.I,
+    )),
     ("console:ps5-slim", "PlayStation 5 Slim", re.compile(r"\b(?:ps5|playstation\s*5)\s*slim\b", re.I)),
     ("console:ps5-digital", "PlayStation 5 Digital", re.compile(r"\b(?:ps5|playstation\s*5)\s*(?:digital|disc[- ]?less)\b", re.I)),
     ("console:ps5", "PlayStation 5", re.compile(r"\b(?:ps5|playstation\s*5)\b", re.I)),
@@ -902,6 +924,7 @@ def _nvidia_family(number: str) -> str:
 
 
 def _gpu(text: str) -> tuple[str, str, dict[str, Any]] | None:
+    laptop = bool(re.search(r"\b(?:laptop|notebook|mobile|max-q)\b", text, re.I))
     match = GPU_RE.search(text)
     if match:
         prefix = match.group(1).lower()
@@ -923,12 +946,15 @@ def _gpu(text: str) -> tuple[str, str, dict[str, Any]] | None:
         vram = int(vram_match.group(1)) if vram_match else None
         if vram:
             key += f"-{vram}gb"
+        if laptop:
+            key += ":laptop"
         generation = number[:2] if prefix == "rtx" and number.startswith(("40", "50")) else (
             number[:2] if prefix == "gtx" and number.startswith("16") else number[:2]
         )
         attrs = {
             "brand": "NVIDIA", "family": prefix.upper(), "model": number,
             "suffix": label_suffix or None, "generation": generation, "vram_gb": vram,
+            "form_factor": "laptop" if laptop else "desktop",
         }
         return key, name, attrs
     match = GPU_MODEL_THEN_BRAND_RE.search(text)
@@ -941,9 +967,12 @@ def _gpu(text: str) -> tuple[str, str, dict[str, Any]] | None:
         vram = int(vram_match.group(1)) if vram_match else None
         if vram:
             key += f"-{vram}gb"
+        if laptop:
+            key += ":laptop"
         return key, name, {
             "brand": "NVIDIA", "family": prefix.upper(), "model": number,
             "suffix": suffix_raw or None, "generation": number[:2], "vram_gb": vram,
+            "form_factor": "laptop" if laptop else "desktop",
         }
     match = GPU_GEFORCE_BARE_RE.search(text) or GPU_NVIDIA_BARE_RE.search(text)
     if match:
@@ -956,9 +985,12 @@ def _gpu(text: str) -> tuple[str, str, dict[str, Any]] | None:
         vram = int(vram_match.group(1)) if vram_match else None
         if vram:
             key += f"-{vram}gb"
+        if laptop:
+            key += ":laptop"
         return key, name, {
             "brand": "NVIDIA", "family": prefix.upper(), "model": number,
             "suffix": suffix_raw or None, "generation": number[:2], "vram_gb": vram,
+            "form_factor": "laptop" if laptop else "desktop",
         }
     match = GPU_LEGACY_RE.search(text)
     if match:
@@ -970,9 +1002,12 @@ def _gpu(text: str) -> tuple[str, str, dict[str, Any]] | None:
         vram = int(vram_match.group(1)) if vram_match else None
         if vram:
             key += f"-{vram}gb"
+        if laptop:
+            key += ":laptop"
         return key, name, {
             "brand": "NVIDIA", "family": prefix.upper(), "model": number,
             "suffix": suffix_raw or None, "generation": number[:2], "vram_gb": vram,
+            "form_factor": "laptop" if laptop else "desktop",
         }
     match = AMD_GPU_RE.search(text)
     if match:
@@ -983,18 +1018,24 @@ def _gpu(text: str) -> tuple[str, str, dict[str, Any]] | None:
         key = f"gpu:rx-{number}" + (f"-{suffix_raw}" if suffix_raw else "")
         if vram:
             key += f"-{vram}gb"
+        if laptop:
+            key += ":laptop"
         name = f"AMD Radeon RX {number}" + (f" {suffix_raw.upper()}" if suffix_raw else "")
         return key, name, {
             "brand": "AMD", "model": number, "suffix": suffix_raw or None,
             "generation": number[:2], "vram_gb": vram,
+            "form_factor": "laptop" if laptop else "desktop",
         }
     match = ARC_GPU_RE.search(text)
     if match:
         family = match.group(1).lower()
         number = match.group(2)
-        key = f"gpu:arc-{family}{number}"
+        key = f"gpu:arc-{family}{number}" + (":laptop" if laptop else "")
         name = f"Intel Arc {family.upper()}{number}"
-        return key, name, {"brand": "Intel", "model": number}
+        return key, name, {
+            "brand": "Intel", "model": number,
+            "form_factor": "laptop" if laptop else "desktop",
+        }
     return None
 
 
@@ -1069,6 +1110,10 @@ def _ram(text: str) -> tuple[str, str, dict[str, Any]] | None:
     speed = int(speed_match.group(1)) if speed_match else None
     kit_count = int(kit.group(1)) if kit else None
     kit_size = int(kit.group(2)) if kit else None
+    if not kit and re.search(r"\bsingle\s+(?:stick|module|dimm)\b", text, re.I):
+        # A single 16GB module is not the same sellable product as a 2x8GB
+        # dual-channel kit even though both total 16GB.
+        kit_count, kit_size = 1, capacity
     if re.search(r"\b(ecc|registered|server|rdimm|lrdimm)\b", text):
         form = "ecc"
     elif re.search(r"\b(sodimm|so-dimm|laptop|notebook)\b", text):
@@ -1187,6 +1232,102 @@ def _hdd(text: str) -> tuple[str, str, dict[str, Any]] | None:
     return key, name, {"interface": "usb" if external else "sata", "capacity_gb": int(capacity)}
 
 
+def _to_gb(value: str, unit: str) -> int:
+    return int(value) * 1024 if unit.lower() == "tb" else int(value)
+
+
+def _steam_internal_capacity(text: str) -> int | None:
+    """Steam Deck capacity, ignoring SD-card storage mentioned in the title."""
+    for match in re.finditer(r"\b(\d{1,4})\s*(gb|tb)\b", text, re.I):
+        value = _to_gb(match.group(1), match.group(2))
+        if not 8 <= value <= 4096:
+            continue
+        neighbourhood = text[max(0, match.start() - 20) : match.end() + 20]
+        if re.search(r"\b(?:micro\s*sd|microsd|sd\s*card|memory\s*card)\b", neighbourhood, re.I):
+            continue
+        return value
+    return None
+
+
+def _steam_deck(text: str) -> tuple[str, str, dict[str, Any]] | None:
+    """Valve Steam Deck needs its own identity: LCD/OLED and storage are price-critical."""
+    if not re.search(r"\bsteam\s+deck\b", text, re.I):
+        return None
+    if re.search(r"\b(?:non[- ]?oled|not\s+oled)\b", text, re.I):
+        display = "lcd"
+    elif re.search(r"\boled\b", text, re.I):
+        display = "oled"
+    elif re.search(r"\blcd\b", text, re.I):
+        display = "lcd"
+    else:
+        display = "unknown"
+
+    upgrade_from_to = re.search(
+        r"\b(\d{1,4})\s*(gb|tb)\s*(?:ssd|nvme|storage)?\s*(?:upgraded?|upgrade)\s*"
+        r"(?:to|with)\s*(\d{1,4})\s*(gb|tb)\b",
+        text,
+        re.I,
+    )
+    upgrade_to = re.search(
+        r"\b(?:upgraded?|upgrade)\s*(?:to|with)?\s*(?:a\s*)?(\d{1,4})\s*(gb|tb)\b",
+        text,
+        re.I,
+    )
+    factory_storage: int | None = None
+    storage: int | None = None
+    origin: str = "unstated"
+    if upgrade_from_to:
+        factory_storage = _to_gb(upgrade_from_to.group(1), upgrade_from_to.group(2))
+        storage = _to_gb(upgrade_from_to.group(3), upgrade_from_to.group(4))
+        origin = "upgraded"
+    elif upgrade_to:
+        storage = _to_gb(upgrade_to.group(1), upgrade_to.group(2))
+        origin = "upgraded"
+    else:
+        storage = _steam_internal_capacity(text)
+
+    if display == "unknown" and storage in {64, 256}:
+        # Valve never sold a 64GB or 256GB OLED; the capacity proves LCD.
+        display = "lcd"
+    if storage and origin != "upgraded":
+        if display == "lcd" and storage >= 1024:
+            origin = "upgraded"
+        elif display == "lcd" and storage in {64, 256, 512}:
+            origin = "factory"
+        elif display == "oled" and storage in {512, 1024}:
+            origin = "factory"
+
+    base = "console:steam-deck"
+    if display == "oled":
+        base += "-oled"
+    elif display == "lcd":
+        base += "-lcd"
+    key = base
+    if storage:
+        label = f"{storage // 1024}tb" if storage >= 1024 and storage % 1024 == 0 else f"{storage}gb"
+        key += f":{label}"
+    if origin == "upgraded" and storage:
+        key += ":upgraded"
+
+    display_label = {"oled": "OLED", "lcd": "LCD"}.get(display, "")
+    cap_label = ""
+    if storage:
+        cap_label = f"{storage // 1024}TB" if storage >= 1024 and storage % 1024 == 0 else f"{storage}GB"
+    name = "Valve Steam Deck" + (f" {display_label}" if display_label else "") + (
+        f" {cap_label}" if cap_label else ""
+    ) + (" (upgraded storage)" if origin == "upgraded" else "")
+    attrs: dict[str, Any] = {
+        "family": "steam-deck",
+        "display": display,
+        "storage_origin": origin,
+    }
+    if storage:
+        attrs["storage_gb"] = storage
+    if factory_storage:
+        attrs["factory_storage_gb"] = factory_storage
+    return key, name, attrs
+
+
 def _console(text: str) -> tuple[str, str, dict[str, Any]] | None:
     """Match consoles without swallowing games or compatibility mentions."""
     # A listing that starts with a component ("RAM 64GB ... (PS5 Pro
@@ -1194,6 +1335,9 @@ def _console(text: str) -> tuple[str, str, dict[str, Any]] | None:
     # are never the console itself.
     if re.match(r"^(?:ram|memory|ddr[45]|ssd|nvme|hdd|hard\s+drive)\b", text, re.I):
         return None
+    steam = _steam_deck(text)
+    if steam:
+        return steam
     if (
         CONSOLE_GAME_RE.search(text)
         and not CONSOLE_CUE_RE.search(text)
@@ -1250,8 +1394,36 @@ def _console(text: str) -> tuple[str, str, dict[str, Any]] | None:
             tb_match = re.search(r"\b(1|2)\s*tb\b", text, re.I)
             if tb_match:
                 capacity = int(tb_match.group(1)) * 1024
-        attrs = {"storage_gb": capacity} if capacity else {}
+        display = "oled" if re.search(r"\boled\b", text, re.I) else (
+            "lcd" if key.startswith("console:switch") and not re.search(
+                r"\boled\b", text, re.I
+            ) else None
+        )
+        edition = None
+        if key.startswith("console:ps5"):
+            if "digital" in key or re.search(r"\b(?:digital|disc[- ]?less)\b", text, re.I):
+                edition = "digital"
+            elif re.search(r"\b(?:disc|blu[- ]?ray)\s*(?:edition|console|drive)?\b", text, re.I):
+                edition = "disc"
+        revision = "pro" if "-pro" in key else "slim" if "-slim" in key else None
+        attrs: dict[str, Any] = {
+            "platform": key.split(":", 1)[1].split("-", 1)[0],
+            "model": key.split(":", 1)[1],
+            "display": display,
+            "edition": edition,
+            "revision": revision,
+        }
+        if capacity:
+            attrs["storage_gb"] = capacity
         return key, name, attrs
+    return None
+
+
+def _network_lock(text: str) -> str | None:
+    if re.search(r"\b(?:unlocked|factory\s+unlocked|sim\s+free)\b", text, re.I):
+        return "unlocked"
+    if re.search(r"\b(?:network\s+locked|locked\s+to|carrier\s+locked)\b", text, re.I):
+        return "locked"
     return None
 
 
@@ -1260,6 +1432,7 @@ def _phone(text: str, details: str = "") -> tuple[str, str, dict[str, Any]] | No
     # the description ("128GB, unlocked"), which is reliable once the exact
     # handset is already known and avoids leaving hundreds of variants unclear.
     storage_text = details if details and not _phone_storage(text) else text
+    network_lock = _network_lock(text)
     match = IPHONE_RE.search(text)
     if match:
         model = match.group(1)
@@ -1270,7 +1443,7 @@ def _phone(text: str, details: str = "") -> tuple[str, str, dict[str, Any]] | No
         name = f"Apple iPhone {model}" + (f" {variant.title()}" if variant else "")
         if storage:
             name += f" {storage}GB"
-        return key, name, {"storage_gb": storage}
+        return key, name, {"storage_gb": storage, "network_lock": network_lock}
     match = re.search(r"\b(samsung\s+)?galaxy\s+(s|note)\s*(\d{2})\s*(ultra|plus|\+)?\b", text, re.I)
     if match:
         family = match.group(2).lower()
@@ -1282,7 +1455,7 @@ def _phone(text: str, details: str = "") -> tuple[str, str, dict[str, Any]] | No
         name = f"Samsung Galaxy {family.upper()}{number}" + (f" {variant.title()}" if variant else "")
         if storage:
             name += f" {storage}GB"
-        return key, name, {"storage_gb": storage}
+        return key, name, {"storage_gb": storage, "network_lock": network_lock}
     match = re.search(r"\bgoogle\s+pixel\s*(\d{1,2})\s*(pro)?\b", text, re.I)
     if match:
         storage = _phone_storage(storage_text)
@@ -1291,7 +1464,7 @@ def _phone(text: str, details: str = "") -> tuple[str, str, dict[str, Any]] | No
         name = f"Google Pixel {match.group(1)}" + (" Pro" if match.group(2) else "")
         if storage:
             name += f" {storage}GB"
-        return key, name, {"storage_gb": storage}
+        return key, name, {"storage_gb": storage, "network_lock": network_lock}
     return None
 
 
@@ -1782,6 +1955,9 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         flags.append("condition_contradiction")
     if wanted:
         flags.append("wanted_ad")
+    refurbished = bool(REFURBISHED_RE.search(title_clean))
+    if refurbished:
+        flags.append("refurbished")
 
     condition = detect_condition(full_text)
     if faulty and condition != "faulty":
@@ -1950,11 +2126,25 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         and (cpu or cpu_family)
         and re.search(r"\b1[2-8](?:\.\d)?(?:\s*(?:inch|in|\"|”|-inch))?\b", title_clean, re.I)
     )
+    # "16GB DDR4 SODIMM laptop RAM" describes a memory module, not a laptop.
+    # The word "laptop" is a form-factor attribute of the RAM, so a standalone
+    # memory listing must not be swallowed by the laptop branch.
+    laptop_memory_listing = bool(
+        DDR_RE.search(title_clean)
+        and re.search(r"\b(?:ram|memory|dimm|so-?dimm|udimm)\b", title_clean, re.I)
+        and not re.search(
+            r"\b(?:macbook|thinkpad|elitebook|probook|latitude|inspiron|ideapad|"
+            r"legion|omen|victus|zephyrus|katana|nitro|predator|notebook\s+\d|"
+            r"laptop\s+\d)\b",
+            title_clean,
+            re.I,
+        )
+    )
     is_laptop = (
         explicit_laptop
         or branded_laptop_spec
         or (bool(LAPTOP_CUE_RE.search(title_clean)) and not pc_cue)
-    ) and not monitor_wins and not laptop_excluded and not bool(
+    ) and not monitor_wins and not laptop_excluded and not laptop_memory_listing and not bool(
         re.search(r"\byoga\s+tab\b", title_clean, re.I)
     )
     system_assembly = system_assembly_evidence(subject_text)
@@ -1977,14 +2167,18 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     handheld_console = bool(
         console
         and console[0]
-        in {
-            "console:steam-deck", "console:steam-deck-oled", "console:rog-ally",
-            "console:rog-ally-x", "console:legion-go", "console:switch",
-            "console:switch-2", "console:switch-oled", "console:switch-lite",
-            "console:vita", "console:psp", "console:3ds", "console:3ds-xl",
-            "console:new-3ds", "console:new-3ds-xl", "console:2ds", "console:2ds-xl",
-            "console:ds", "console:ds-lite", "console:dsi", "console:dsi-xl",
-        }
+        and (
+            str(console[0]).startswith("console:steam-deck")
+            or console[0]
+            in {
+                "console:rog-ally", "console:rog-ally-x", "console:legion-go",
+                "console:switch", "console:switch-2", "console:switch-oled",
+                "console:switch-lite", "console:vita", "console:psp", "console:3ds",
+                "console:3ds-xl", "console:new-3ds", "console:new-3ds-xl", "console:2ds",
+                "console:2ds-xl", "console:ds", "console:ds-lite", "console:dsi",
+                "console:dsi-xl",
+            }
+        )
     )
     # A GPU plus RAM is still a component bundle, not a complete computer.
     # Only infer a system when there is an actual system cue or several
@@ -2179,6 +2373,11 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         flags.append("variant_unclear")
     if kind == "tablet" and product_key and not attrs.get("storage_gb"):
         flags.append("variant_unclear")
+    if kind == "console" and product_key and str(product_key).startswith("console:steam-deck"):
+        if str(attrs.get("display") or "unknown") not in {"lcd", "oled"} or not attrs.get(
+            "storage_gb"
+        ):
+            flags.append("variant_unclear")
     if kind == "laptop" and product_key and product_key.startswith("laptop:macbook"):
         if not attrs.get("storage_gb") or not attrs.get("ram_gb"):
             flags.append("variant_unclear")
@@ -2363,6 +2562,13 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     identity_conf, identity_level, identity_basis = identity_reliability(
         kind, product_key, attrs, flags, condition
     )
+    if product_key and refurbished:
+        # Refurbished stock is a separate market and must not share a price
+        # snapshot with ordinary used listings.
+        product_key = f"{product_key}:refurbished"
+        if product_name:
+            product_name = f"{product_name} (refurbished)"
+        attrs["refurbished"] = True
     if product_key:
         confidence = min(identity_conf, 1.0)
 

@@ -56,6 +56,104 @@ def _bucket(value: float) -> str:
     return "0"
 
 
+def audit_evidence(conn: sqlite3.Connection) -> dict:
+    """Re-associate stored evidence with the identity its title supports.
+
+    Raw observations are never deleted. An observation whose title no longer
+    supports any exact variant is invalidated rather than left to feed a wrong
+    product. Both the old and new keys are returned so their cached valuations
+    are rebuilt.
+    """
+    now = iso()
+    cache: dict[tuple[str, str], object] = {}
+    observation_updates: list[tuple[str, str, int]] = []
+    observation_invalidations: list[tuple[str, str, int]] = []
+    comp_updates: list[tuple[str, str, int]] = []
+    affected: set[str] = set()
+    observation_reassigned = 0
+    observation_unresolved = 0
+    comp_reassigned = 0
+    comp_unresolved = 0
+
+    def identify(title: str, details: str = ""):
+        cache_key = (title, details)
+        cached = cache.get(cache_key)
+        if cached is None:
+            cached = identify_listing(title or "", details)
+            cache[cache_key] = cached
+        return cached
+
+    # The observation table references listings through a text source_id. A
+    # SQL join on ('listing:' || l.id) cannot use the primary-key index and turns
+    # this audit into a full listings scan per observation, so resolve the
+    # handful of fields once in memory instead.
+    listing_details = {
+        int(row[0]): (row[1], row[2], row[3])
+        for row in conn.execute(
+            "SELECT id, title, description, condition_raw FROM listings"
+        )
+    }
+    for row in conn.execute(
+        "SELECT id, title, source_id, product_key, kind "
+        "FROM market_observations WHERE invalidated_at IS NULL"
+    ):
+        source_id = str(row["source_id"] or "")
+        listing_id = None
+        if source_id.startswith("listing:"):
+            try:
+                listing_id = int(source_id[8:])
+            except ValueError:
+                listing_id = None
+        listing = listing_details.get(listing_id) if listing_id is not None else None
+        listing_title = listing[0] if listing else None
+        details = (
+            f'{(listing[1] if listing else "") or ""} {(listing[2] if listing else "") or ""}'
+            if listing else ""
+        )
+        ident = identify(listing_title or row["title"] or "", details)
+        old_key = str(row["product_key"] or "")
+        old_kind = str(row["kind"] or "")
+        if ident.product_key and (not old_kind or old_kind == ident.kind):
+            if ident.product_key != old_key or ident.kind != old_kind:
+                observation_updates.append((ident.product_key, ident.kind, int(row["id"])))
+                observation_reassigned += 1
+                affected.add(old_key)
+                affected.add(ident.product_key)
+            continue
+        observation_invalidations.append(
+            (now, "variant identity could not be re-established", int(row["id"]))
+        )
+        observation_unresolved += 1
+        affected.add(old_key)
+
+    for row in conn.execute(
+        "SELECT id, title, product_key, kind FROM market_comps"
+    ):
+        ident = identify(row["title"] or "")
+        old_key = str(row["product_key"] or "")
+        old_kind = str(row["kind"] or "")
+        if ident.product_key and (not old_kind or old_kind == ident.kind):
+            if ident.product_key != old_key or ident.kind != old_kind:
+                comp_updates.append((ident.product_key, ident.kind, int(row["id"])))
+                comp_reassigned += 1
+                affected.add(old_key)
+                affected.add(ident.product_key)
+            continue
+        comp_unresolved += 1
+        affected.add(old_key)
+
+    return {
+        "observation_updates": observation_updates,
+        "observation_invalidations": observation_invalidations,
+        "comp_updates": comp_updates,
+        "affected_keys": affected,
+        "observation_reassigned": observation_reassigned,
+        "observation_unresolved": observation_unresolved,
+        "comp_reassigned": comp_reassigned,
+        "comp_unresolved": comp_unresolved,
+    }
+
+
 def audit(conn: sqlite3.Connection, *, sample: int | None = None) -> dict:
     sql = (
         "SELECT id, title, description, condition_raw, category, product_key, "
@@ -131,6 +229,20 @@ def audit(conn: sqlite3.Connection, *, sample: int | None = None) -> dict:
         for old, _new in transitions
         if ":" in old and not old.startswith(("none:", "other:")) and old.split(":", 1)[1] != "None"
     }
+    # A changed attribute can alter compatibility even when the grouping key
+    # itself stayed the same. Invalidate both the old and new keys, not just the
+    # one that disappeared.
+    for old, new in transitions:
+        for label in (old, new):
+            if ":" in label and not label.startswith(("none:", "other:")):
+                affected_keys.add(label.split(":", 1)[1])
+    for row in changed_rows:
+        if row[1]:
+            affected_keys.add(str(row[1]))
+    evidence = audit_evidence(conn)
+    affected_keys |= {
+        str(key) for key in evidence["affected_keys"] if key
+    }
     key_list = [key for key in affected_keys if key]
     live_snapshots = 0
     promoted_rows = 0
@@ -163,6 +275,7 @@ def audit(conn: sqlite3.Connection, *, sample: int | None = None) -> dict:
         "live_snapshots": live_snapshots,
         "total_snapshots": total_snapshots,
         "promoted_on_affected_keys": promoted_rows,
+        "evidence": evidence,
     }
 
 
@@ -174,6 +287,20 @@ def apply(conn: sqlite3.Connection, result: dict, *, revalue: bool) -> dict:
         result["changed_rows"],
     )
     now = iso()
+    evidence = result.get("evidence") or {}
+    conn.executemany(
+        "UPDATE market_observations SET product_key=?, kind=? WHERE id=?",
+        evidence.get("observation_updates") or [],
+    )
+    conn.executemany(
+        "UPDATE market_observations SET invalidated_at=?, invalid_reason=? WHERE id=? "
+        "AND invalidated_at IS NULL",
+        evidence.get("observation_invalidations") or [],
+    )
+    conn.executemany(
+        "UPDATE market_comps SET product_key=?, kind=? WHERE id=?",
+        evidence.get("comp_updates") or [],
+    )
     invalidated = 0
     keys = result["affected_keys"]
     for start in range(0, len(keys), 400):
@@ -201,7 +328,14 @@ def apply(conn: sqlite3.Connection, result: dict, *, revalue: bool) -> dict:
         (now,),
     ).rowcount or 0
     conn.commit()
-    summary = {"invalidated_snapshots": invalidated, "retired_observations": retired}
+    summary = {
+        "invalidated_snapshots": invalidated,
+        "retired_observations": retired,
+        "observations_reassigned": evidence.get("observation_reassigned", 0),
+        "observations_invalidated": evidence.get("observation_unresolved", 0),
+        "market_comps_reassigned": evidence.get("comp_reassigned", 0),
+        "market_comps_unresolved": evidence.get("comp_unresolved", 0),
+    }
     if revalue:
         from app.db import Database
         from app.valuation import ValuationEngine
@@ -252,6 +386,10 @@ def main() -> None:
                     "live_snapshots_on_affected_keys": result["live_snapshots"],
                     "total_snapshots": result["total_snapshots"],
                     "promoted_deals_on_affected_keys": result["promoted_on_affected_keys"],
+                    "observations_reassigned": result["evidence"]["observation_reassigned"],
+                    "observations_invalidated": result["evidence"]["observation_unresolved"],
+                    "market_comps_reassigned": result["evidence"]["comp_reassigned"],
+                    "market_comps_unresolved": result["evidence"]["comp_unresolved"],
                 },
                 indent=2,
             )

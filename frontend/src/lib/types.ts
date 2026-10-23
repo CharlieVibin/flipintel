@@ -89,6 +89,15 @@ export interface Comp {
   notes?: string | null;
   url: string | null;
   observed_at: string | null;
+  identified_variant?: string | null;
+  match_quality?: "exact" | "uncertain" | "incompatible";
+  match_reason?: string | null;
+  weight?: number;
+  adjusted?: boolean;
+  adjustment_reason?: string | null;
+  contributes?: boolean;
+  role?: "basis" | "context";
+  context_reason?: string | null;
 }
 
 export interface CompItem {
@@ -163,14 +172,29 @@ export interface Breakdown {
     max_bid?: number | null;
   };
   comps?: Comp[];
+  context_comps?: Comp[];
+  cex_reference?: {
+    retail: number;
+    cash?: number | null;
+    voucher?: number | null;
+    grade?: string | null;
+    url?: string | null;
+    checked_at?: string | null;
+    used_in_estimate: boolean;
+  } | null;
   rejected_comps?: {
     title: string;
     price: number;
     marketplace: string;
     evidence: string;
     reason: string;
+    conflict?: "display" | "storage" | "capacity" | "model" | "kind" | string | null;
+    match_quality?: string;
+    identified_variant?: string | null;
   }[];
   sample_size?: number;
+  basis_size?: number;
+  uncertain_count?: number;
   sold_count?: number;
   asking_count?: number;
   dispersion?: number | null;
