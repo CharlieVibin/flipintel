@@ -84,7 +84,16 @@ def assess_listing(
     market_ratio: float | None = None
 
     comps = list(getattr(estimate, "comps", []) or []) if estimate is not None else []
-    prices = sorted(
+    # ``comps`` is the twelve-row display slice; it is not a market sample.
+    # Use the full condition-adjusted pool when the estimate carries one so a
+    # verdict cannot flip just because a different marketplace was refreshed
+    # last and took over the visible slice.
+    market_values = sorted(
+        float(value)
+        for value in (getattr(estimate, "market_values", []) or [])
+        if float(value or 0) > 0
+    )
+    prices = market_values or sorted(
         float(comp.get("adjusted_price") or 0)
         for comp in comps
         if float(comp.get("adjusted_price") or 0) > 0

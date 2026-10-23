@@ -296,6 +296,30 @@ def test_cheapest_percentile_zero_still_triggers_deep_discount_review():
     assert risk.level != "high"
 
 
+def test_risk_uses_the_full_market_distribution_not_the_display_slice():
+    # The twelve display comparables can all come from whichever marketplace
+    # was refreshed last. Risk must not use that slice as the market sample.
+    display_slice = [
+        {"adjusted_price": 120, "condition": "good", "price": 120} for _ in range(12)
+    ]
+    full_pool = [190, 195, 198, 200, 200, 205, 205, 210, 212, 215, 220, 230]
+    listing = {"price": 100, "condition_norm": "good", "flags_list": []}
+
+    sliced = assess_listing(
+        listing, SimpleNamespace(comps=display_slice),
+        expected_resale=200, purchase_total=100,
+    )
+    assert "price_anomaly" not in sliced.signals
+
+    full = assess_listing(
+        listing, SimpleNamespace(comps=display_slice, market_values=full_pool),
+        expected_resale=200, purchase_total=100,
+    )
+    assert full.market_ratio is not None and full.market_ratio < 0.55
+    assert full.market_ratio > 0.45
+    assert "price_anomaly" in full.signals
+
+
 def test_component_bundle_is_not_mistaken_for_a_complete_pc():
     bundle = identify_listing("RTX 4070 12GB graphics card + 16GB DDR5 RAM")
     assert bundle.category == "gpu"
@@ -326,6 +350,124 @@ def test_market_observations_are_recorded_and_risk_columns_populated(tmp_path):
         # Re-running refresh is idempotent for the daily observation snapshot.
         engine.refresh(limit=100)
         assert db.scalar("SELECT COUNT(*) FROM market_observations") == 7
+    finally:
+        db.close()
+
+
+def test_incremental_refresh_skips_unchanged_listings(tmp_path):
+    db = Database(tmp_path / "incremental-noop.db")
+    try:
+        for index in range(6):
+            _listing(db, external_id=f"ask-{index}", title=f"RTX 4070 12GB ask {index}", price=300)
+        engine = ValuationEngine(db)
+        first = engine.refresh(limit=100)
+        assert first["full"] == 1
+        assert first["evaluated"] == 6
+        assert db.scalar("SELECT COUNT(*) FROM deals") == 6
+
+        second = engine.refresh(limit=100)
+        assert second["full"] == 0
+        assert second["evaluated"] == 0
+        assert second["keys"] == 0
+        assert db.scalar("SELECT COUNT(*) FROM deals") == 6
+        # A skipped pass must not disturb the existing recommendations.
+        assert db.scalar("SELECT COUNT(*) FROM deals WHERE input_fingerprint IS NULL") == 0
+    finally:
+        db.close()
+
+
+def test_incremental_refresh_revalues_only_the_changed_product_key(tmp_path):
+    db = Database(tmp_path / "incremental-key.db")
+    try:
+        rtx = [
+            _listing(db, external_id=f"rtx-{index}", title=f"RTX 4070 12GB ask {index}", price=300)
+            for index in range(6)
+        ]
+        ps5 = [
+            _listing(
+                db, external_id=f"ps5-{index}", title=f"PlayStation 5 console {index}",
+                price=350, key="console:ps5", kind="console", category="console",
+            )
+            for index in range(6)
+        ]
+        engine = ValuationEngine(db)
+        assert engine.refresh(limit=100)["full"] == 1
+        db.execute("UPDATE deals SET computed_at='sentinel'")
+        db.execute("UPDATE listings SET price=260 WHERE id=?", (rtx[0],))
+
+        result = engine.refresh(limit=100)
+        assert result["full"] == 0
+        assert result["keys"] == 1
+        assert result["evaluated"] == len(rtx)
+        untouched = db.query(
+            "SELECT computed_at FROM deals WHERE listing_id IN (%s)" % ",".join("?" * len(ps5)),
+            tuple(ps5),
+        )
+        assert {row["computed_at"] for row in untouched} == {"sentinel"}
+        changed = db.query_one("SELECT computed_at, purchase_total FROM deals WHERE listing_id=?", (rtx[0],))
+        assert changed["computed_at"] != "sentinel"
+        # Vinted purchase total includes delivery and the buyer-protection fee.
+        assert changed["purchase_total"] == 277.19
+    finally:
+        db.close()
+
+
+def test_incremental_refresh_detects_new_paid_evidence(tmp_path):
+    db = Database(tmp_path / "incremental-evidence.db")
+    try:
+        for index in range(6):
+            _listing(db, external_id=f"ask-{index}", title=f"RTX 4070 12GB ask {index}", price=300)
+        engine = ValuationEngine(db)
+        engine.refresh(limit=100)
+        before = db.query_one(
+            "SELECT expected_resale, confidence FROM deals ORDER BY listing_id LIMIT 1"
+        )
+        now = iso()
+        db.execute(
+            """
+            INSERT INTO market_comps(product_key, marketplace, source, source_id, title,
+                price, kind, condition_norm, is_sold, observed_at, created_at, updated_at)
+            VALUES ('gpu:rtx-4070-12gb', 'ebay', 'manual', 'sold-incremental',
+                'RTX 4070 12GB sold', 420, 'gpu', 'good', 1, ?, ?, ?)
+            """,
+            (now, now, now),
+        )
+        result = engine.refresh(limit=100)
+        assert result["full"] == 0
+        assert result["keys"] == 1
+        assert result["evaluated"] == 6
+        after = db.query_one(
+            "SELECT expected_resale, confidence FROM deals ORDER BY listing_id LIMIT 1"
+        )
+        assert (after["expected_resale"], after["confidence"]) != (
+            before["expected_resale"], before["confidence"]
+        )
+        breakdown = json.loads(
+            db.query_one(
+                "SELECT breakdown FROM deals ORDER BY listing_id LIMIT 1"
+            )["breakdown"]
+        )
+        assert breakdown["sold_count"] >= 1
+    finally:
+        db.close()
+
+
+def test_periodic_full_reconciliation_runs_after_the_interval(tmp_path):
+    db = Database(tmp_path / "incremental-reconcile.db")
+    try:
+        for index in range(6):
+            _listing(db, external_id=f"ask-{index}", title=f"RTX 4070 12GB ask {index}", price=300)
+        engine = ValuationEngine(db)
+        assert engine.refresh(limit=100)["full"] == 1
+        assert engine.refresh(limit=100)["evaluated"] == 0
+
+        db.execute(
+            "UPDATE valuation_state SET value=? WHERE key='last_full_at'",
+            (hours_ago(7),),
+        )
+        result = engine.refresh(limit=100)
+        assert result["full"] == 1
+        assert result["evaluated"] == 6
     finally:
         db.close()
 

@@ -8,7 +8,10 @@ the strength of the price evidence. Ask prices are never labelled as sold.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -30,6 +33,60 @@ from .utils import (
 
 MIN_COMPS = 3
 SUPPORTED_KINDS = {"gpu", "cpu", "ram", "ssd", "motherboard", "pc", "laptop", "console", "monitor", "phone", "tablet", "networking"}
+
+# Incremental refreshes skip unchanged listings, but market drift (ages, new
+# comparables outside a product key, calibration) must still be reconciled.
+FULL_REFRESH_HOURS = 6
+
+# Bump when evaluation logic changes so the next refresh cannot reuse deals
+# computed by the previous rules.
+VALUATION_REVISION = 2
+
+
+def _fingerprint(payload: Any) -> str:
+    return hashlib.sha1(json_dumps(payload).encode("utf-8")).hexdigest()
+
+
+def _config_fingerprint(config: "ValuationConfig") -> str:
+    return _fingerprint(
+        [
+            VALUATION_REVISION,
+            config.min_profit, config.min_roi, config.min_confidence,
+            config.ebay_fvf, config.ebay_fixed_fee, config.resale_channel,
+            config.resale_shipping, config.packaging_cost, config.collection_cost,
+            config.other_costs, config.vinted_buyer_fee_pct,
+            config.vinted_buyer_fee_fixed, config.vinted_shipping,
+            config.asking_to_sold_factor, config.cex_private_factor,
+            config.calibration_active, sorted(config.category_factors.items()),
+        ]
+    )
+
+
+def _listing_fingerprint(listing: dict[str, Any]) -> str:
+    """Everything ``evaluate`` reads from a listing, and nothing that merely
+    records when it was last seen."""
+    try:
+        raw = json.loads(listing.get("raw_json") or "{}")
+    except (TypeError, ValueError):
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    seller_feedback = (
+        raw.get("seller_feedback"), raw.get("seller_feedback_score"),
+        raw.get("seller_registration"),
+    )
+    return _fingerprint(
+        [
+            listing.get("id"), listing.get("marketplace"), listing.get("price"),
+            listing.get("shipping"), listing.get("condition_norm"),
+            listing.get("product_key"), listing.get("listing_kind"),
+            listing.get("identification_confidence"), listing.get("is_faulty"),
+            listing.get("is_wanted"), listing.get("is_bundle"),
+            listing.get("is_auction"), bool(listing.get("image_url")),
+            listing.get("flags"), listing.get("attrs"), listing.get("duplicate_of"),
+            listing.get("first_seen"), listing.get("review_decision"), seller_feedback,
+        ]
+    )
 
 
 @dataclass
@@ -1014,7 +1071,107 @@ class ValuationEngine:
         )
         return len(values)
 
-    def refresh(self, limit: int = 100000) -> dict[str, int]:
+    def _pool_signatures(self, listings: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
+        """Fingerprint every comparable pool from grouped aggregates.
+
+        A product key is re-evaluated only when its pool composition, prices or
+        evidence actually changed. This keeps a scan from recomputing ~20k
+        listings when one marketplace returned a few new items.
+        """
+        parts: dict[tuple[str, str], list[str]] = defaultdict(list)
+        kinds: dict[str, set[str]] = defaultdict(set)
+        for row in self.db.query(
+            """
+            SELECT product_key, listing_kind,
+                   COALESCE(condition_norm, 'unknown') AS condition_norm,
+                   COUNT(*) AS n, ROUND(SUM(price), 2) AS total
+            FROM listings
+            WHERE status='active' AND last_seen >= ? AND product_key IS NOT NULL
+              AND is_faulty=0 AND is_wanted=0 AND is_bundle=0
+              AND COALESCE(condition_norm, 'unknown') != 'faulty'
+              AND price >= 5 AND price <= 25000
+            GROUP BY product_key, listing_kind, condition_norm
+            """,
+            (hours_ago(24 * 30),),
+        ):
+            key = (row["product_key"], row["listing_kind"])
+            parts[key].append(f"L|{row['condition_norm']}|{row['n']}|{row['total']}")
+            kinds[row["product_key"]].add(row["listing_kind"])
+
+        def apply(product_key: str, group_kind: str, piece: str) -> None:
+            targets = [group_kind] if group_kind else list(kinds.get(product_key, ()))
+            for kind in targets:
+                key = (product_key, kind)
+                if key in parts:
+                    parts[key].append(piece)
+
+        for row in self.db.query(
+            """
+            SELECT product_key, COALESCE(kind, '') AS kind,
+                   COUNT(*) AS n, ROUND(SUM(price), 2) AS total
+            FROM market_observations
+            WHERE observed_at >= ?
+            GROUP BY product_key, kind
+            """,
+            (hours_ago(24 * 90),),
+        ):
+            apply(
+                row["product_key"], row["kind"],
+                f"O|{row['kind']}|{row['n']}|{row['total']}",
+            )
+
+        for row in self.db.query(
+            """
+            SELECT product_key, COALESCE(kind, '') AS kind,
+                   COUNT(*) AS n, ROUND(SUM(price), 2) AS total,
+                   MAX(COALESCE(updated_at, created_at, observed_at)) AS latest
+            FROM market_comps
+            WHERE observed_at >= ?
+            GROUP BY product_key, kind
+            """,
+            (hours_ago(24 * 180),),
+        ):
+            apply(
+                row["product_key"], row["kind"],
+                f"C|{row['kind']}|{row['n']}|{row['total']}|{row['latest']}",
+            )
+
+        for row in self.db.query(
+            """
+            SELECT product_key, sell_price, cash_price, status, fetched_at
+            FROM external_quotes WHERE source = 'cex'
+            """
+        ):
+            apply(
+                row["product_key"], "",
+                f"X|{row['sell_price']}|{row['cash_price']}|{row['status']}|{row['fetched_at']}",
+            )
+
+        # A complete PC with too few complete-system comparables is valued from
+        # its GPU pool, so that dependency belongs in the PC key's signature.
+        dependencies: dict[tuple[str, str], set[str]] = defaultdict(set)
+        for listing in listings:
+            if listing.get("listing_kind") != "pc" or not listing.get("product_key"):
+                continue
+            try:
+                attrs = json.loads(listing.get("attrs_json") or "{}")
+            except (TypeError, ValueError):
+                attrs = {}
+            gpu_key = attrs.get("gpu_key") if isinstance(attrs, dict) else None
+            if gpu_key:
+                dependencies[(listing["product_key"], "pc")].add(str(gpu_key))
+
+        signatures: dict[tuple[str, str], str] = {}
+        for key, pieces in parts.items():
+            extra = list(pieces)
+            for gpu_key in sorted(dependencies.get(key, ())):
+                gpu_parts = parts.get((gpu_key, "gpu"))
+                if gpu_parts:
+                    extra.append("G|" + _fingerprint(sorted(gpu_parts)))
+            signatures[key] = _fingerprint(sorted(extra))
+        return signatures
+
+    def refresh(self, limit: int = 100000, full: bool = False) -> dict[str, int]:
         from .calibration import build_calibration
 
         config = ValuationConfig.from_db(self.db)
@@ -1032,17 +1189,52 @@ class ValuationEngine:
             """,
             (hours_ago(24 * 21), limit),
         )
-        import json
         decisions = {
             int(row["listing_id"]): row["decision"]
             for row in self.db.query("SELECT listing_id, decision FROM review_decisions")
         }
-        evaluated = deals = review = 0
-        self._comp_cache = {}
         for listing in rows:
             listing["flags_list"] = json.loads(listing.get("flags") or "[]") if listing.get("flags") else []
             listing["attrs_json"] = listing.get("attrs")
             listing["review_decision"] = decisions.get(int(listing["id"]), "")
+
+        fingerprints = {int(row["id"]): _listing_fingerprint(row) for row in rows}
+        stored = {
+            int(row["listing_id"]): row["input_fingerprint"]
+            for row in self.db.query("SELECT listing_id, input_fingerprint FROM deals")
+        }
+        previous_keys = {
+            (row["product_key"], row["kind"]): row["signature"]
+            for row in self.db.query("SELECT product_key, kind, signature FROM valuation_keys")
+        }
+        signatures = self._pool_signatures(rows)
+        changed_keys = {
+            key for key, signature in signatures.items()
+            if previous_keys.get(key) != signature
+        }
+        config_signature = _config_fingerprint(config)
+        state = {
+            row["key"]: row["value"]
+            for row in self.db.query("SELECT key, value FROM valuation_state")
+        }
+        full = bool(
+            full
+            or config_signature != state.get("config_signature")
+            or (age_hours(state.get("last_full_at")) or 0) >= FULL_REFRESH_HOURS
+        )
+        if full:
+            targets = rows
+        else:
+            targets = []
+            for listing in rows:
+                listing_id = int(listing["id"])
+                key = (listing.get("product_key"), listing.get("listing_kind"))
+                if key in changed_keys or stored.get(listing_id) != fingerprints[listing_id]:
+                    targets.append(listing)
+
+        evaluated = deals = review = 0
+        self._comp_cache = {}
+        for listing in targets:
             result = self.evaluate(listing, config)
             self.db.execute(
                 """
@@ -1051,8 +1243,8 @@ class ValuationEngine:
                     resale_fees, resale_shipping, packaging, net_profit,
                     net_profit_conservative, net_profit_optimistic, roi, score, is_deal,
                     needs_review, review_reason, risk_score, risk_level, risk_reasons,
-                    reasons, breakdown, computed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reasons, breakdown, computed_at, input_fingerprint)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(listing_id) DO UPDATE SET
                     product_key=excluded.product_key, kind=excluded.kind,
                     expected_resale=excluded.expected_resale, resale_low=excluded.resale_low,
@@ -1069,7 +1261,8 @@ class ValuationEngine:
                     risk_score=excluded.risk_score, risk_level=excluded.risk_level,
                     risk_reasons=excluded.risk_reasons,
                     reasons=excluded.reasons,
-                    breakdown=excluded.breakdown, computed_at=excluded.computed_at
+                    breakdown=excluded.breakdown, computed_at=excluded.computed_at,
+                    input_fingerprint=excluded.input_fingerprint
                 """,
                 (
                     result["listing_id"], result["product_key"], result["kind"],
@@ -1083,6 +1276,7 @@ class ValuationEngine:
                     result["review_reason"], result["risk_score"], result["risk_level"],
                     json_dumps(result["risk_reasons"]), json_dumps(result["reasons"]),
                     json_dumps(result["breakdown"]), result["computed_at"],
+                    fingerprints[int(result["listing_id"])],
                 ),
             )
             evaluated += 1
@@ -1099,5 +1293,39 @@ class ValuationEngine:
             ")",
             (hours_ago(24 * 21),),
         )
+        now = iso()
+        stored_keys = signatures if full else {
+            key: signatures[key] for key in changed_keys
+        }
+        if stored_keys:
+            self.db.executemany(
+                """
+                INSERT INTO valuation_keys(product_key, kind, signature, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(product_key, kind) DO UPDATE SET
+                    signature=excluded.signature, updated_at=excluded.updated_at
+                """,
+                [
+                    (product_key, kind, signature, now)
+                    for (product_key, kind), signature in stored_keys.items()
+                ],
+            )
+        state_values = [("config_signature", config_signature, now), ("last_refresh_at", now, now)]
+        if full:
+            state_values.append(("last_full_at", now, now))
+        self.db.executemany(
+            """
+            INSERT INTO valuation_state(key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+            """,
+            state_values,
+        )
         self._comp_cache = None
-        return {"evaluated": evaluated, "deals": deals, "review": review, "observed": observed}
+        return {
+            "evaluated": evaluated,
+            "deals": deals,
+            "review": review,
+            "observed": observed,
+            "keys": len(changed_keys),
+            "full": int(full),
+        }

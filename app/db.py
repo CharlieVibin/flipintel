@@ -174,7 +174,8 @@ CREATE TABLE IF NOT EXISTS deals (
     review_reason TEXT,
     reasons TEXT,
     breakdown TEXT,
-    computed_at TEXT NOT NULL
+    computed_at TEXT NOT NULL,
+    input_fingerprint TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_deals_feed ON deals(is_deal, score DESC);
 CREATE INDEX IF NOT EXISTS idx_deals_profit ON deals(net_profit DESC);
@@ -303,6 +304,7 @@ class Database:
                 "risk_score": "REAL NOT NULL DEFAULT 0",
                 "risk_level": "TEXT",
                 "risk_reasons": "TEXT",
+                "input_fingerprint": "TEXT",
             },
             "scan_runs": {
                 "duplicates": "INTEGER NOT NULL DEFAULT 0",
