@@ -291,29 +291,31 @@ review. Manual CSV remains optional and is not required for scanning or valuatio
 
 | Source | Collection | Notes |
 | --- | --- | --- |
-| Vinted UK | Working | Public catalogue HTML, up to 96 cards per query; title/brand/condition from cards. |
-| Gumtree UK | Working | JSON-LD ItemList is authoritative; descriptions, conditions, images and canonical URLs. Promoted cards excluded. |
-| eBay UK | Code complete, needs keys | Official Browse API, UK marketplace, GBP, fixed-price, newly listed, quota/backoff. |
+| Vinted UK | Working | Category browse verified on all 10 branches; up to 96 cards/page, newest first, marketplace cap at page 10. |
+| Gumtree UK | Working | Category browse verified on all 6 branches; 30 cards/page. JSON-LD is authoritative on search pages, per-card anchors on category pages. |
+| eBay UK | Code complete, needs keys | Official Browse API category search (`category_ids`, no keyword), 200/page, 4 requests/cycle, quota/backoff. Not exercised live. |
 | Facebook Marketplace | Unsupported | Login required; automated collection is not attempted. |
 | CeX UK | Blocked here | Optional anchor only. Cloudflare 403 in this workspace. |
 
-## Measured scan performance (latest successful cycle)
+## Measured scan performance (keyword-cycle baseline, before category discovery)
 
 | Source | Items | Total | Collect | Ingest | Valuation | Duplicates |
 | --- | --- | --- | --- | --- | --- | --- |
 | Vinted | 1,144 | 22.6 s | 18.9 s | 0.5 s | 2.6 s | 0.005 s |
 | Gumtree | 304 | 25.4 s | 22.2 s | 0.2 s | 1.6 s | 0.005 s |
 
-Collection is paced at roughly 1.4–1.8 seconds per query across 12 queries; that
-is deliberate rate-limit protection, not an application bottleneck. Valuation is
-now incremental: only changed listings and product keys whose comparable pool,
-sold evidence or CeX anchor moved are recomputed (1.6–2.6 s in these cycles).
-The six-hour full reconciliation takes about 25 s for ~21k listings and runs in
-the same serialised refresh slot. Measured on a copy of the live database:
-first/full pass **25.3 s** for 20,811 deal rows, a no-op pass **0.7 s**, and a
-single price change **0.7 s** (four listings in one key). After a live scan the
-incrementally maintained 20,968 deal rows matched a fresh full recomputation
-exactly (0 differences).
+That baseline ran 12 keyword queries. Category-first cycles now issue up to 12
+category page requests plus two secondary searches; live category scans measured
+13–21 s for a backfill pass and 6–14 s for an incremental pass (see the benchmark
+above). Collection remains paced at roughly 1.4–1.8 seconds per request; that is
+deliberate rate-limit protection, not an application bottleneck. Valuation is
+incremental: only changed listings and product keys whose comparable pool, sold
+evidence or CeX anchor moved are recomputed. The six-hour full reconciliation
+takes about 25 s at ~21k listings and runs in the same serialised refresh slot.
+Measured at that time on a copy of the live database: first/full pass **25.3 s**
+for 20,811 deal rows, a no-op pass **0.7 s**, and a single price change **0.7 s**
+(four listings in one key). The incrementally maintained deal rows then matched
+a fresh full recomputation exactly (0 differences).
 
 ## Known limitations
 
