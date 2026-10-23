@@ -73,7 +73,7 @@ ACCESSORY_TITLE_RE = re.compile(
     r"\b(backpack|rucksack|carry\s+bag|carry\s+case|travel\s+case|sleeve|laptop\s+bag|"
     r"charger|charging\s+dock|power\s+supply|psu|keyboard|mouse|mousepad|headset|"
     r"headphones|earphones|screws?|screwdriver|stand|bracket|cable|adapter|dock|"
-    r"battery|skin|cover|protector|decal|sticker|replacement|spares?|spare\s+parts|"
+    r"battery|skins?|covers?|protectors?|decals?|stickers?|replacement|spares?|spare\s+parts|"
     r"faceplates?|shell|bezel|hinge|fan\s+only|cooler\s+only|empty\s+box|boxes|cases?|"
     r"nudient|casely|badge|pin\s+badge|bodyguardz|caudabe|velvet\s+caviar|loopy|"
     r"thumb\s*grips?|joy[-\s]?con|game\s+cartridge|splitter|\bhdmi\b|docking\s+station|"
@@ -81,20 +81,21 @@ ACCESSORY_TITLE_RE = re.compile(
     r"flash\s+drive|usb\s+stick|pen\s+drive|enclosure|caddy|housing|digitizer|"
     r"screen\s+assembly|replacement\s+screen|glass\s+only|box\s+only|"
     r"(?:\d+x)?cases?|camera\s+(?:lens\s+)?protection|screen\s+protectors?|"
-    r"box\s+(?:only|for)|(?:empty|original|retail|full)\s+(?:original\s+)?box|"
+    r"box\s+(?:only|for)|empty\s+box|"
     r"packaging(?:\s+set)?|retail\s+packaging|otterbox|spigen|caseology|casetify|"
     r"\bmous\b|dbrand|\bwrap\b|holder|back\s+glass|rear\s+glass|"
-    r"cooling\s+fan|\bfan\b|mid\s*frame|midframe|chassis|casing|lcd|oled\s+assembly|"
-    r"logic\s+board|charging\s+port|sim\s+tray|camera\s+module|privacy\s+(?:screen|filter)|"
-    r"tempered\s+glass|alligator|crocodile|phone\s+case|silicone\s+case|leather\s+case|"
+    r"cooling\s+fan|fan\s+only|mid\s*frame|midframe|chassis|casing|oled\s+assembly|"
+    r"\betui\b|hülle|funda|coque|hoesje|swivel\s+base|"
+    r"logic\s+board|charging\s+port|sim\s+tray|camera\s+module|privacy\s+(?:screen|filter)|"        r"tempered\s+glass|alligator|crocodile|phone\s+case|silicone\s+case|leather\s+case|"
     r"replacement\s+shell|housing\s+only|frame\s+only|lead\s+for|charging\s+cable|"
-    r"accessor(?:y|ies)|stylus|\bpen\b|\bpencil\b|protect(?:or|er)s?|kids|\btoy\b|"
+    r"accessor(?:y|ies)|stylus|\bpen\b|\bpencils?\b|protect(?:or|er)s?|kids|\btoy\b|"
+    r"\betui\b|hülle|funda|coque|hoesje|\bbags?\b|swivel\s+base|carry\s+bag|"
     r"screen\s+only|portfolio|osmo|winnie\s+the\s+pooh|piglet|\bpooh\b|"
     r"controller\s+camera|motion\s+sensor|psvr|ps\s+vr|camera\s+v\d|"
     r"(?:wifi|wi-fi|wireless|network|power|usb|hdmi|controller|button)\s+board|"
     r"charging\s+coil|antenna\s+assembly|(?:wifi|wi-fi|bluetooth)\s+(?:card|module|antenna)|"
     r"phonecase|case\s*20\d{2}|case\s+for|"
-    r"board\s+only)\b",
+    r"clips?|holsters?|board\s+only)\b",
     re.I,
 )
 CONTRACT_RE = re.compile(
@@ -116,12 +117,17 @@ COMPATIBILITY_RE = re.compile(
 OEM_RE = re.compile(r"\b(oem|tray\s+cpu|bulk\s+cpu)\b", re.I)
 ES_RE = re.compile(r"\b(engineering\s+sample|qualification\s+sample|\bqs\b|\bes\s+cpu\b)\b", re.I)
 CONSOLE_BUNDLE_RE = re.compile(
-    r"\b(?:with|plus|and|\+)\s+(?:an?\s+)?(?:"
+    r"(?:\b(?:with|plus|and)\b|\+)\s+(?:an?\s+)?(?:"
     r"\d+\s+(?:extra\s+)?games?"
     r"|(?:\d+\s+)?(?:extra|additional|spare|second|2nd)\s+controllers?"
     r"|\d+\s+controllers?"
     r"|(?:a\s+)?(?:headset|charging\s+dock|memory\s+card)\b"
     r")",
+    re.I,
+)
+ACCESSORY_NOUN_RE = re.compile(
+    r"\b(?:cases?|covers?|protectors?|skins?|sleeves?|bags?|chargers?|cables?|"
+    r"docks?|stands?|brackets?|holders?|clips?|holsters?|adapters?|stylus|pens?)\b",
     re.I,
 )
 CONSOLE_ACCESSORY_RE = re.compile(
@@ -193,9 +199,28 @@ PARTS_ONLY_RE = re.compile(
     r"motherboard\s+only|bare\s+board|for\s+parts|faulty)\b",
     re.I,
 )
+BOX_ONLY_RE = re.compile(
+    r"\b(?:empty|original|retail|full|packaging)\s+box\b|"
+    r"\bbox\s+(?:only|for)\b|\bpackaging\s+only\b",
+    re.I,
+)
+BUNDLED_ACCESSORY_RE = re.compile(
+    # Only an explicit "with / includes" phrase proves that the device is the
+    # item being sold. A bare "&" or "plus" is not enough: "iPhone 14 Pro Case,
+    # MagSafe Ring & Portable Charger" and "iPhone 15 plus case lot" are
+    # accessory listings whose model name was read as a phone. "plus" is also
+    # a model suffix ("16 Plus"), so it can never join a bundle.
+    r"\b(?:with|including|includes?|inc\.?|comes\s+with|boxed\s+with|supplied\s+with)\b"
+    r"[^|;]{0,60}\b(?:cases?|box|boxes|chargers?|cables?|docks?|covers?|"
+    r"sleeves?|bags?|controllers?|gamepads?|headsets?|keyboard|mouse|stylus|"
+    r"pen|accessor(?:y|ies)|screen\s+protectors?|stands?|brackets?|faceplates?)\b",
+    re.I,
+)
 CONSOLE_CUE_RE = re.compile(
-    r"\b(console|bundle|disc|digital|slim|pro|oled|lite|v2|1tb|2tb|512gb|825gb|"
-    r"joy[-\s]?cons?|controllers?|includes?)\b|\+\s*\d+\s*games",
+    # "disc" alone is game media; only "disc edition" describes hardware.
+    r"\b(console|bundle|disc\s+edition|digital\s+edition|slim|pro|oled|lite|v2|1tb|2tb|512gb|825gb|"
+    r"\d{3}\s*gb|boxed|tested|working|complete|condition|handheld|charger|power\s+supply|"
+    r"memory\s+card|joy[-\s]?cons?|controllers?|includes?)\b|\+\s*\d+\s*games",
     re.I,
 )
 WANTED_RE = re.compile(
@@ -215,12 +240,36 @@ USED_CONTRADICTION_RE = re.compile(
 CAUTION_RE = re.compile(
     r"\b(read\s+(?:the\s+)?description|sold\s+as\s+seen|as\s+seen|untested|no\s+returns?|"
     r"missing|no\s+(?:box|cables?|psu|power\s+supply)|cosmetic|"
-    r"scratch(?:es|ed)?|dent(?:ed)?|pixel\s+defect|screen\s+burn|\bdead\b)\b",
+    r"scratch(?:es|ed)?|dent(?:ed)?|crack(?:ed|s)?|chipped|pixel\s+defect|"
+    r"screen\s+burn|\bdead\b)\b",
     re.I,
 )
 PHONE_PART_RE = re.compile(
     r"\b(motherboard|logic\s+board|screen\s+assembly|charging\s+port|sim\s+tray|"
     r"rear\s+glass|back\s+glass|frame\s+only|shell\s+only|battery\s+only|lcd)\b",
+    re.I,
+)
+PLATFORM_RE = re.compile(
+    r"\b(?:ps[1-5]|playstation\s*[1-5]|xbox(?:\s*(?:360|one|series\s*[xs]))?|"
+    r"nintendo(?:\s*(?:ds|3ds|2ds|64|gamecube|wii\s*u?|switch))?|switch|"
+    r"game\s*boy|gba|gbc|snes|sega|mega\s*drive|dreamcast|saturn|"
+    r"ps\s*vita|psp|gamecube)\b",
+    re.I,
+)
+GAME_MEDIA_RE = re.compile(
+    r"\b(?:game|games|cartridge|disc\s+only|manual|inlay|box\s+art|"
+    r"cib|complete\s+in\s+box|pal|ntsc|region\s+free|steelbook|"
+    r"video\s+game)\b",
+    re.I,
+)
+# These cues describe actual hardware. "Boxed", "complete", "working" and
+# "manual" are common on games too and must not turn a cartridge into a console.
+GAME_HARDWARE_CUE_RE = re.compile(
+    # "Bundle" is not hardware: "PS3 games bundle" is a bundle of games. A
+    # console-with-games bundle is handled by CONSOLE_BUNDLE_RE instead.
+    r"\b(?:console|handheld|boxed\s+console|complete\s+console|"
+    r"controllers?|includes?\s+(?:an?\s+)?controllers?|1tb|2tb|512gb|825gb|"
+    r"\d{3}\s*gb)\b",
     re.I,
 )
 
@@ -229,17 +278,31 @@ GPU_RE = re.compile(
     r"((?:(?:ti|super)\s*){1,2})?\b",
     re.I,
 )
+# Marketplace sellers often put the model before the family ("4060 RTX") or
+# omit the family entirely ("MSI GeForce 5090"). These forms are unambiguous
+# when Nvidia/GeForce is present, so identify them instead of losing a card to
+# keyword-only discovery.
+GPU_MODEL_THEN_BRAND_RE = re.compile(
+    r"\b([1-5]\d{3})\s*(ti|super)?\s*(rtx|gtx)\b", re.I
+)
+GPU_GEFORCE_BARE_RE = re.compile(
+    r"\bgeforce\s+(?:rtx\s*)?(\d{3,4})\s*(ti|super)?\b", re.I
+)
+GPU_NVIDIA_BARE_RE = re.compile(
+    r"\bnvidia\s+(\d{3,4})\s*(ti|super)?\b", re.I
+)
+GPU_LEGACY_RE = re.compile(r"\b(gtx|gt)\s*(\d{3,4})\s*(ti|super)?\b", re.I)
 AMD_GPU_RE = re.compile(
     r"\b(?:amd\s+|radeon\s+)?(rx)\s*(\d{3,4})\s*(xtx|xt|gre)?\b", re.I
 )
 ARC_GPU_RE = re.compile(r"\b(?:intel\s+)?arc\s*([ab])\s*(\d{3})\b", re.I)
 RYZEN_RE = re.compile(
-    r"\b(?:amd\s+)?ryzen\s*([3579])\s*(\d{4})\s*(x3d|xt|ge|g|x)?\b", re.I
+    r"\b(?:amd\s+)?ryzen\s*([3579])\s*(\d{4})\s*(x3d|xt|ge|g|x|f)?\b", re.I
 )
 # Compact marketing form: "Ryzen 5600X" means tier 5, model 5600X. It must not
 # be read as a "Ryzen 5" with model 600 or as no CPU at all.
 RYZEN_COMPACT_RE = re.compile(
-    r"\b(?:amd\s+)?ryzen\s*([3579])(\d{3})\s*(x3d|xt|ge|g|x)?\b", re.I
+    r"\b(?:amd\s+)?ryzen\s*([3579])(\d{3})\s*(x3d|xt|ge|g|x|f)?\b", re.I
 )
 INTEL_RE = re.compile(
     r"\b(?:intel\s+)?(?:core\s+)?i([3579])[\s-]*(\d{4,5})\s*(ks|kf|k|f|t|h|hk|hx|u|g\d?)?\b",
@@ -254,8 +317,14 @@ KIT_RE = re.compile(r"\b(\d)\s*[x×]\s*(\d{1,3})\s*gb\b", re.I)
 CAPACITY_TB_RE = re.compile(r"\b(\d(?:\.\d)?)\s*tb\b", re.I)
 SIZE_GB_RE = re.compile(r"\b(\d{2,4})\s*gb\b", re.I)
 MOBO_CHIPSET_RE = re.compile(
-    r"\b(x870e?|x670e?|b650e?|a620|b550|a520|x570|b450|z890|z790|z690|b760|"
-    r"b660|h770|h610|x299|trx40)\b",
+    r"\b(x870e?|x670e?|b650e?|a620|b550|a520|x570|x470|b450|b350|a320|x370|"
+    r"x399|z890|z790|z690|z590|z490|z390|z370|z270|z170|b760|b660|b560|b460|"
+    r"h770|h670|h610|h510|h410|x299|x99|trx40|trx50|wrx80)(?:[a-z]{1,2})?\b",
+    re.I,
+)
+MOBO_BRAND_OR_MODEL_RE = re.compile(
+    r"\b(?:asus|msi|gigabyte|aorus|asrock|biostar|evga|nzxt|prime|tuf|rog\s+strix|"
+    r"tomahawk|bazooka|mortar|steel\s+legend|gaming\s+plus|pro\s+[bzx]\d{3})\b",
     re.I,
 )
 STORAGE_BRANDS = (
@@ -308,11 +377,17 @@ CONSOLE_PATTERNS = (
     ("console:ps4-pro", "PlayStation 4 Pro", re.compile(r"\b(?:ps4|playstation\s*4)\s*pro\b", re.I)),
     ("console:ps4-slim", "PlayStation 4 Slim", re.compile(r"\b(?:ps4|playstation\s*4)\s*slim\b", re.I)),
     ("console:ps4", "PlayStation 4", re.compile(r"\b(?:ps4|playstation\s*4)\b", re.I)),
+    ("console:ps3", "PlayStation 3", re.compile(r"\b(?:ps3|playstation\s*3)\b", re.I)),
+    ("console:ps2", "PlayStation 2", re.compile(r"\b(?:ps2|playstation\s*2)\b", re.I)),
+    ("console:ps1", "PlayStation 1", re.compile(r"\b(?:ps1|playstation\s*(?:1|one)|ps\s+one)\b", re.I)),
     ("console:xbox-series-x", "Xbox Series X", re.compile(r"\bxbox\s+series\s+x\b", re.I)),
     ("console:xbox-series-s", "Xbox Series S", re.compile(r"\bxbox\s+series\s+s\b", re.I)),
     ("console:xbox-one-x", "Xbox One X", re.compile(r"\bxbox\s+one\s+x\b", re.I)),
     ("console:xbox-one-s", "Xbox One S", re.compile(r"\bxbox\s+one\s+s\b", re.I)),
     ("console:xbox-one", "Xbox One", re.compile(r"\bxbox\s+one\b", re.I)),
+    ("console:xbox-360-s", "Xbox 360 S", re.compile(r"\bxbox\s*360\s*(?:s|slim|e)\b", re.I)),
+    ("console:xbox-360-elite", "Xbox 360 Elite", re.compile(r"\bxbox\s*360\s*elite\b", re.I)),
+    ("console:xbox-360", "Xbox 360", re.compile(r"\bxbox\s*360\b", re.I)),
     ("console:switch-2", "Nintendo Switch 2", re.compile(r"\b(?:nintendo\s+)?switch\s*2\b", re.I)),
     ("console:switch-oled", "Nintendo Switch OLED", re.compile(r"\b(?:nintendo\s+)?switch\s*oled\b", re.I)),
     ("console:switch-lite", "Nintendo Switch Lite", re.compile(r"\bswitch\s*lite\b", re.I)),
@@ -322,7 +397,56 @@ CONSOLE_PATTERNS = (
     ("console:rog-ally-x", "ROG Ally X", re.compile(r"\brog\s+ally\s*x\b", re.I)),
     ("console:rog-ally", "ROG Ally", re.compile(r"\brog\s+ally\b", re.I)),
     ("console:legion-go", "Lenovo Legion Go", re.compile(r"\blegion\s+go\b", re.I)),
+    ("console:new-3ds-xl", "New Nintendo 3DS XL", re.compile(
+        r"\bnew\s+(?:nintendo\s+)?3ds\s*xl\b", re.I
+    )),
+    ("console:3ds-xl", "Nintendo 3DS XL", re.compile(r"\b(?:nintendo\s+)?3ds\s*xl\b", re.I)),
+    ("console:new-3ds", "New Nintendo 3DS", re.compile(r"\bnew\s+(?:nintendo\s+)?3ds\b", re.I)),
+    ("console:3ds", "Nintendo 3DS", re.compile(r"\b(?:nintendo\s+)?3ds\b", re.I)),
+    ("console:2ds-xl", "Nintendo 2DS XL", re.compile(r"\b(?:nintendo\s+)?2ds\s*xl\b", re.I)),
+    ("console:2ds", "Nintendo 2DS", re.compile(r"\b(?:nintendo\s+)?2ds\b", re.I)),
+    ("console:dsi-xl", "Nintendo DSi XL", re.compile(r"\b(?:nintendo\s+)?dsi\s*xl\b", re.I)),
+    ("console:dsi", "Nintendo DSi", re.compile(r"\b(?:nintendo\s+)?dsi\b", re.I)),
+    ("console:ds-lite", "Nintendo DS Lite", re.compile(r"\b(?:nintendo\s+)?ds\s*lite\b", re.I)),
+    ("console:ds", "Nintendo DS", re.compile(r"\b(?:nintendo\s+)?ds\b", re.I)),
+    ("console:gameboy-advance-sp", "Game Boy Advance SP", re.compile(
+        r"\bgame\s*boy\s*advance\s*sp\b", re.I
+    )),
+    ("console:gameboy-advance", "Game Boy Advance", re.compile(
+        r"\b(?:game\s*boy\s*advance|gba)\b", re.I
+    )),
+    ("console:gameboy-color", "Game Boy Color", re.compile(
+        r"\b(?:game\s*boy\s*color|gbc)\b", re.I
+    )),
+    ("console:gameboy-pocket", "Game Boy Pocket", re.compile(
+        r"\bgame\s*boy\s*pocket\b", re.I
+    )),
+    ("console:gameboy", "Game Boy", re.compile(r"\bgame\s*boy\b", re.I)),
+    ("console:gamecube", "Nintendo GameCube", re.compile(r"\bgamecube\b", re.I)),
+    ("console:wii-u", "Nintendo Wii U", re.compile(r"\b(?:nintendo\s+)?wii\s*u\b", re.I)),
+    ("console:wii", "Nintendo Wii", re.compile(r"\b(?:nintendo\s+)?wii\b", re.I)),
+    ("console:n64", "Nintendo 64", re.compile(r"\b(?:nintendo\s*64|n64)\b", re.I)),
+    ("console:snes", "Super Nintendo", re.compile(r"\b(?:snes|super\s+nintendo)\b", re.I)),
+    ("console:mega-drive", "Sega Mega Drive", re.compile(
+        r"\b(?:sega\s*)?(?:mega\s*drive|genesis)\b", re.I
+    )),
+    ("console:master-system", "Sega Master System", re.compile(
+        r"\bsega\s*master\s*system\b", re.I
+    )),
+    ("console:dreamcast", "Sega Dreamcast", re.compile(r"\bdreamcast\b", re.I)),
+    ("console:saturn", "Sega Saturn", re.compile(r"\bsega\s*saturn\b", re.I)),
+    ("console:game-gear", "Sega Game Gear", re.compile(r"\bgame\s*gear\b", re.I)),
+    ("console:vita", "PlayStation Vita", re.compile(r"\b(?:ps\s*vita|playstation\s*vita)\b", re.I)),
+    ("console:psp", "PlayStation Portable", re.compile(r"\b(?:psp|playstation\s*portable)\b", re.I)),
 )
+GENERIC_CONSOLE_KEYS = {
+    "console:ps5", "console:ps4", "console:ps3", "console:ps2", "console:ps1",
+    "console:xbox-series-x", "console:xbox-series-s", "console:xbox-one",
+    "console:xbox-360", "console:switch", "console:switch-2", "console:ds",
+    "console:3ds", "console:2ds", "console:gameboy", "console:gamecube",
+    "console:wii", "console:n64", "console:snes", "console:dreamcast",
+    "console:vita", "console:psp",
+}
 LAPTOP_RE = re.compile(
     r"\b(laptop|notebook|macbook|chromebook|elitebook|probook|latitude|precision|"
     r"spectre|envy|pavilion|yoga)\b",
@@ -331,12 +455,14 @@ LAPTOP_RE = re.compile(
 # Model-line cues catch listings that omit the word "laptop" but are clearly a
 # notebook (e.g. "MSI Thin GF63 RTX 4060").
 LAPTOP_MODEL_PATTERNS: tuple[tuple[str, str, re.Pattern], ...] = (
-    ("acer-nitro", "Acer Nitro", re.compile(r"\b(?:acer\s+)?nitro\s*(?:5|v|16|17)?\b", re.I)),
-    ("acer-predator", "Acer Predator", re.compile(r"\b(?:acer\s+)?predator\s*(?:helios|triton|neo)?\b", re.I)),
+    ("acer-nitro", "Acer Nitro", re.compile(r"\b(?:acer\s+nitro|nitro\s*(?:5|v|16|17))\b", re.I)),
+    ("acer-predator", "Acer Predator", re.compile(
+        r"\b(?:acer\s+predator|predator\s+(?:helios|triton|neo))\b", re.I
+    )),
     ("asus-tuf-laptop", "ASUS TUF Gaming laptop", re.compile(r"\btuf\s+(?:gaming\s+)?(?:a1[457]|f1[57])\b", re.I)),
     ("asus-rog-strix-laptop", "ASUS ROG Strix laptop", re.compile(r"\brog\s+strix\s+(?:g1[4678]|scar|18)\b", re.I)),
     ("asus-zephyrus", "ASUS ROG Zephyrus", re.compile(r"\bzephyrus\b", re.I)),
-    ("msi-katana", "MSI Katana", re.compile(r"\bkatana\b", re.I)),
+    ("msi-katana", "MSI Katana", re.compile(r"\bmsi\s+katana\b", re.I)),
     ("msi-gf63", "MSI GF63", re.compile(r"\bgf63\b", re.I)),
     ("msi-thin", "MSI Thin", re.compile(r"\bmsi\s+thin\b", re.I)),
     ("msi-stealth", "MSI Stealth", re.compile(r"\bmsi\s+stealth\b", re.I)),
@@ -350,7 +476,9 @@ LAPTOP_MODEL_PATTERNS: tuple[tuple[str, str, re.Pattern], ...] = (
     ("lenovo-ideapad", "Lenovo IdeaPad", re.compile(r"\bideapad\b", re.I)),
     ("lenovo-thinkpad", "Lenovo ThinkPad", re.compile(r"\bthinkpad\b", re.I)),
     ("dell-g15", "Dell G15", re.compile(r"\bdell\s+g1[56]\b", re.I)),
-    ("razer-blade", "Razer Blade", re.compile(r"\bblade\s*(?:14|15|16|17)?\b", re.I)),
+    ("razer-blade", "Razer Blade", re.compile(
+        r"\b(?:razer\s+blade|blade\s+(?:14|15|16|17))\b", re.I
+    )),
     ("surface-laptop", "Microsoft Surface Laptop", re.compile(r"\bsurface\s+laptop\b", re.I)),
     ("hp-elitebook", "HP EliteBook", re.compile(r"\belitebook\b", re.I)),
     ("hp-probook", "HP ProBook", re.compile(r"\bprobook\b", re.I)),
@@ -359,6 +487,30 @@ LAPTOP_MODEL_PATTERNS: tuple[tuple[str, str, re.Pattern], ...] = (
     ("dell-latitude", "Dell Latitude", re.compile(r"\blatitude\b", re.I)),
     ("dell-xps", "Dell XPS", re.compile(r"\bxps\s*(?:13|14|15|16|17)?\b", re.I)),
     ("lenovo-yoga", "Lenovo Yoga", re.compile(r"\b(?:lenovo\s+)?yoga\b", re.I)),
+    ("lenovo-x1-carbon", "Lenovo ThinkPad X1 Carbon", re.compile(
+        r"\b(?:lenovo\s+)?(?:thinkpad\s+)?x1\s*carbon\b", re.I
+    )),
+    ("lenovo-miix", "Lenovo Miix", re.compile(r"\b(?:lenovo\s+)?miix\b", re.I)),
+    ("hp-elite-dragonfly", "HP Elite Dragonfly", re.compile(
+        r"\b(?:hp\s+)?elite\s+dragonfly\b", re.I
+    )),
+    ("asus-vivobook", "ASUS VivoBook", re.compile(r"\b(?:asus\s+)?vivobook\b", re.I)),
+    ("asus-zenbook", "ASUS ZenBook", re.compile(r"\b(?:asus\s+)?zenbook\b", re.I)),
+    ("panasonic-toughbook", "Panasonic Toughbook", re.compile(
+        r"\b(?:panasonic\s+)?toughbook\b", re.I
+    )),
+    ("samsung-galaxy-book", "Samsung Galaxy Book", re.compile(
+        r"\b(?:samsung\s+)?galaxy\s+book\b", re.I
+    )),
+    ("acer-aspire", "Acer Aspire", re.compile(
+        r"\b(?:acer\s+aspire|aspire\s+(?:3|5|7|v|e|one))\b", re.I
+    )),
+    ("acer-swift", "Acer Swift", re.compile(
+        r"\b(?:acer\s+swift|swift\s+(?:1|3|5|7|edge|x))\b", re.I
+    )),
+    ("dell-inspiron", "Dell Inspiron", re.compile(r"\binspiron\b", re.I)),
+    ("dell-vostro", "Dell Vostro", re.compile(r"\bvostro\b", re.I)),
+    ("surface-book", "Microsoft Surface Book", re.compile(r"\bsurface\s+book\b", re.I)),
 )
 LAPTOP_CUE_RE = re.compile(
     r"\b(" + "|".join(pattern.pattern for _, _, pattern in LAPTOP_MODEL_PATTERNS) + r")",
@@ -369,9 +521,9 @@ PC_RE = re.compile(
     r"computer\s+tower|workstation|gaming\s+rig|complete\s+pc|pc\s+setup|"
     r"desktop\s+computer|mini\s*pc|micro\s*pc|tiny\s*pc|sff\s+pc|"
     r"gaming\s+computer|gaming\s+desktop|desktop\s+tower|computer\s+pc|"
-    r"pc\s+desktop|tower\s+pc|"
-    r"optiplex|thinkcentre|elitedesk|prodesk|alienware\s+aurora|ideacentre|"
-    r"all[-\s]?in[-\s]?one)\b",
+    r"pc\s+desktop|tower\s+pc|pc\s+(?:bundle|with|and)|\bcomplete\s+pc\b|"
+    r"optiplex|thinkcentre|thinkstation|elitedesk|prodesk|esprimo|"
+    r"alienware\s+aurora|ideacentre|all[-\s]?in[-\s]?one)\b",
     re.I,
 )
 SYSTEM_BRAND_RE = re.compile(
@@ -379,8 +531,12 @@ SYSTEM_BRAND_RE = re.compile(
     r"\b(?:pc|desktop|computer|aio|all[-\s]?in[-\s]?one|workstation)\b",
     re.I,
 )
-SCREEN_RE = re.compile(r"\b(\d{2})(?:\.\d)?\s*-?\s*(?:inch|in\b|\")", re.I)
-RES_RE = re.compile(r"\b(4k|uhd|1440p|2k|qhd|1080p|fhd)\b", re.I)
+SCREEN_RE = re.compile(
+    r"\b(\d{2})(?:\.\d)?\s*-?\s*(?:inch|in\b|[\"”″])", re.I
+)
+RES_RE = re.compile(
+    r"\b(4k|uhd|1440p|2k|qhd|1080p|fhd|full\s*hd)\b", re.I
+)
 HZ_RE = re.compile(r"\b(\d{2,3})\s*hz\b", re.I)
 IPHONE_RE = re.compile(
     r"\biphone\s*(\d{1,2})\s*(pro\s+max|pro|plus|mini)?\b", re.I
@@ -431,6 +587,11 @@ def detect_condition(text: str) -> str:
     t = lower_text(text)
     if re.search(r"\b(spares?\s*(?:or|/)?\s*repairs?|for\s+parts|faulty|not\s+working|broken|dead)\b", t):
         return "faulty"
+    # A cracked or chipped screen/back still works but is materially less
+    # valuable. Valuing it as "used" makes a damaged handset look like a
+    # bargain against good-condition comparables.
+    if re.search(r"\b(?:cracked?|chipped)\b", t):
+        return "fair"
     if re.search(
         r"\b(brand\s+new|new\s+sealed|sealed|unopened|new\s+in\s+box|bnib|new\s+with\s+tags|"
         r"new\s+without\s+tags|new\s+with\s+box|new\s+other)\b",
@@ -454,6 +615,19 @@ def detect_condition(text: str) -> str:
     return "unknown"
 
 
+def _nvidia_family(number: str) -> str:
+    """Infer the marketing family from an Nvidia model number.
+
+    Only used when the seller wrote "GeForce 5090" or "Nvidia 980 Ti" without
+    the RTX/GTX prefix. A bare 3-digit card in the 700 range is treated as GT
+    (GT 730) rather than GTX, which keeps those inexpensive cards in their own
+    comparable pool.
+    """
+    if len(number) == 4:
+        return "rtx" if number[0] in {"2", "3", "4", "5"} else "gtx"
+    return "gtx" if int(number) >= 780 else "gt"
+
+
 def _gpu(text: str) -> tuple[str, str, dict[str, Any]] | None:
     match = GPU_RE.search(text)
     if match:
@@ -472,7 +646,7 @@ def _gpu(text: str) -> tuple[str, str, dict[str, Any]] | None:
         brand = "NVIDIA GeForce"
         name = f"{brand} {prefix.upper()} {number}" + (f" {label_suffix}" if label_suffix else "")
         full = text[match.start():match.end() + 24]
-        vram_match = re.search(r"\b(\d{1,2})\s*gb\b", full)
+        vram_match = re.search(r"\b(\d{1,2})\s*g(?:b)?\b", full)
         vram = int(vram_match.group(1)) if vram_match else None
         if vram:
             key += f"-{vram}gb"
@@ -484,6 +658,49 @@ def _gpu(text: str) -> tuple[str, str, dict[str, Any]] | None:
             "suffix": label_suffix or None, "generation": generation, "vram_gb": vram,
         }
         return key, name, attrs
+    match = GPU_MODEL_THEN_BRAND_RE.search(text)
+    if match:
+        number, suffix_raw, prefix = match.group(1), (match.group(2) or "").lower(), match.group(3).lower()
+        key = f"gpu:{prefix}-{number}" + (f"-{suffix_raw}" if suffix_raw else "")
+        name = f"NVIDIA GeForce {prefix.upper()} {number}" + (f" {suffix_raw.title()}" if suffix_raw else "")
+        full = text[match.start():match.end() + 24]
+        vram_match = re.search(r"\b(\d{1,2})\s*g(?:b)?\b", full)
+        vram = int(vram_match.group(1)) if vram_match else None
+        if vram:
+            key += f"-{vram}gb"
+        return key, name, {
+            "brand": "NVIDIA", "family": prefix.upper(), "model": number,
+            "suffix": suffix_raw or None, "generation": number[:2], "vram_gb": vram,
+        }
+    match = GPU_GEFORCE_BARE_RE.search(text) or GPU_NVIDIA_BARE_RE.search(text)
+    if match:
+        number, suffix_raw = match.group(1), (match.group(2) or "").lower()
+        prefix = _nvidia_family(number)
+        key = f"gpu:{prefix}-{number}" + (f"-{suffix_raw}" if suffix_raw else "")
+        name = f"NVIDIA GeForce {prefix.upper()} {number}" + (f" {suffix_raw.title()}" if suffix_raw else "")
+        full = text[match.start():match.end() + 24]
+        vram_match = re.search(r"\b(\d{1,2})\s*g(?:b)?\b", full)
+        vram = int(vram_match.group(1)) if vram_match else None
+        if vram:
+            key += f"-{vram}gb"
+        return key, name, {
+            "brand": "NVIDIA", "family": prefix.upper(), "model": number,
+            "suffix": suffix_raw or None, "generation": number[:2], "vram_gb": vram,
+        }
+    match = GPU_LEGACY_RE.search(text)
+    if match:
+        prefix, number, suffix_raw = match.group(1).lower(), match.group(2), (match.group(3) or "").lower()
+        key = f"gpu:{prefix}-{number}" + (f"-{suffix_raw}" if suffix_raw else "")
+        name = f"NVIDIA GeForce {prefix.upper()} {number}" + (f" {suffix_raw.title()}" if suffix_raw else "")
+        full = text[match.start():match.end() + 24]
+        vram_match = re.search(r"\b(\d{1,2})\s*g(?:b)?\b", full)
+        vram = int(vram_match.group(1)) if vram_match else None
+        if vram:
+            key += f"-{vram}gb"
+        return key, name, {
+            "brand": "NVIDIA", "family": prefix.upper(), "model": number,
+            "suffix": suffix_raw or None, "generation": number[:2], "vram_gb": vram,
+        }
     match = AMD_GPU_RE.search(text)
     if match:
         number = match.group(2)
@@ -539,8 +756,6 @@ def _cpu(text: str) -> tuple[str, str, dict[str, Any]] | None:
 def _ram(text: str) -> tuple[str, str, dict[str, Any]] | None:
     ddr = DDR_RE.search(text)
     if not ddr:
-        return None
-    if not re.search(r"\b(ram|memory|dimm|kit)\b", text):
         return None
     capacity: int | None = None
     kit = KIT_RE.search(text)
@@ -679,6 +894,11 @@ def _hdd(text: str) -> tuple[str, str, dict[str, Any]] | None:
 
 def _console(text: str) -> tuple[str, str, dict[str, Any]] | None:
     """Match consoles without swallowing games or compatibility mentions."""
+    # A listing that starts with a component ("RAM 64GB ... (PS5 Pro
+    # exchange)") only names the console in passing. Component-first titles
+    # are never the console itself.
+    if re.match(r"^(?:ram|memory|ddr[45]|ssd|nvme|hdd|hard\s+drive)\b", text, re.I):
+        return None
     if (
         CONSOLE_GAME_RE.search(text)
         and not CONSOLE_CUE_RE.search(text)
@@ -694,25 +914,53 @@ def _console(text: str) -> tuple[str, str, dict[str, Any]] | None:
         # Generic patterns need either a console cue (console, disc, bundle,
         # storage, controllers) or a short listing title. "Spider-Man 2 PS5" is
         # a game; "Sony PS5" is a console.
-        if key in {
-            "console:ps5", "console:ps4", "console:switch", "console:switch-2",
-            "console:xbox-series-x", "console:xbox-series-s", "console:xbox-one",
-        }:
+        if key in GENERIC_CONSOLE_KEYS:
             if not CONSOLE_CUE_RE.search(text) and not CONSOLE_HARDWARE_RE.search(text):
-                tokens = [t for t in tokenise(text) if t not in {"sony", "microsoft", "nintendo", "the"}]
-                limit = 4 if key.startswith("console:xbox") else 2
-                if len(tokens) > limit:
+                # "Xbox Series X" is a model name, not extra qualifiers.
+                platform_words = set(tokenise(name)) | {
+                    "sony", "microsoft", "nintendo", "the", "series"
+                }
+                allowed_extra = {
+                    "console", "boxed", "tested", "working", "complete",
+                    "condition", "good", "used", "new", "mint", "edition",
+                    "disc", "digital", "slim", "pro", "oled", "lite",
+                    "v2", "handheld", "charger", "with", "and", "1tb", "2tb",
+                    "500gb", "825gb", "512gb", "256gb", "128gb", "64gb",
+                    "white", "black", "grey", "gray", "silver", "gold",
+                    "red", "blue", "green", "purple", "pink", "carbon",
+                }
+                # Bare platform names such as "Nintendo DS" need a tight title.
+                # Any unexplained word ("Singstar", "Skyrim", "MW2") is a game
+                # title or an accessory, never hardware evidence of its own.
+                extra = [t for t in tokenise(text) if t not in platform_words]
+                # A named console part ("PS5 Blu-ray drive") must still resolve
+                # to the console so it can be flagged as an accessory; the
+                # guard below only rejects unexplained game titles.
+                console_part_cue = bool(re.search(
+                    r"\b(disc\s+drive|optical\s+drive|blu[-\s]?ray\s+drive|"
+                    r"hard\s+drive|hdd|power\s+brick|av\s+cable|faceplates?|"
+                    r"shell|bezel|hdmi\s+port|heatsink|memory\s+card|swivel\s+base)\b",
+                    text,
+                    re.I,
+                ))
+                if not console_part_cue and (
+                    len(extra) > 2 or not set(extra) <= allowed_extra
+                ):
                     continue
         return key, name, {}
     return None
 
 
-def _phone(text: str) -> tuple[str, str, dict[str, Any]] | None:
+def _phone(text: str, details: str = "") -> tuple[str, str, dict[str, Any]] | None:
+    # The model and category come from the title. Storage may be stated only in
+    # the description ("128GB, unlocked"), which is reliable once the exact
+    # handset is already known and avoids leaving hundreds of variants unclear.
+    storage_text = details if details and not _phone_storage(text) else text
     match = IPHONE_RE.search(text)
     if match:
         model = match.group(1)
         variant = (match.group(2) or "").lower()
-        storage = _phone_storage(text)
+        storage = _phone_storage(storage_text)
         key = f"phone:iphone-{model}" + (f"-{variant.replace(' ', '-')}" if variant else "")
         key += f"-{storage}gb" if storage else ""
         name = f"Apple iPhone {model}" + (f" {variant.title()}" if variant else "")
@@ -724,7 +972,7 @@ def _phone(text: str) -> tuple[str, str, dict[str, Any]] | None:
         family = match.group(2).lower()
         number = match.group(3)
         variant = (match.group(4) or "").lower().replace("+", "plus")
-        storage = _phone_storage(text)
+        storage = _phone_storage(storage_text)
         key = f"phone:galaxy-{family}{number}" + (f"-{variant}" if variant else "")
         key += f"-{storage}gb" if storage else ""
         name = f"Samsung Galaxy {family.upper()}{number}" + (f" {variant.title()}" if variant else "")
@@ -733,7 +981,7 @@ def _phone(text: str) -> tuple[str, str, dict[str, Any]] | None:
         return key, name, {"storage_gb": storage}
     match = re.search(r"\bgoogle\s+pixel\s*(\d{1,2})\s*(pro)?\b", text, re.I)
     if match:
-        storage = _phone_storage(text)
+        storage = _phone_storage(storage_text)
         key = f"phone:pixel-{match.group(1)}" + ("-pro" if match.group(2) else "")
         key += f"-{storage}gb" if storage else ""
         name = f"Google Pixel {match.group(1)}" + (" Pro" if match.group(2) else "")
@@ -749,7 +997,10 @@ def _phone_storage(text: str) -> int | None:
     The bare number must follow the model name; reading any 3-digit number
     would turn screen sizes and model years into capacities.
     """
-    storage = _storage(text)
+    # Older handsets are routinely resold at 8/16/32GB. Those capacities were
+    # previously ignored, which left working iPhone 6/7 and iPad listings with
+    # no storage variant and pushed them into the manual review queue.
+    storage = _storage(text, legacy=True)
     if storage:
         return storage
     # "256G" is common phone shorthand. A bare boundary after the digits does
@@ -770,10 +1021,15 @@ def _phone_storage(text: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _storage(text: str) -> int | None:
-    for match in re.finditer(r"\b(\d{2,4})\s*gb\b", text):
+STORAGE_GB = (64, 128, 256, 512, 1024)
+LEGACY_STORAGE_GB = (8, 16, 32)
+
+
+def _storage(text: str, legacy: bool = False) -> int | None:
+    allowed = STORAGE_GB + (LEGACY_STORAGE_GB if legacy else ())
+    for match in re.finditer(r"\b(\d{1,4})\s*gb\b", text):
         value = int(match.group(1))
-        if value in (64, 128, 256, 512, 1024):
+        if value in allowed:
             return value
     tb = CAPACITY_TB_RE.search(text)
     if tb:
@@ -781,9 +1037,9 @@ def _storage(text: str) -> int | None:
     return None
 
 
-def _tablet(text: str) -> tuple[str | None, str | None, dict[str, Any]] | None:
+def _tablet(text: str, details: str = "") -> tuple[str | None, str | None, dict[str, Any]] | None:
     if "ipad" not in text:
-        return None
+        return _non_apple_tablet(text, details)
     match = re.search(r"\bipad\s*(pro|air|mini)?\s*(m\d)?\b", text)
     family = (match.group(1) or "").lower() if match else ""
     chip = (match.group(2) or "").lower() if match else ""
@@ -812,7 +1068,7 @@ def _tablet(text: str) -> tuple[str | None, str | None, dict[str, Any]] | None:
     generation = gen_match.group(1) if gen_match else ""
     screen = re.search(r"\b(8\.3|10\.2|10\.9|11|12\.9|13)\s*(?:inch|in\b|\"|(?=m[1-4]\b))", text)
     screen_size = screen.group(1) if screen else ""
-    storage = _storage(text)
+    storage = _storage(text, legacy=True) or _storage(details, legacy=True)
     attrs = {
         "storage_gb": storage, "generation": generation or None,
         "screen_in": float(screen_size) if screen_size else None,
@@ -834,6 +1090,116 @@ def _tablet(text: str) -> tuple[str | None, str | None, dict[str, Any]] | None:
     return key, name, attrs
 
 
+def _non_apple_tablet(
+    text: str, details: str = ""
+) -> tuple[str | None, str | None, dict[str, Any]] | None:
+    """Identify exact non-Apple tablet families that are actually resold.
+
+    Generic "tablet" titles stay ungrouped. A comparable pool that mixes a
+    Galaxy Tab A7 with a Tab S9 Ultra would invent value, so the model line and
+    generation are part of the key. Storage is included when the title or
+    description states it; otherwise the caller marks the variant unclear.
+    """
+    storage = _storage(text) or _storage(details)
+
+    match = re.search(
+        r"\b(?:samsung\s+)?galaxy\s+tab\s+"
+        r"(s\d{1,2}|a\s?\d{1,2}|e|active\s*\d?|pro)\s*"
+        r"(ultra|plus|\+|lite|fe)?\b",
+        text,
+        re.I,
+    )
+    if match:
+        model = re.sub(r"\s+", "", match.group(1).lower())
+        variant = (match.group(2) or "").lower().replace("+", "plus")
+        key = f"tablet:galaxy-tab-{model}" + (f"-{variant}" if variant else "")
+        if storage:
+            key += f"-{storage}gb"
+        label = f"Samsung Galaxy Tab {model.upper()}" + (f" {variant.title()}" if variant else "")
+        if storage:
+            label += f" {storage}GB"
+        return key, label, {"storage_gb": storage, "model": model, "variant": variant or None}
+
+    match = re.search(
+        r"\b(?:lenovo\s+)?(yoga\s+tab|tab)\s*([a-z]?\d{1,2})\s*(plus|pro)?\b",
+        text,
+        re.I,
+    )
+    if match:
+        family, model, variant = match.group(1).lower(), match.group(2).lower(), (match.group(3) or "").lower()
+        family_slug = "yoga-tab" if "yoga" in family else "tab"
+        key = f"tablet:lenovo-{family_slug}-{model}" + (f"-{variant}" if variant else "")
+        if storage:
+            key += f"-{storage}gb"
+        label = f"Lenovo {'Yoga Tab' if family_slug == 'yoga-tab' else 'Tab'} {model.upper()}" + (
+            f" {variant.title()}" if variant else ""
+        )
+        if storage:
+            label += f" {storage}GB"
+        return key, label, {"storage_gb": storage, "model": model, "variant": variant or None}
+
+    match = re.search(
+        r"\b(?:amazon\s+)?(?:fire|kindle\s+fire)\s*(hd\s*)?(\d{1,2})\b",
+        text,
+        re.I,
+    )
+    if match:
+        hd = (match.group(1) or "").strip().lower()
+        model = f"{hd}{match.group(2)}" if hd else match.group(2)
+        key = f"tablet:fire-{model}"
+        if storage:
+            key += f"-{storage}gb"
+        label = f"Amazon Fire {'HD ' if hd else ''}{match.group(2)}"
+        if storage:
+            label += f" {storage}GB"
+        return key, label, {"storage_gb": storage, "model": model}
+
+    match = re.search(
+        r"\bsurface\s+(pro|go)\s*(x|\d{1,2})?\s*(plus|\+)?(?![a-z0-9])",
+        text,
+        re.I,
+    )
+    if match:
+        family = match.group(1).lower()
+        model = match.group(2) or ""
+        variant = (match.group(3) or "").lower().replace("+", "plus")
+        tail = text[match.end():]
+        if model and re.match(r"\s*(?:[\"”]|inch|in\b)", tail):
+            # "Surface Pro 13\"" is a screen size, not a model generation.
+            return None
+        if not model:
+            # A bare Surface Pro spans many generations and price bands.
+            return None
+        key = f"tablet:surface-{family}-{model}" + (f"-{variant}" if variant else "")
+        if storage:
+            key += f"-{storage}gb"
+        label = f"Microsoft Surface {family.title()} {model.upper()}" + (
+            f" {variant.title()}" if variant else ""
+        )
+        if storage:
+            label += f" {storage}GB"
+        return key, label, {
+            "storage_gb": storage, "model": model, "variant": variant or None,
+        }
+
+    match = re.search(
+        r"\b(xiaomi|redmi|oneplus)\s+pad\s*(\d{1,2})?\s*(pro)?\b",
+        text,
+        re.I,
+    )
+    if match:
+        brand, model, variant = match.group(1).lower(), match.group(2) or "", (match.group(3) or "").lower()
+        key = f"tablet:{brand}-pad" + (f"-{model}" if model else "") + (f"-{variant}" if variant else "")
+        if storage:
+            key += f"-{storage}gb"
+        label = f"{brand.title()} Pad" + (f" {model}" if model else "") + (f" {variant.title()}" if variant else "")
+        if storage:
+            label += f" {storage}GB"
+        return key, label, {"storage_gb": storage, "model": model or None, "variant": variant or None}
+
+    return None
+
+
 def _monitor(text: str) -> tuple[str, str, dict[str, Any]] | None:
     if not re.search(r"\b(monitor|display|screen)\b", text):
         return None
@@ -847,8 +1213,11 @@ def _monitor(text: str) -> tuple[str, str, dict[str, Any]] | None:
     if not (size or resolution):
         return None
     size_label = f"{size.group(1)}in" if size else ""
-    res_raw = (resolution.group(1) if resolution else "").lower()
-    res_label = {"uhd": "4K", "4k": "4K", "2k": "1440p", "qhd": "1440p", "fhd": "1080p"}.get(res_raw, res_raw)
+    res_raw = " ".join((resolution.group(1) if resolution else "").lower().split())
+    res_label = {
+        "uhd": "4K", "4k": "4K", "2k": "1440p", "qhd": "1440p",
+        "fhd": "1080p", "full hd": "1080p",
+    }.get(res_raw, res_raw)
     hz_label = f"{hz.group(1)}Hz" if hz else ""
     brand_match = MONITOR_BRAND_RE.search(text)
     brand = brand_match.group(1).lower().replace(".", "") if brand_match else None
@@ -1023,8 +1392,10 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     accessory = bool(ACCESSORY_RE.search(title_clean))
     caution = bool(CAUTION_RE.search(full_text))
     parts_only = bool(PARTS_ONLY_RE.search(title_clean))
+    # Phone/tablet part cues only apply to those devices. "Steam Deck LCD" and
+    # "PS5 LCD" are product descriptions, not replacement phone screens.
     phone_part = bool(PHONE_PART_RE.search(title_clean)) and bool(re.search(
-        r"\b(iphone|ipad|galaxy|pixel|macbook|laptop|ps5|ps4|xbox|switch|steam\s+deck)\b",
+        r"\b(iphone|ipad|galaxy|pixel|macbook|laptop)\b",
         title_clean,
         re.I,
     ))
@@ -1044,7 +1415,20 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
             title_clean,
             re.I,
         )
+        # "PS5 with 2 games" is a console bundle; "PS5 games bundle" is games.
+        and not CONSOLE_BUNDLE_RE.search(title_clean)
     )
+    # A platform name plus game media is a game, not the console. This catches
+    # the long tail ("Crash Nitro Kart PlayStation 2 game") without relying on
+    # a list of every game title ever sold.
+    if (
+        not platform_game
+        and PLATFORM_RE.search(title_clean)
+        and GAME_MEDIA_RE.search(title_clean)
+        and not GAME_HARDWARE_CUE_RE.search(title_clean)
+        and not CONSOLE_BUNDLE_RE.search(title_clean)
+    ):
+        platform_game = True
     game_bundle = bool(
         re.search(r"\b(?:ps[45]|playstation|xbox|switch)\b", title_clean, re.I)
         and re.search(r"\bgame(?:s)?\s+bundle\b|\bbundle\s+of\s+games?\b", title_clean, re.I)
@@ -1079,11 +1463,19 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     gpu = _gpu(text)
     cpu = _cpu(text)
     console = _console(text)
-    console_accessory = bool(CONSOLE_ACCESSORY_RE.search(title_clean))
+    console_accessory = bool(console) and bool(CONSOLE_ACCESSORY_RE.search(title_clean))
     title_accessory = bool(ACCESSORY_TITLE_RE.search(title_clean))
     strong_accessory = bool(ACCESSORY_STRONG_RE.search(title_clean))
     # "PS5 with controller" is a complete console; "PS5 controller" is not.
     if console and re.search(r"\b(?:with|includes?|inc\.?|plus|\+)\b.*\bcontrollers?\b", title_clean, re.I):
+        console_accessory = False
+        strong_accessory = False
+        title_accessory = False
+    # "Xbox Series X console & controller" names the console itself. A bare
+    # "Xbox Series X controller" does not, and is already caught above.
+    if console and re.search(r"\bconsoles?\b", title_clean, re.I) and not re.search(
+        r"\b(?:disc|optical|blu[-\s]?ray)\s+drive\b|\bfaceplates?\b", title_clean, re.I
+    ):
         console_accessory = False
         strong_accessory = False
         title_accessory = False
@@ -1094,10 +1486,24 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     multi_item = bool(MULTI_ITEM_RE.search(title_clean))
     box_mention = bool(re.search(r"\bbox\b", title_clean, re.I))
     box_included = bool(re.search(
-        r"\b(?:with|including|includes?|inc\.?|comes\s+with|in\s+original)\s+(?:the\s+)?(?:original\s+)?box\b",
+        r"\b(?:with|including|includes?|inc\.?|comes\s+with|boxed|unopened|sealed|brand\s+new|"
+        r"in\s+(?:its\s+|the\s+)?(?:original\s+)?box)\b[^|;]{0,35}\b(?:box|packaging)\b",
         title_clean, re.I,
     ))
-    if box_mention and not box_included:
+    # "Boxed" and "with box" describe a complete item. Only packaging-only
+    # titles (empty box / box only / trailing "... box") are accessories.
+    box_only = bool(BOX_ONLY_RE.search(title_clean)) or bool(
+        box_mention and not box_included and re.search(
+            r"\bbox\b\s*$"
+            # "iPhone 11 Pro box space grey" names the colour after the word
+            # box; it is packaging, not a complete handset.
+            r"|\bbox\b[^|,;]{0,24}\b(?:space\s+gr[ae]y|black|white|blue|red|silver|"
+            r"gold|purple|green|pink|graphite|titanium)\b\s*$",
+            title_clean,
+            re.I,
+        )
+    )
+    if box_only:
         accessory = True
         flags.append("accessory_or_box")
     if empty_title or platform_game or game_bundle or parts_only:
@@ -1117,7 +1523,8 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         console
         and re.search(
             r"\b(disc\s+drive|optical\s+drive|blu[-\s]?ray\s+drive|bluray\s+drive|"
-            r"faceplate|shell|bezel|hdmi\s+port|heatsink)\b",
+            r"hard\s+drive|hdd|power\s+brick|av\s+cable|faceplate|shell|bezel|"
+            r"hdmi\s+port|heatsink|memory\s+card)\b",
             title_clean, re.I,
         )
         and not re.search(r"\b(console|with|includes?|inc\.?|disc\s+edition)\b", title_clean, re.I)
@@ -1137,19 +1544,38 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         title_clean,
         re.I,
     )
-    explicit_laptop = bool(LAPTOP_RE.search(title_clean))
+    explicit_laptop = bool(LAPTOP_RE.search(title_clean)) and not bool(
+        re.search(r"\byoga\s+tab\b", title_clean, re.I)
+    )
+    monitor_ident = _monitor(text)
+    # A monitor title may contain "PC" or a system brand ("Dell ... Computer
+    # Monitor"). Only let a system cue override the monitor when the title also
+    # carries actual system specifications such as a CPU, RAM or storage.
+    monitor_system_spec = bool(
+        _cpu(text) or _gpu(text) or _ram(text) or _ssd(text) or _hdd(text)
+    )
+    monitor_wins = (
+        bool(monitor_ident)
+        and not explicit_laptop
+        and not bool(console)
+        and not bool(PC_RE.search(title_clean))
+        and not (monitor_system_spec and bool(SYSTEM_BRAND_RE.search(title_clean)))
+    )
     pc_cue = bool(PC_RE.search(title_clean)) or bool(SYSTEM_BRAND_RE.search(title_clean))
     if not pc_cue and re.search(r"\baio\b", title_clean, re.I) and re.search(
         r"\b(pc|computer|windows|win\s*1[01])\b", title_clean, re.I
     ):
         pc_cue = True
     system_combo = bool(title_gpu and (title_cpu or cpu_family))
-    is_laptop = explicit_laptop or (bool(LAPTOP_CUE_RE.search(title_clean)) and not pc_cue)
+    is_laptop = (
+        explicit_laptop or (bool(LAPTOP_CUE_RE.search(title_clean)) and not pc_cue)
+    ) and not monitor_wins and not bool(re.search(r"\byoga\s+tab\b", title_clean, re.I))
     # A GPU plus RAM is still a component bundle, not a complete computer.
     # Only infer a system when there is an actual system cue or several
     # independent system components alongside the GPU.
     system_component_cue = bool(re.search(
-        r"\b(pc|computer|desktop|tower|system|build|motherboard|mobo|psu|case|chassis)\b",
+        r"\b(pc|computer|desktop|tower|system|build|motherboard|mobo|psu|case|chassis|"
+        r"windows|win\s*1[01])\b",
         title_clean,
         re.I,
     ))
@@ -1157,9 +1583,38 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         pc_cue
         or system_combo
         or bool(title_gpu and _ram(title_clean) and system_component_cue)
-    ) and not is_laptop
+        # "3070 FE | Ryzen 9 | 32GB DDR4 | ... pc" names a complete machine
+        # without the usual "gaming PC" phrase. A bare "PC Monitor" has no
+        # component specs and is still left to the monitor parser.
+        or bool(
+            re.search(r"\bpc\b", title_clean, re.I)
+            and (gpu or cpu or _ram(text) or _ssd(text))
+        )
+        # A CPU sold with RAM, storage and a Windows licence is a complete
+        # machine (often a business laptop or mini PC), not a loose processor.
+        or bool(
+            (cpu or cpu_family)
+            and re.search(r"\b\d{1,3}\s*gb\s+(?:ram|ddr[45])\b", title_clean, re.I)
+            and re.search(
+                r"\b(?:\d{3,4}\s*gb|1\s*tb)\s+(?:nvme|ssd|hdd)\b",
+                title_clean,
+                re.I,
+            )
+            and re.search(r"\b(?:windows|win\s*1[01])\b", title_clean, re.I)
+        )
+    ) and not is_laptop and not monitor_wins
     has_gpu_context = bool(gpu) and bool(
-        re.search(r"\b(rtx|gtx|rx|radeon|geforce|arc|gpu|graphics|card)\b", text)
+        re.search(r"\b(rtx|gtx|rx|radeon|geforce|nvidia|amd|arc|gpu|graphics|card)\b", text)
+    )
+    # A laptop mainboard names the laptop model for compatibility; it is a
+    # replacement part, not a working laptop or a loose processor.
+    laptop_part = bool(
+        is_laptop
+        and re.search(
+            r"\b(?:motherboard|mainboard|logic\s+board|palmrest|keyboard\s+only)\b",
+            title_clean,
+            re.I,
+        )
     )
 
     category = "other"
@@ -1169,7 +1624,21 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     confidence = 0.0
     attrs: dict[str, Any] = {}
 
-    if is_laptop:
+    if platform_game:
+        # A console platform named on a game listing must not fall through to a
+        # laptop line ("Crash Nitro Kart" matched Acer Nitro) or a GPU.
+        category, kind = "other", "other"
+        product_key, product_name = None, None
+        confidence = 0.0
+    elif monitor_wins:
+        category, kind = "monitor", "monitor"
+        product_key, product_name, attrs = monitor_ident
+        confidence = 0.64
+    elif laptop_part:
+        category, kind = "motherboard", "other"
+        flags.append("parts_only")
+        confidence = 0.0
+    elif is_laptop:
         category, kind = "laptop", "laptop"
         product_key, product_name, attrs, confidence = _laptop(text, gpu, cpu)
         if "macbook" in text:
@@ -1181,7 +1650,7 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         category, kind = "gpu", "gpu"
         product_key, product_name, attrs = gpu
         confidence = 0.93
-    elif cpu and re.search(r"\b(cpu|processor|ryzen|core\s+i[3579]|intel|amd)\b", text):
+    elif cpu:
         category, kind = "cpu", "cpu"
         product_key, product_name, attrs = cpu
         confidence = 0.9
@@ -1203,26 +1672,25 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         category, kind = "console", "console"
         product_key, product_name, attrs = console
         confidence = 0.9
-    elif _monitor(text):
-        category, kind = "monitor", "monitor"
-        product_key, product_name, attrs = _monitor(text)
-        confidence = 0.64
     elif _network(text)[0] or (NETWORK_CUE_RE.search(text) and re.search(r"\b(router|switch|access point|mesh|unifi|deco|orbi|eero)\b", text)):
         category, kind = "networking", "networking"
         product_key, product_name, attrs, confidence = _network(text)
-    elif _phone(text):
+    elif _phone(text, full_text):
         category, kind = "phone", "phone"
-        product_key, product_name, attrs = _phone(text)
+        product_key, product_name, attrs = _phone(text, full_text)
         confidence = 0.82
-    elif _tablet(text):
+    elif _tablet(text, full_text) and _tablet(text, full_text)[0]:
         category, kind = "tablet", "tablet"
-        product_key, product_name, attrs = _tablet(text)
+        product_key, product_name, attrs = _tablet(text, full_text)
         confidence = 0.8
-    elif MOBO_CHIPSET_RE.search(text) and re.search(r"\b(motherboard|mobo|mainboard|board)\b", text):
+    elif MOBO_CHIPSET_RE.search(text) and (
+        re.search(r"\b(motherboard|mobo|mainboard|board)\b", text)
+        or MOBO_BRAND_OR_MODEL_RE.search(text)
+    ):
         category, kind = "motherboard", "motherboard"
         chipset = MOBO_CHIPSET_RE.search(text).group(1).lower()
         socket = "am5" if chipset.startswith(("b650", "x670", "x870", "a620")) else (
-            "am4" if chipset.startswith(("b550", "x570", "b450", "a520")) else "lga"
+            "am4" if chipset.startswith(("b550", "x570", "x470", "b450", "b350", "a320", "x370", "a520")) else "lga"
         )
         product_key = f"mobo:{socket}:{chipset}"
         product_name = f"{chipset.upper()} motherboard"
@@ -1232,7 +1700,9 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         category, kind = "gpu", "gpu"
         confidence = 0.2
         flags.append("model_unclear")
-    elif re.search(r"\b(ram|memory|ddr[45])\b", text):
+    elif re.search(r"\b(ram|memory|ddr[45])\b", text) and not re.search(
+        r"\b(ipad|tablet|surface|galaxy\s+tab|laptop|phone|console)\b", text
+    ):
         category = "ram"
         kind = "ram"
         flags.append("model_unclear")
@@ -1240,6 +1710,23 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         category, kind = "ssd", "ssd"
         flags.append("model_unclear")
 
+    platform_bundle = bool(re.search(
+        r"\b(?:game|games)\s+bundle\b|\bbundle\s+of\s+(?:\d+\s+)?games\b",
+        text,
+        re.I,
+    ))
+    if (
+        category == "other"
+        and kind == "other"
+        and PLATFORM_RE.search(text)
+        and (not platform_game or platform_bundle)
+    ):
+        # Console accessories ("Xbox One Kinect") and game bundles belong to
+        # the console taxonomy even when they have no product key. They remain
+        # unvaluable, which is exactly what prevents a £5 Kinect sensor or a
+        # £3 game from being priced as a console.
+        category, kind = "console", "console"
+        confidence = 0.0
     if category == "other" and kind == "other":
         confidence = 0.0
 
@@ -1304,6 +1791,44 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     if component_bundle:
         flags.append("component_bundle")
 
+    # A complete device that happens to include a case, charger or box is not
+    # an accessory. Keep the device identity when the accessory is explicitly
+    # bundled, but never when the title is packaging-only, a console part, a
+    # compatibility item or a multi-item lot.
+    bundled_accessory_match = BUNDLED_ACCESSORY_RE.search(title_clean)
+    bundled_accessory = bool(bundled_accessory_match)
+    # "Pixel 8 Phone Case with ring holder" mentions "with" only after the
+    # case has already been named: the accessory is the product being sold.
+    # A bundled accessory must come after the joiner phrase.
+    accessory_named_first = bool(
+        bundled_accessory_match
+        and ACCESSORY_NOUN_RE.search(title_clean[: bundled_accessory_match.start()])
+    )
+    # A title that sells a lot of cases, covers or accessories is an accessory
+    # listing even when it mentions "with" or a device model.
+    accessory_lot = bool(re.search(
+        r"\b(?:cases?|covers?|protectors?|skins?)\s*(?:lot|bundle|job\s*lot|multipack|multi\s*pack)\b"
+        r"|\b(?:lot|bundle|job\s*lot)\s+of\s+(?:\d+\s+)?(?:cases?|covers?|protectors?|accessories)\b"
+        r"|\baccessories\s+(?:only|lot)\b",
+        title_clean,
+        re.I,
+    ))
+    keep_bundled_device = bool(
+        accessory
+        and product_key
+        and bundled_accessory
+        and not accessory_named_first
+        and not accessory_lot
+        and not console_part
+        and not compatibility
+        and not multi_item
+        and not contract
+        and not empty_title
+        and not parts_only
+    )
+    if keep_bundled_device:
+        accessory = False
+        flags = [flag for flag in flags if flag != "accessory_or_box"]
     if accessory:
         product_key, product_name = None, None
         confidence = 0.0

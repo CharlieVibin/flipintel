@@ -56,7 +56,7 @@ def test_category_catalogues_are_unique_and_urls_are_browsable():
         if marketplace != "ebay":
             assert all(category.path.startswith("/") for category in categories)
 
-    assert category_by_id("vinted", "2994") is not None
+    assert category_by_id("vinted", "3580") is not None
     assert category_by_id("gumtree", "computers-software") is not None
     assert category_by_id("ebay", "139971") is not None
     assert categories_for("facebook") == ()
@@ -81,7 +81,7 @@ def test_vinted_category_parser_keeps_cards_and_category_id():
     </body></html>
     """
     collector = VintedCollector.__new__(VintedCollector)
-    items = collector.parse_search(html, "category:3564")
+    items = collector.parse_search(html, "category:3580")
     assert len(items) == 1
     item = items[0]
     assert item.external_id == "111"
@@ -209,12 +209,12 @@ def test_category_scan_stops_on_overlap_after_the_safety_page(tmp_path):
     try:
         known = _listing(db, "known-1")
         collector = FakeCategoryCollector({
-            ("3564", 1): CategoryPage(
-                items=[_raw("known-1", "3564"), _raw("new-1", "3564")],
+            ("3580", 1): CategoryPage(
+                items=[_raw("known-1", "3580"), _raw("new-1", "3580")],
                 page=1, has_more=True,
             ),
-            ("3564", 2): CategoryPage(
-                items=[_raw("known-1", "3564"), _raw("new-1", "3564")],
+            ("3580", 2): CategoryPage(
+                items=[_raw("known-1", "3580"), _raw("new-1", "3580")],
                 page=2, has_more=True,
             ),
         })
@@ -225,18 +225,18 @@ def test_category_scan_stops_on_overlap_after_the_safety_page(tmp_path):
         scanner._seed_categories("vinted")
         db.execute(
             "UPDATE category_scans SET backfill_done=1, next_due_at=? "
-            "WHERE marketplace='vinted' AND category_id='3564'",
+            "WHERE marketplace='vinted' AND category_id='3580'",
             (iso(),),
         )
         outcome = asyncio.run(scanner._scan_categories(collector, manual=False))
         assert outcome.status == "ok", outcome.error
         detail = outcome.detail["categories"][0]
-        assert detail["category_id"] == "3564"
+        assert detail["category_id"] == "3580"
         assert detail["pages"] == 2
         assert detail["stop"] == "overlap"
-        assert collector.requests == [("3564", 1), ("3564", 2)]
+        assert collector.requests == [("3580", 1), ("3580", 2)]
         state = db.query_one(
-            "SELECT * FROM category_scans WHERE marketplace='vinted' AND category_id='3564'"
+            "SELECT * FROM category_scans WHERE marketplace='vinted' AND category_id='3580'"
         )
         assert state["backfill_done"] == 1
         assert state["last_new"] == 1
@@ -245,7 +245,7 @@ def test_category_scan_stops_on_overlap_after_the_safety_page(tmp_path):
         memberships = db.query(
             "SELECT category_id FROM listing_categories WHERE listing_id=?", (known,)
         )
-        assert memberships and memberships[0]["category_id"] == "3564"
+        assert memberships and memberships[0]["category_id"] == "3580"
     finally:
         db.close()
 
@@ -254,8 +254,8 @@ def test_backfill_phase_scans_one_category_to_the_configured_depth(tmp_path):
     db = Database(tmp_path / "category-capped.db")
     try:
         pages = {
-            ("3564", page): CategoryPage(
-                items=[_raw(f"capped-{page}-{index}", "3564") for index in range(2)],
+            ("3580", page): CategoryPage(
+                items=[_raw(f"capped-{page}-{index}", "3580") for index in range(2)],
                 page=page,
                 has_more=True,
             )
@@ -265,16 +265,20 @@ def test_backfill_phase_scans_one_category_to_the_configured_depth(tmp_path):
         scanner = _category_scanner(db, collector)
         db.set_settings({"category_requests_per_cycle": "10", "category_backfill_pages": "10"})
         scanner._seed_categories("vinted")
-        # Every category is due, but the backfill phase must only take one.
-        db.execute("UPDATE category_scans SET next_due_at=?", (iso(),))
+        # The target category is due, but the backfill phase must only take one.
+        db.execute(
+            "UPDATE category_scans SET next_due_at=? "
+            "WHERE marketplace='vinted' AND category_id='3580'",
+            (iso(),),
+        )
         outcome = asyncio.run(scanner._scan_categories(collector, manual=False))
         assert outcome.status == "ok", outcome.error
-        assert [category for category, _ in collector.requests] == ["3564"] * 10
+        assert [category for category, _ in collector.requests] == ["3580"] * 10
         assert [page for _, page in collector.requests] == list(range(1, 11))
         detail = outcome.detail["categories"][0]
         assert detail["stop"] == "page_limit"
         state = db.query_one(
-            "SELECT * FROM category_scans WHERE marketplace='vinted' AND category_id='3564'"
+            "SELECT * FROM category_scans WHERE marketplace='vinted' AND category_id='3580'"
         )
         assert state["backfill_done"] == 1
         assert state["coverage"] == "partial"
@@ -289,20 +293,20 @@ def test_incremental_scan_stops_on_page_one_when_nothing_is_new(tmp_path):
     try:
         _listing(db, "known-1")
         collector = FakeCategoryCollector({
-            ("3564", 1): CategoryPage(
-                items=[_raw("known-1", "3564")], page=1, has_more=True,
+            ("3580", 1): CategoryPage(
+                items=[_raw("known-1", "3580")], page=1, has_more=True,
             ),
         })
         scanner = _category_scanner(db, collector)
         scanner._seed_categories("vinted")
         db.execute(
             "UPDATE category_scans SET backfill_done=1, next_due_at=? "
-            "WHERE marketplace='vinted' AND category_id='3564'",
+            "WHERE marketplace='vinted' AND category_id='3580'",
             (iso(),),
         )
         outcome = asyncio.run(scanner._scan_categories(collector, manual=False))
         assert outcome.status == "ok", outcome.error
-        assert collector.requests == [("3564", 1)]
+        assert collector.requests == [("3580", 1)]
         assert outcome.detail["categories"][0]["stop"] == "overlap"
     finally:
         db.close()
@@ -315,12 +319,12 @@ def test_reseeding_the_catalogue_does_not_reset_scan_coverage(tmp_path):
         scanner._seed_categories("vinted")
         db.execute(
             "UPDATE category_scans SET coverage='partial', backfill_done=1 "
-            "WHERE marketplace='vinted' AND category_id='3564'"
+            "WHERE marketplace='vinted' AND category_id='3580'"
         )
         scanner._seed_categories("vinted")
         state = db.query_one(
             "SELECT coverage, backfill_done FROM category_scans "
-            "WHERE marketplace='vinted' AND category_id='3564'"
+            "WHERE marketplace='vinted' AND category_id='3580'"
         )
         assert state["coverage"] == "partial"
         assert state["backfill_done"] == 1
@@ -332,15 +336,15 @@ def test_category_backfill_finishes_and_marks_clean_coverage(tmp_path):
     db = Database(tmp_path / "category-backfill.db")
     try:
         collector = FakeCategoryCollector({
-            ("3564", 1): CategoryPage(
-                items=[_raw("a-1", "3564")], page=1, has_more=False,
+            ("3580", 1): CategoryPage(
+                items=[_raw("a-1", "3580")], page=1, has_more=False,
             ),
         })
         scanner = _category_scanner(db, collector)
         outcome = asyncio.run(scanner._scan_categories(collector, manual=False))
         assert outcome.status == "ok"
         state = db.query_one(
-            "SELECT * FROM category_scans WHERE marketplace='vinted' AND category_id='3564'"
+            "SELECT * FROM category_scans WHERE marketplace='vinted' AND category_id='3580'"
         )
         assert state["backfill_done"] == 1
         assert state["coverage"] == "full"
@@ -349,9 +353,9 @@ def test_category_backfill_finishes_and_marks_clean_coverage(tmp_path):
         vinted = next(m for m in snapshot["marketplaces"] if m["marketplace"] == "vinted")
         assert vinted["supported"] is True
         assert vinted["scanned_categories"] >= 1
-        entry = next(c for c in vinted["categories"] if c["category_id"] == "3564")
+        entry = next(c for c in vinted["categories"] if c["category_id"] == "3580")
         assert entry["state"] == "ok"
         assert entry["new"] == 1
-        assert entry["scan_url"].endswith("/catalog/3564-electronics_computers")
+        assert entry["scan_url"].endswith("/catalog/3580-electronics_comp_laptops")
     finally:
         db.close()

@@ -318,7 +318,7 @@
     "title": "Osmo interactive play bundle 2 x games like new for iPad",
     "review_price": 20.0,
     "expect_key": null,
-    "expect_category": "tablet",
+    "expect_category": "other",
     "expect_bundle": true,
     "expect_flags": [
       "accessory_or_box"
@@ -328,7 +328,7 @@
     "title": "Hastraith White Stylus for Apple iPad",
     "review_price": 8.0,
     "expect_key": null,
-    "expect_category": "tablet",
+    "expect_category": "other",
     "expect_flags": [
       "accessory_or_box"
     ]

@@ -155,6 +155,30 @@ def test_risk_score_does_not_call_a_low_price_fraud_alone():
     assert any("condition" in reason.lower() for reason in strongly_suspicious.reasons)
 
 
+def test_unstated_variant_alone_is_not_a_manual_review():
+    estimate = SimpleNamespace(
+        comps=[{"adjusted_price": 300.0} for _ in range(8)],
+        market_values=[300.0] * 8,
+        sold_count=0,
+    )
+    normal_price = {
+        "price": 290.0,
+        "condition_norm": "good",
+        "flags_list": ["variant_unclear"],
+        "raw_json": "{}",
+        "image_url": "https://example.invalid/x.jpg",
+    }
+    result = assess_listing(normal_price, estimate, expected_resale=300, purchase_total=290)
+    # The data gap lowers confidence but does not, on its own, ask a human to
+    # verify a listing that is priced at the normal market level.
+    assert result.review_recommended is False
+    assert "variant_unclear" in result.signals
+
+    cheap = {**normal_price, "price": 120.0}
+    suspicious = assess_listing(cheap, estimate, expected_resale=300, purchase_total=120)
+    assert suspicious.review_recommended is True
+
+
 def test_condition_contradiction_and_networking_identification():
     contradiction = identify_listing(
         "Sealed brand new PS5 console",

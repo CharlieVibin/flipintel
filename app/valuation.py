@@ -895,6 +895,11 @@ class ValuationEngine:
                 and (estimate.sample_size if estimate else 0) >= 4
                 and float(listing.get("identification_confidence") or 0) >= 0.55
                 and not listing.get("is_bundle")
+                # An unstated storage, memory or chip variant cannot be valued
+                # precisely, so it never enters the automatic feed even when
+                # the price is attractive. The listing is still visible with
+                # its variant warning; it is no longer a manual-review chore.
+                and "variant_unclear" not in flags
                 and not needs_review
                 and (
                     estimate.sold_count >= 1

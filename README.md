@@ -12,13 +12,15 @@ clear a profit, ROI and confidence floor.
 
 ## What works
 
-- **Category-first discovery.** The scanner browses 34 electronics category
-  targets directly — 10 Vinted branches, 6 Gumtree branches and 18 eBay
-  branches — with no search phrase required. Categories are scanned newest-first
-  and tracked independently, with resumable backfills, adaptive 3–20 minute
-  intervals, overlap stopping and a safety page. The 89-keyword phrase list is
-  still used for two secondary searches per cycle to catch miscategorised items
-  and valuation comparables, but it no longer limits what gets discovered.
+- **Category-first discovery.** The scanner browses 28 hardware category
+  targets directly — 15 Vinted device subcategories, 3 Gumtree hardware
+  categories and 10 eBay hardware branches — with no search phrase required.
+  The catalogue deliberately targets device branches rather than parent
+  "accessories", games, audio and TV branches. Categories are scanned
+  newest-first and tracked independently, with resumable backfills, adaptive
+  3–20 minute intervals, overlap stopping and a safety page. Keyword discovery
+  is an explicit hybrid-mode supplement, not part of the category cycle, so a
+  category scan cannot quietly refill the feed with accessories and games.
 - **Live collection** from Vinted UK and Gumtree UK with per-host rate limits,
   robots.txt checks, retries, circuit breakers and honest failure states.
 - **Optional eBay UK** collection through the free official Browse API. Add
@@ -27,10 +29,13 @@ clear a profit, ROI and confidence floor.
 - **Automatic model identification** for GPUs, CPUs, memory, NVMe/SATA/2.5-inch/
   external SSDs, HDDs, motherboards, complete PCs, laptops, consoles, handhelds,
   monitors, phones and tablets. Generation, capacity, VRAM, interface and kit
-  details are part of the product key where they are stated. Accessories, empty
-  boxes, games, Kinect-style add-ons, faceplates, parts-only devices and
-  wanted ads are excluded from deal recommendations; genuine console bundles
-  remain identified as consoles.
+  details are part of the product key where they are stated; legacy 8/16/32GB
+  phone and tablet capacities are recognised as real variants. Accessories
+  (cases, covers, bags, styluses), empty boxes, games, Kinect-style add-ons,
+  faceplates, laptop mainboards, parts-only devices and wanted ads are excluded
+  from deal recommendations; genuine console bundles remain identified as
+  consoles. Titles are read structurally rather than by adding exclusion words:
+  a model name inside an accessory title is not evidence of the device.
 - **Comparable-market valuation** that prefers recently completed sales,
   keeps sold and asking evidence separate, uses weighted medians/quartiles,
   trims outliers, caps confidence honestly and supports complete-PC component
@@ -67,6 +72,10 @@ clear a profit, ROI and confidence floor.
   examples. Opening a group filters the queue to those listings; explicit
   approve/reject actions work on up to 200 selected IDs at a time. Bulk approval
   resolves the review gate but adds no evidence and raises no confidence.
+  A missing variant is a data gap, not an accusation: it lowers confidence and
+  blocks an automatic recommendation, but only reaches review when the price is
+  also far below the market. Normal-price phones with unstated storage no longer
+  wait in the queue.
 - **Manual-review queue** for implausibly cheap items, including unusually
   cheap memory/storage. These are excluded from automatic recommendations and
   can be inspected through the dashboard's Review filter.

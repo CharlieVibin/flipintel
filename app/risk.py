@@ -241,17 +241,28 @@ def assess_listing(
         and sold_support == 0
         and market_ratio is not None
         and market_ratio <= 0.65
+        # Compare the asking price with the modelled resale for this listing's
+        # condition, not only with the asking-price pool. A used console at
+        # 25% below its modelled value is a normal bargain; the pool median is
+        # pulled up by boxed/new listings and used to send those real deals to
+        # manual review. Below 60% of the modelled value is still suspicious.
+        and (expected <= 0 or purchase <= expected * 0.60)
     )
     review_recommended = (
         level == "high"
         or (price_only and score >= 30)
         or (level == "medium" and len(signal_keys) >= 2 and not price_only)
-        or "variant_unclear" in signal_keys
         # A price far below the observed market is not fraud on its own, but it
         # is exactly the case a human should verify before it ranks as a deal.
         # The listing stays low/medium risk; it simply leaves the automatic feed.
         or deep_price_anomaly
     )
+    # variant_unclear is a data gap, not a suspicion. It adds 12 risk points and
+    # blocks an automatic recommendation in the valuation gate, but on its own
+    # it no longer fills the manual queue: a phone at the normal model price
+    # with an unstated capacity is not a bargain to verify. A genuinely cheap
+    # unknown-variant listing still reaches review through price_anomaly or
+    # extreme_discount above.
     reasons = [reason for _, _, reason in signals]
     return RiskAssessment(
         score=score,

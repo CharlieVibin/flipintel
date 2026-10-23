@@ -28,7 +28,14 @@ def _ebay_item(**overrides):
     return base
 
 
-def test_ebay_missing_credentials_are_reported_without_network():
+def test_ebay_missing_credentials_are_reported_without_network(tmp_path, monkeypatch):
+    # A developer running the suite may have real keys in .env. This test is
+    # about the unconfigured path, so isolate it from local credentials.
+    monkeypatch.delenv("EBAY_CLIENT_ID", raising=False)
+    monkeypatch.delenv("EBAY_CLIENT_SECRET", raising=False)
+    monkeypatch.setattr(
+        "app.collectors.ebay.credential_store.env_file", tmp_path / "missing.env"
+    )
     db = Database(":memory:")
     collector = EbayCollector(db)
     try:

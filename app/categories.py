@@ -4,11 +4,21 @@ Every entry is a category browse endpoint that was checked against the live
 marketplace where possible. Keyword discovery still exists for comparables and
 miscategorised listings, but it is no longer the primary way listings are found.
 
+The catalogue deliberately targets device branches, not their parent
+"accessories" branches. The previous Vinted entries included the whole of
+electronics and audio, which produced thousands of phone cases, game discs,
+headphones and unrelated collectibles for every genuine machine. Narrow
+subcategories are cheaper to scan and their listings are relevant before the
+parser even runs.
+
 Notes:
 * Vinted exposes server-rendered ``/catalog/<id>-<slug>`` pages with 96 cards
-  per page. The IDs below come from Vinted's public UK catalogue sitemap.
+  per page. The IDs below come from Vinted's public UK catalogue sitemap and
+  were checked against their parent pages.
 * Gumtree exposes ``/for-sale/<slug>`` category pages with 30 cards per page,
-  ``?sort=newest`` ordering and ``/uk/pageN`` pagination.
+  ``?sort=newest`` ordering and ``/uk/pageN`` pagination. Only its three
+  hardware categories are scanned; games, audio, cameras and TVs are not
+  valued by this application.
 * eBay Browse search accepts a single non-top-level ``category_ids`` value with
   no ``q``. Top-level categories are not used because eBay requires a keyword
   for those. The IDs below are EBAY_GB leaf/branch categories documented by
@@ -35,27 +45,27 @@ class Category:
 
 
 VINTED: tuple[Category, ...] = (
-    Category("vinted", "3564", "Computers & accessories", "/catalog/3564-electronics_computers", "2994", priority=3),
-    Category("vinted", "3565", "Mobile phones & communication", "/catalog/3565-electronics_phones", "2994", priority=3),
-    Category("vinted", "3566", "Audio, headphones & hi-fi", "/catalog/3566-electronics_audio", "2994", priority=2),
-    Category("vinted", "3002", "Video games & consoles", "/catalog/3002-electronics_video_games", "2994", priority=3),
-    Category("vinted", "3054", "Cameras & accessories", "/catalog/3054-electronics_cameras_accessories", "2994", priority=2),
-    Category("vinted", "3568", "TV & home cinema", "/catalog/3568-electronics_tv", "2994", priority=1),
-    Category("vinted", "3004", "Wearables", "/catalog/3004-electronics_wearables", "2994", priority=1),
-    Category("vinted", "3567", "Tablets & accessories", "/catalog/3567-electronics_tablets_acc", "2994", priority=2),
-    Category("vinted", "2995", "Electronics accessories", "/catalog/2995-electronics_accessories", "2994", priority=1),
-    # Catch-all branch: covers items filed only at the electronics root. Scanned
-    # less often because the branches above already overlap most of it.
-    Category("vinted", "2994", "All electronics (catch-all)", "/catalog/2994-electronics", None, priority=0),
+    Category("vinted", "3580", "Laptops", "/catalog/3580-electronics_comp_laptops", "3564", priority=3),
+    Category("vinted", "3581", "Desktop PCs", "/catalog/3581-electronics_comp_desktops", "3564", priority=3),
+    Category("vinted", "3602", "Graphics cards", "/catalog/3602-electronics_comp_graphicscards", "3582", priority=3),
+    Category("vinted", "3599", "Processors", "/catalog/3599-electronics_comp_cpus", "3582", priority=3),
+    Category("vinted", "3603", "Memory (RAM)", "/catalog/3603-electronics_comp_ram", "3582", priority=2),
+    Category("vinted", "3600", "Motherboards", "/catalog/3600-electronics_comp_motherboards", "3582", priority=2),
+    Category("vinted", "3605", "Internal hard drives", "/catalog/3605-electronics_comp_internal_hdd", "3582", priority=1),
+    Category("vinted", "3607", "Internal SSDs", "/catalog/3607-electronics_comp_internal_ssd", "3582", priority=2),
+    Category("vinted", "3637", "Monitors", "/catalog/3637-electronics_comp_monitors", "3564", priority=2),
+    Category("vinted", "3661", "Mobile phones", "/catalog/3661-electronics_phones_mobilephones", "3565", priority=3),
+    Category("vinted", "3728", "Tablets", "/catalog/3728-electronics_tab_tablets", "3567", priority=2),
+    Category("vinted", "3025", "Consoles", "/catalog/3025-electronics_vg_consoles", "3002", priority=3),
+    Category("vinted", "3642", "Routers", "/catalog/3642-electronics_comp_routers", "3594", priority=1),
+    Category("vinted", "3643", "Mesh Wi-Fi", "/catalog/3643-electronics_comp_mesh", "3594", priority=1),
+    Category("vinted", "3644", "Network switches", "/catalog/3644-electronics_comp_network_switches", "3594", priority=1),
 )
 
 GUMTREE: tuple[Category, ...] = (
     Category("gumtree", "computers-software", "Computers & software", "/for-sale/computers-software", priority=3),
     Category("gumtree", "phones", "Mobile phones", "/for-sale/phones", priority=3),
     Category("gumtree", "video-games-consoles", "Video games & consoles", "/for-sale/video-games-consoles", priority=3),
-    Category("gumtree", "tv-dvd-cameras", "TV, DVD & cameras", "/for-sale/tv-dvd-cameras", priority=2),
-    Category("gumtree", "stereos-audio", "Audio & stereo", "/for-sale/stereos-audio", priority=2),
-    Category("gumtree", "cameras-studio-equipment", "Cameras & studio equipment", "/for-sale/cameras-studio-equipment", priority=2),
 )
 
 EBAY: tuple[Category, ...] = (
@@ -65,18 +75,7 @@ EBAY: tuple[Category, ...] = (
     Category("ebay", "165", "Drives, storage & blank media", coverage="partial", priority=2),
     Category("ebay", "171485", "Tablets & eReaders", coverage="partial", priority=2),
     Category("ebay", "139971", "Video game consoles", coverage="partial", priority=3),
-    Category("ebay", "139973", "Video games", coverage="partial", priority=2),
-    Category("ebay", "54968", "Video game accessories", coverage="partial", priority=1),
     Category("ebay", "9355", "Mobile & smart phones", coverage="partial", priority=3),
-    Category("ebay", "9394", "Mobile phone accessories", coverage="partial", priority=1),
-    Category("ebay", "31388", "Digital cameras", coverage="partial", priority=2),
-    Category("ebay", "11724", "Camcorders", coverage="partial", priority=1),
-    Category("ebay", "15200", "Camera, drone & photo accessories", coverage="partial", priority=1),
-    Category("ebay", "179697", "Camera drones", coverage="partial", priority=1),
-    Category("ebay", "11071", "TVs", coverage="partial", priority=2),
-    Category("ebay", "32852", "DVD, Blu-ray & home cinema", coverage="partial", priority=1),
-    Category("ebay", "15052", "Portable audio & headphones", coverage="partial", priority=2),
-    Category("ebay", "112529", "Headphones", coverage="partial", priority=2),
 )
 
 CATALOGUES: dict[str, tuple[Category, ...]] = {

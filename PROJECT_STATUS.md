@@ -5,6 +5,124 @@
 **Runtime:** Python 3.10, FastAPI, SQLite, React 18 + Vite + Tailwind
 **Live dashboard:** http://127.0.0.1:8765 (while the local server is running)
 
+## Session 2026-10-23 — discovery and deal-pipeline audit
+
+Before changing thresholds, the pipeline was measured listing by listing on a
+frozen 60,863-listing snapshot (`scripts/audit_pipeline.py`, read-only). The
+same snapshot was then re-identified and revalued with the previous code and
+with the new code, each with a full reconciliation. This is the first
+apples-to-apples comparison on identical collected listings.
+
+### Audit findings (same 60,863 listings, previous code)
+
+- 11,437 listings had an exact product identity (18.8%); 10,026 were valued and
+  8,023 had at least four comparables. Only **21** cleared every deal gate, while
+  **2,570** sat in manual review.
+- The dominant review reason was not a suspicious price. It was
+  `variant_unclear`: the risk model sent *every* phone/tablet with an unstated
+  capacity to review, including hundreds priced at the normal market level.
+- 5,496 review rows were variant-unclear; 1,993 of those had only the variant
+  data gap as a reason. The queue was bookkeeping, not triage.
+- Identification lost real listings for mechanical reasons: 8/16/32GB legacy
+  capacities were ignored (iPhone 6/7, iPad 2–5), games such as `MW2 ps3` and
+  `Skyrim - PS3` were read as consoles, cases containing `Plus` (`iPhone 16 Plus
+  Phone Cases`) were read as handsets, and a laptop mainboard became a laptop.
+- 48,282 listings had no identity. Sampling them confirmed that most are phone
+  cases, games, media, cables and unrelated products; the console cue alone
+  matched 8,170 of them. Category scanning was also pulling whole accessory and
+  games branches (Vinted Electronics, eBay Video Games, Gumtree audio/cameras).
+
+### What changed
+
+- [x] **Discovery targets devices, not departments.** The catalogue is now 28
+      hardware targets: 15 Vinted device subcategories (laptops, desktops, GPUs,
+      CPUs, RAM, motherboards, SSDs/HDDs, monitors, phones, tablets, consoles,
+      routers/mesh/switches), 3 Gumtree hardware categories and 10 eBay hardware
+      branches. Accessories, games, audio, cameras and TV branches are gone.
+- [x] **Keyword discovery is hybrid-only.** In category mode the old two-keyword
+      supplement no longer runs, so a category cycle cannot refill the feed with
+      accessories and games through the back door. It remains available when the
+      scanner is deliberately set to hybrid discovery.
+- [x] **New noise is not stored.** New listings that identify as an accessory,
+      game, packaging, compatibility item, parts-only device, wanted ad or
+      multi-item lot are skipped before insert. Existing rows are untouched and
+      expire normally, so collected history is preserved.
+- [x] **Structural accessory detection.** A model name inside an accessory title
+      is no longer evidence of the device. `plus` is treated as a model suffix,
+      not a bundle conjunction; a bundled accessory must follow an explicit
+      "with/includes" phrase; accessory nouns before that phrase, case lots,
+      covers, bags, styluses, `etui`/`hulle`/`funda`, swivel bases and
+      packaging-only colour descriptions are excluded. `Pixel 8 Phone Case with
+      Stand` and `iPhone 16 Plus Phone Cases` no longer become handsets.
+- [x] **Games versus consoles.** A short title with an unexplained word (`MW2
+      ps3`, `PS3 Singstar`, `Skyrim - PS3`) is no longer hardware; `PS5 with 2
+      games` and `PlayStation 5 Slim + 4 Games` remain console bundles; `PS5
+      game bundle` remains a game bundle. A component-first title (`RAM 64GB …
+      (PS5 Pro exchange)`) can no longer become a PS5.
+- [x] **Variant resolution where evidence exists.** Legacy 8/16/32GB capacities
+      now form real phone/tablet keys, resolving older iPhones and iPads instead
+      of queueing them. Laptop mainboards are parts, not laptops, and a CPU sold
+      with RAM, SSD and Windows is a complete machine rather than a £60 CPU.
+- [x] **Cracked devices are valued as fair, not used.** `cracked/chipped` sets
+      condition `fair` and a caution flag, so a cracked-screen handset is no
+      longer compared with good-condition stock and promoted as a bargain.
+- [x] **Review is triage, not a variant to-do list.** `variant_unclear` still
+      lowers confidence, still blocks automatic recommendation and still appears
+      in the listing's risk reasons. On its own it no longer opens a manual
+      review; only a genuine price anomaly does. Normal-price phones with
+      unstated storage leave the queue.
+- [x] **Deep-discount review compares like with like.** The "far below market"
+      review trigger now also requires the asking price to be below 60% of the
+      listing's own modelled resale, instead of only below the ask-pool median.
+      The pool median is pulled up by boxed/new stock, which was sending genuine
+      used console deals (Xbox Series X at £250 vs £340 modelled) to review.
+
+### Benchmark (identical 60,863 listings, full revaluation)
+
+| Metric | Previous code | New code | Change |
+|---|---:|---:|---:|
+| Exact product identities | 11,437 (18.8%) | 14,408 (23.7%) | +2,971 (+26%) |
+| Distinct products | 2,599 | 3,094 | +495 (+19%) |
+| Valued listings | 10,026 | 12,749 | +2,723 (+27%) |
+| At least 4 comparables | 8,023 | 10,332 | +2,309 (+29%) |
+| Automatic deals | 21 | 37 | +16 |
+| Manual review queue | 2,570 | 784 | −1,786 (−69%) |
+| Unexplained listings | 48,282 | 45,404 | −2,878 |
+
+Deal-set comparison: 13 deals are common, **24 are new** and **8 left**. Three
+of the eight removals were false positives found by the audit (a RAM kit priced
+as a PS5 Pro, a Dell laptop mainboard priced as a laptop, and a cracked-screen
+S22 Ultra priced as good condition). The other five stopped passing after the
+comparison pool changed or the bundle gate applied; the largest was a PS5 Slim
++ 4 games bundle at £280. New deals are mostly consoles, phones, GPUs and
+complete PCs (RTX 5070 Ti £450, PS5 Pro £500, iPhone 15 Pro £204, Steam Deck 1TB
+£180, Xbox Series S £140–150), plus two RAM kits and two SSDs.
+
+### Honest limits
+
+- Every valuation is an **asking-price estimate**. No completed-sale evidence is
+  invented; deals with no sold support say so. Vinted still has no sold feed.
+- The riskiest new deals are cheap handsets and a Switch OLED at £79. Their
+  prices sit within the current asking-market spread, so the existing risk model
+  does not flag them; they are not evidence of a completed sale either. The
+  confidence and review details remain visible in the drawer.
+- 45,404 rows still have no identity. Most are accessory/game/media rows
+  already collected; new scans no longer store them. eBay category discovery is
+  still unverified without API keys.
+
+### Verification
+
+- **76 tests pass**, including new regressions for accessory-first titles,
+  legacy capacities, console games vs bundles, laptop mainboards, cracked
+  condition and variant-only review policy.
+- Frontend `tsc -b && vite build` passes.
+- Live database (preserved, not reset): the new rules were applied with a full
+  reconciliation. At the last check the running app reported **62,771 active
+  listings, 37 deals and 816 review items**; all three marketplaces were healthy.
+- A pre-audit copy was kept at `data/rigradar.pre-audit.db`; the audit script
+  (`scripts/audit_pipeline.py`) is read-only and can be rerun against any
+  database copy to reproduce these numbers.
+
 ## Session 2026-10-23 — grouped review queue
 
 The review queue reached roughly 2,000 rows, and roughly half of them were the

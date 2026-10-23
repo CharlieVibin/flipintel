@@ -69,6 +69,18 @@ def search_term_for(key: str, name: str) -> str:
     return term.strip()
 
 
+NOISE_FLAGS = {
+    "accessory_or_box",
+    "console_game",
+    "compatibility_accessory",
+    "parts_only",
+    "wanted_ad",
+    "contract_or_finance",
+    "multi_item",
+    "engineering_sample",
+}
+
+
 def _valid_url(url: str, marketplace: str) -> bool:
     try:
         parsed = urlparse(url)
@@ -677,11 +689,12 @@ class Scanner:
             details.append(cat)
 
         # Secondary targeted keyword pass for miscategorised listings and
-        # comparables. It is deliberately small; category discovery does the
-        # breadth work.
+        # comparables. Category mode is keyword-free by design: the old
+        # supplement added thousands of games, cases and unrelated products to
+        # every category pass. Hybrid mode keeps it as an explicit opt-in.
         supplement = max(0, min(6, self.db.setting_int("keyword_supplement_queries", 2)))
         supplement_detail: dict[str, Any] | None = None
-        if supplement and budget > 0:
+        if supplement and budget > 0 and self._discovery_mode(marketplace) == "hybrid":
             queries = self._queries_for_cycle(marketplace, count=min(supplement, budget))
             s_new = 0
             try:
@@ -960,6 +973,12 @@ class Scanner:
             title = normalise_text(item.title)[:500]
             description = normalise_text(item.description)[:4000]
             ident = identify_listing(title, f"{description} {item.condition_raw}", marketplace)
+            # Structural noise (games, cases, packaging, compatibility parts)
+            # is not worth storing or valuing. Existing rows are left untouched
+            # and expire through the normal stale-listing maintenance; nothing
+            # collected is deleted.
+            if not ident.product_key and NOISE_FLAGS.intersection(ident.flags):
+                continue
             existing = self.db.query_one(
                 """
                 SELECT l.id, l.price, l.last_price, l.category, l.product_key, l.product_name,

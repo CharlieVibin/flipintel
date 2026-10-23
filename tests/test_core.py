@@ -164,6 +164,93 @@ def test_phone_shorthand_and_case_brand_traps():
         assert "accessory_or_box" in result.flags, title
 
 
+def test_accessories_naming_a_model_do_not_become_the_device():
+    # "plus" is a model suffix, not a bundle conjunction. The old rule read
+    # "iPhone 16 Plus Phone Cases" as a phone that came with cases.
+    for title in (
+        "iPhone 16 Plus Phone Cases",
+        "iPhone 15 plus case lot",
+        "iPhone 14 covers and phone clip",
+        "Velvet Caviar Bundle: iPhone 14 Pro Case, MagSafe Ring & Portable Charger",
+        "Purple & Gold Google Pixel 8 Phone Case with Rotating Ring Holder Stand",
+        "Lenovo Tab A9 Shockproof Case Red & Black with Stand, Brand New",
+    ):
+        result = identify_listing(title)
+        assert result.product_key is None, title
+        assert result.confidence == 0, title
+        assert "accessory_or_box" in result.flags, title
+
+    # A genuine device that includes a case keeps its identity.
+    bundled = identify_listing("iPhone 13 with case and screen protector")
+    assert bundled.product_key == "phone:iphone-13"
+    assert "accessory_or_box" not in bundled.flags
+
+
+def test_legacy_capacities_resolve_older_device_variants():
+    iphone = identify_listing("iPhone 6 Plus 16gb Unlocked")
+    assert iphone.product_key == "phone:iphone-6-plus-16gb"
+    assert iphone.attrs["storage_gb"] == 16
+    assert "variant_unclear" not in iphone.flags
+
+    ipad = identify_listing("iPad 4th Gen 32GB WiFi")
+    assert ipad.product_key == "tablet:ipad-gen4-32gb"
+    assert ipad.attrs["storage_gb"] == 32
+    assert "variant_unclear" not in ipad.flags
+
+    # A modern SSD capacity is not treated as a legacy phone variant.
+    assert identify_listing("iPhone 13 128GB").attrs["storage_gb"] == 128
+
+
+def test_console_bundles_and_console_accessories_are_separated():
+    bundle = identify_listing("Sony PlayStation 5 Console with Controllers and Headset")
+    assert bundle.product_key == "console:ps5"
+    assert "accessory_or_box" not in bundle.flags
+
+    controller_bundle = identify_listing("Xbox Series X Console & Green Controller")
+    assert controller_bundle.product_key == "console:xbox-series-x"
+
+    assert identify_listing("PS5 with 2 games").product_key == "console:ps5"
+    assert identify_listing("PS5 game bundle").product_key is None
+
+    kinect = identify_listing("Xbox one Kinect sensor")
+    assert kinect.product_key is None
+    assert kinect.category == "console"
+
+    # Short game titles name a platform without any hardware cue. A single
+    # unexplained word is a game title, not proof of a console for sale.
+    for title in ("MW2 ps3", "PS3 Singstar", "Skyrim - PS3", "PS3 games bundle"):
+        assert identify_listing(title).product_key is None, title
+    assert identify_listing("PS5 disc edition").product_key == "console:ps5"
+    assert identify_listing("Xbox 360").product_key == "console:xbox-360"
+    assert identify_listing("Sony PS5 Blu-ray drive for digital editions").product_key is None
+
+    # A component-first title only mentions the console in passing.
+    ram = identify_listing("RAM 64GB (2x 32GB) Corsair (PS5 Pro exchange)")
+    assert ram.product_key is None
+    assert ram.kind != "console"
+
+    # A laptop mainboard is a replacement part, not a working laptop.
+    mainboard = identify_listing(
+        "Dell Latitude 5320 Motherboard i7-1185G7 3.0GHz DDR4 0DFNFK Tested"
+    )
+    assert mainboard.product_key is None
+
+    # A cracked handset is not valued against good-condition comparables.
+    cracked = identify_listing(
+        "Samsung Galaxy S22 Ultra - 128GB - Black (Unlocked) - cracked screen but working"
+    )
+    assert cracked.condition == "fair"
+    assert "condition_caution" in cracked.flags
+
+    # A CPU sold with RAM, an SSD and Windows is a complete machine, not a
+    # loose processor worth £60.
+    workstation = identify_listing(
+        "HP 250 G9 Intel Core i5-1235U 8GB RAM 256GB NVMe Windows 11 Pro"
+    )
+    assert workstation.kind == "pc"
+    assert "complete_system" in workstation.flags
+
+
 def test_working_with_issues_is_faulty_not_a_bargain():
     result = identify_listing(
         'Apple MacBook Air 13" 2019 - 8GB RAM / 128GB SSD - Working With Issues #112'
