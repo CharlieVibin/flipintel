@@ -27,6 +27,17 @@ export function timeAgo(value: string | null | undefined): string {
   return new Date(value).toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 }
 
+export function timeUntil(value: string | null | undefined): string {
+  if (!value) return "";
+  const target = new Date(value).getTime();
+  if (Number.isNaN(target)) return "";
+  const seconds = Math.max(0, Math.round((target - Date.now()) / 1000));
+  if (seconds < 45) return "now";
+  if (seconds < 3600) return `in ${Math.round(seconds / 60)}m`;
+  if (seconds < 86400) return `in ${Math.round(seconds / 3600)}h`;
+  return `in ${Math.round(seconds / 86400)}d`;
+}
+
 export function clockTime(value: string | null | undefined): string {
   if (!value) return "—";
   return new Date(value).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
@@ -56,6 +67,7 @@ export const CATEGORY_LABELS: Record<string, string> = {
   monitor: "Monitor",
   phone: "Phone",
   tablet: "Tablet",
+  networking: "Networking",
   other: "Tech",
 };
 

@@ -1,8 +1,8 @@
-import { ArrowUpRight, Bookmark, BookmarkCheck, Clock3, MapPin, RotateCcw, TrendingUp, X } from "lucide-react";
+import { ArrowUpRight, Bookmark, BookmarkCheck, CircleAlert, Clock3, MapPin, RotateCcw, TrendingUp, X } from "lucide-react";
 import type { Deal } from "../lib/types";
 import { cn } from "./ui";
 import { ConfidenceMeter, MarketBadge, ProductImage, ScoreRing } from "./ui";
-import { CATEGORY_LABELS, conditionLabel, daysAgo, money, pct } from "../lib/format";
+import { CATEGORY_LABELS, conditionLabel, daysAgo, methodLabel, money, pct } from "../lib/format";
 
 interface Props {
   deal: Deal;
@@ -15,7 +15,16 @@ interface Props {
 
 export function DealCard({ deal, onOpen, onSave, onDismiss, onRestore, archived = false }: Props) {
   const profit = deal.net_profit ?? 0;
-  const positive = profit > 0;
+  const review = deal.needs_review;
+  const positive = profit > 0 && !review;
+  const soldEvidence = ["sold_comps", "mixed_comps"].includes(deal.valuation_method ?? "");
+  const evidenceLabel = soldEvidence
+    ? "Sold evidence"
+    : deal.valuation_method === "live_asking_comps"
+      ? "Asking only"
+      : deal.valuation_method === "component_model"
+        ? "Component model"
+        : methodLabel(deal.valuation_method);
   return (
     <article
       className={cn(
@@ -31,7 +40,7 @@ export function DealCard({ deal, onOpen, onSave, onDismiss, onRestore, archived 
       }}
       tabIndex={0}
       role="button"
-      aria-label={`${deal.title}, ${money(deal.price)}, estimated profit ${money(profit)}`}
+      aria-label={`${deal.title}, ${money(deal.price)}, ${review ? "needs manual review" : `estimated profit ${money(profit)}`}`}
     >
       <div className="relative aspect-[16/9] overflow-hidden">
         <ProductImage
@@ -54,6 +63,27 @@ export function DealCard({ deal, onOpen, onSave, onDismiss, onRestore, archived 
                 <BookmarkCheck className="h-3 w-3" /> Saved
               </span>
             )}
+            {deal.needs_review && (
+              <span className="chip border-ember/30 bg-ink-950/80 text-ember backdrop-blur-md">
+                <CircleAlert className="h-3 w-3" /> Review
+              </span>
+            )}
+            {!deal.needs_review && deal.risk_level !== "low" && (
+              <span
+                className={cn(
+                  "chip border-ink-600 bg-ink-950/80 backdrop-blur-md",
+                  deal.risk_level === "high" ? "text-rose" : "text-amber-300",
+                )}
+                title={deal.risk_reasons?.[0] ?? "Marketplace risk assessment"}
+              >
+                Risk {Math.round(deal.risk_score)}
+              </span>
+            )}
+            {deal.duplicate_of && (
+              <span className="chip border-ink-500 bg-ink-950/80 text-mist-300 backdrop-blur-md">
+                Possible duplicate
+              </span>
+            )}
           </div>
           <div className="rounded-full border border-ink-600/70 bg-ink-950/75 px-1.5 py-1 backdrop-blur-md">
             <ScoreRing score={deal.score} size={38} />
@@ -72,17 +102,18 @@ export function DealCard({ deal, onOpen, onSave, onDismiss, onRestore, archived 
           <div
             className={cn(
               "shrink-0 rounded-xl border px-2.5 py-1.5 text-right backdrop-blur-md",
-              positive
-                ? "border-lime-400/30 bg-lime-400/10 text-lime-300"
-                : "border-ink-500 bg-ink-950/70 text-mist-300",
+              review
+                ? "border-ember/30 bg-ember/10 text-ember"
+                : positive
+                  ? "border-lime-400/30 bg-lime-400/10 text-lime-300"
+                  : "border-ink-500 bg-ink-950/70 text-mist-300",
             )}
           >
             <p className="numeric text-sm font-semibold leading-none">
-              {positive ? "+" : ""}
-              {money(profit)}
+              {review ? "Review" : `${positive ? "+" : ""}${money(profit)}`}
             </p>
             <p className="mt-1 font-mono text-[9px] uppercase tracking-wider opacity-80">
-              {pct(deal.roi, 0)} ROI
+              {review ? "Unverified" : `${pct(deal.roi, 0)} ROI`}
             </p>
           </div>
         </div>
@@ -111,6 +142,23 @@ export function DealCard({ deal, onOpen, onSave, onDismiss, onRestore, archived 
           </div>
         </div>
 
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          <span
+            className={cn(
+              "chip border-ink-600 bg-ink-850/80 text-[9px]",
+              soldEvidence ? "text-lime-300" : "text-ember",
+            )}
+            title={soldEvidence ? "At least one user-supplied completed sale supports this valuation" : "This valuation relies on live asking prices"}
+          >
+            {evidenceLabel}
+          </span>
+          {deal.net_profit_conservative != null && (
+            <span className="chip border-sky-400/20 bg-sky-400/[0.06] text-sky-300" title="Net profit if the lower end of the supported resale range is achieved">
+              Conservative {deal.net_profit_conservative >= 0 ? "+" : ""}{money(deal.net_profit_conservative)}
+            </span>
+          )}
+        </div>
+
         <div className="mt-3 flex items-center justify-between gap-4">
           <div className="flex min-w-0 items-center gap-2 text-[11px] text-mist-400">
             <span className="inline-flex items-center gap-1">
@@ -118,6 +166,14 @@ export function DealCard({ deal, onOpen, onSave, onDismiss, onRestore, archived 
             </span>
             <span className="h-1 w-1 rounded-full bg-ink-500" />
             <span className="truncate">{conditionLabel(deal.condition)}</span>
+            <span className="h-1 w-1 shrink-0 rounded-full bg-ink-500" />
+            <span className="shrink-0 text-mist-500">
+              {deal.shipping > 0
+                ? `${money(deal.shipping)} postage`
+                : deal.marketplace === "vinted"
+                  ? "Vinted delivery"
+                  : "Delivery not listed"}
+            </span>
             {deal.location && (
               <>
                 <span className="h-1 w-1 shrink-0 rounded-full bg-ink-500" />
@@ -128,7 +184,9 @@ export function DealCard({ deal, onOpen, onSave, onDismiss, onRestore, archived 
               </>
             )}
           </div>
-          <span className="numeric shrink-0 text-[10px] text-mist-500">{deal.sample_size} comps</span>
+          <span className="numeric shrink-0 text-[10px] text-mist-500">
+            {deal.sample_size} comps · {methodLabel(deal.valuation_method)}
+          </span>
         </div>
 
         <div className="mt-3">

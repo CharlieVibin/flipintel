@@ -155,7 +155,11 @@ export function DealsPage({
           icon={Sparkles}
           label="New today"
           value={`${overview?.new_deals_24h ?? 0}`}
-          sub="Qualifying deals in 24h"
+          sub={
+            overview?.review_count
+              ? `${overview.review_count} need manual review`
+              : "Qualifying deals in 24h"
+          }
           loading={!overview}
         />
         <Stat
@@ -218,6 +222,21 @@ export function DealsPage({
         </div>
       )}
 
+      {Boolean(overview?.review_count) && !filters.review && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-ember/20 bg-ember/[0.04] px-4 py-3 text-xs text-mist-300">
+          <span className="flex items-center gap-2">
+            <CircleAlert className="h-4 w-4 text-ember" />
+            {overview?.review_count} listing{overview?.review_count === 1 ? "" : "s"} suppressed because the price is implausibly cheap and needs a human check.
+          </span>
+          <button
+            className="font-medium text-ember hover:underline"
+            onClick={() => setFilters((prev) => ({ ...prev, review: true }))}
+          >
+            Inspect review queue
+          </button>
+        </div>
+      )}
+
       <FilterBar
         filters={effectiveFilters}
         onChange={(patch) => setFilters((prev) => ({ ...prev, ...patch }))}
@@ -230,6 +249,7 @@ export function DealsPage({
         total={total}
         loading={loading}
         categories={overview?.categories ?? []}
+        reviewCount={overview?.review_count ?? 0}
       />
 
       <div className="mt-4">
@@ -251,7 +271,10 @@ export function DealsPage({
           <EmptyDeals
             health={health}
             overview={overview}
-            filtered={Boolean(query || filters.category || filters.marketplace || filters.min_profit || filters.max_age_hours)}
+            filtered={Boolean(
+              query || filters.category || filters.marketplace || filters.condition || filters.min_profit ||
+              filters.min_confidence || filters.max_age_hours || filters.review,
+            )}
             onReset={() => {
               setFilters({ sort: "score" });
               setQuery("");

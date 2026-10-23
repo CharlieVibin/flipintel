@@ -16,7 +16,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { api } from "../lib/api";
-import type { Settings } from "../lib/types";
+import type { EbayConnectionTest, EbayCredentialsStatus, Settings } from "../lib/types";
 import { cn } from "../components/ui";
 
 interface Props {
@@ -31,6 +31,7 @@ type NumericKey =
   | "ebay_fvf_pct"
   | "resale_shipping"
   | "packaging_cost"
+  | "other_costs"
   | "vinted_shipping"
   | "asking_to_sold_pct"
   | "scan_interval_vinted"
@@ -45,18 +46,20 @@ const EMPTY_NUMBERS: Record<NumericKey, string> = {
   ebay_fvf_pct: "13.22",
   resale_shipping: "4.50",
   packaging_cost: "1.00",
+  other_costs: "0.00",
   vinted_shipping: "3.49",
-  asking_to_sold_pct: "90",
+  asking_to_sold_pct: "85",
   scan_interval_vinted: "240",
   scan_interval_gumtree: "300",
   scan_interval_ebay: "300",
-  queries_per_cycle: "4",
+  queries_per_cycle: "12",
 };
 
 export function SettingsPage({ onToast, onRefreshSummary }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [numbers, setNumbers] = useState<Record<NumericKey, string>>(EMPTY_NUMBERS);
   const [enabled, setEnabled] = useState({ vinted: true, gumtree: true, ebay: true });
+  const [resaleChannel, setResaleChannel] = useState<"ebay" | "vinted" | "facebook">("ebay");
   const [notify, setNotify] = useState(false);
   const [webhook, setWebhook] = useState("");
   const [removeWebhook, setRemoveWebhook] = useState(false);
@@ -66,6 +69,14 @@ export function SettingsPage({ onToast, onRefreshSummary }: Props) {
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [ebayForm, setEbayForm] = useState({
+    client_id: "",
+    client_secret: "",
+    environment: "production",
+  });
+  const [ebayBusy, setEbayBusy] = useState(false);
+  const [ebayTest, setEbayTest] = useState<EbayConnectionTest | null>(null);
+  const [ebayError, setEbayError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -81,6 +92,7 @@ export function SettingsPage({ onToast, onRefreshSummary }: Props) {
           ebay_fvf_pct: String(round(data.fees.ebay_fvf * 100, 2)),
           resale_shipping: String(data.fees.resale_shipping),
           packaging_cost: String(data.fees.packaging_cost),
+          other_costs: String(data.fees.other_costs),
           vinted_shipping: String(data.fees.vinted_shipping),
           asking_to_sold_pct: String(round(data.fees.asking_to_sold_factor * 100, 1)),
           scan_interval_vinted: String(data.scanning.scan_interval_vinted),
@@ -93,6 +105,7 @@ export function SettingsPage({ onToast, onRefreshSummary }: Props) {
           gumtree: data.scanning.enabled_gumtree,
           ebay: data.scanning.enabled_ebay,
         });
+        setResaleChannel(data.fees.resale_channel);
         setNotify(data.notifications.enabled);
       })
       .catch((error: unknown) => {
@@ -116,10 +129,12 @@ export function SettingsPage({ onToast, onRefreshSummary }: Props) {
         min_roi: num(numbers.min_roi_pct, 12) / 100,
         min_confidence: num(numbers.min_confidence_pct, 42) / 100,
         ebay_fvf: num(numbers.ebay_fvf_pct, 13.22) / 100,
+        resale_channel: resaleChannel,
         resale_shipping: num(numbers.resale_shipping, 4.5),
         packaging_cost: num(numbers.packaging_cost, 1),
+        other_costs: num(numbers.other_costs, 0),
         vinted_shipping: num(numbers.vinted_shipping, 3.49),
-        asking_to_sold_factor: num(numbers.asking_to_sold_pct, 90) / 100,
+        asking_to_sold_factor: num(numbers.asking_to_sold_pct, 85) / 100,
         scan_interval_vinted: Math.max(120, Math.round(num(numbers.scan_interval_vinted, 240))),
         scan_interval_gumtree: Math.max(120, Math.round(num(numbers.scan_interval_gumtree, 300))),
         scan_interval_ebay: Math.max(120, Math.round(num(numbers.scan_interval_ebay, 300))),
@@ -145,6 +160,77 @@ export function SettingsPage({ onToast, onRefreshSummary }: Props) {
       onToast(error instanceof Error ? error.message : "Could not save settings", "error");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function saveEbay() {
+    if (!ebayForm.client_id.trim() || !ebayForm.client_secret.trim()) {
+      setEbayError("Enter both the client ID and client secret");
+      return;
+    }
+    setEbayBusy(true);
+    setEbayError(null);
+    setEbayTest(null);
+    try {
+      const response = await api.saveEbayCredentials({
+        client_id: ebayForm.client_id.trim(),
+        client_secret: ebayForm.client_secret.trim(),
+        environment: ebayForm.environment,
+      });
+      setSettings(response.settings);
+      setEbayForm((value) => ({ ...value, client_secret: "" }));
+      onToast("eBay credentials saved securely to the local .env", "success");
+      const test = await api.testEbayConnection();
+      setEbayTest(test);
+      if (test.ok) {
+        onToast(
+          `eBay connected: ${test.sample_count ?? 0} UK listings returned`,
+          "success",
+        );
+      } else {
+        setEbayError(test.error ?? "eBay rejected the connection test");
+      }
+      onRefreshSummary();
+    } catch (error) {
+      setEbayError(error instanceof Error ? error.message : "Could not save eBay credentials");
+      onToast("Could not save eBay credentials", "error");
+    } finally {
+      setEbayBusy(false);
+    }
+  }
+
+  async function testEbay() {
+    setEbayBusy(true);
+    setEbayError(null);
+    try {
+      const test = await api.testEbayConnection();
+      setEbayTest(test);
+      if (test.ok) {
+        onToast(`eBay connected: ${test.sample_count ?? 0} UK listings returned`, "success");
+      } else {
+        setEbayError(test.error ?? "eBay connection test failed");
+      }
+    } catch (error) {
+      setEbayError(error instanceof Error ? error.message : "eBay connection test failed");
+    } finally {
+      setEbayBusy(false);
+    }
+  }
+
+  async function removeEbay() {
+    setEbayBusy(true);
+    setEbayError(null);
+    setEbayTest(null);
+    try {
+      const response = await api.removeEbayCredentials();
+      setSettings(response.settings);
+      setEbayForm({ client_id: "", client_secret: "", environment: "production" });
+      onToast("eBay credentials removed", "success");
+      onRefreshSummary();
+    } catch (error) {
+      setEbayError(error instanceof Error ? error.message : "Could not remove eBay credentials");
+    } finally {
+      setEbayBusy(false);
     }
   }
 
@@ -227,17 +313,33 @@ export function SettingsPage({ onToast, onRefreshSummary }: Props) {
           </div>
         </Section>
 
-        <Section icon={Wallet} title="Resale costs" description="Applied to every valuation. Defaults reflect eBay UK private-seller fees.">
+        <Section icon={Wallet} title="Resale costs" description="Applied to every valuation. Known fees are separated from estimates; nothing is silently treated as zero.">
+          <div>
+            <label className="label">Resale channel</label>
+            <select
+              className="field"
+              value={resaleChannel}
+              onChange={(event) => {
+                setResaleChannel(event.target.value as "ebay" | "vinted" | "facebook");
+                setDirty(true);
+              }}
+            >
+              <option value="ebay">eBay UK — final value fee applies</option>
+              <option value="vinted">Vinted — no seller selling fee</option>
+              <option value="facebook">Facebook Marketplace — local collection</option>
+            </select>
+          </div>
           <Field label="eBay final value fee" suffix="%" value={numbers.ebay_fvf_pct} onChange={(v) => updateNumber("ebay_fvf_pct", v)} />
           <Field label="Outbound delivery" suffix="£" value={numbers.resale_shipping} onChange={(v) => updateNumber("resale_shipping", v)} />
           <Field label="Packaging" suffix="£" value={numbers.packaging_cost} onChange={(v) => updateNumber("packaging_cost", v)} />
+          <Field label="Other / refurbishment" suffix="£" value={numbers.other_costs} onChange={(v) => updateNumber("other_costs", v)} hint="Repair, cleaning or other known costs. Keep at zero if unknown." />
           <Field label="Vinted delivery estimate" suffix="£" value={numbers.vinted_shipping} onChange={(v) => updateNumber("vinted_shipping", v)} />
           <Field
             label="Asking → sold adjustment"
             suffix="%"
             value={numbers.asking_to_sold_pct}
             onChange={(v) => updateNumber("asking_to_sold_pct", v)}
-            hint="Applied to live asking prices when no sold-price evidence exists."
+            hint="Conservative fallback for live asking prices. Categories with validated completed-sale calibration override this automatically."
           />
         </Section>
 
@@ -352,19 +454,17 @@ export function SettingsPage({ onToast, onRefreshSummary }: Props) {
           </div>
         </Section>
 
-        <Section icon={ShieldCheck} title="Data sources & credentials" description="Credentials live in .env, never in the database or browser.">
-          <StatusRow
-            icon={KeyRound}
-            label="eBay Browse API"
-            ok={settings.environment.ebay_configured}
-            okText="Configured"
-            offText="Free developer keys required"
-            note={
-              settings.environment.ebay_configured
-                ? "Official API in use; HTML scraping is never attempted."
-                : "Create a free app at developer.ebay.com, then set EBAY_CLIENT_ID and EBAY_CLIENT_SECRET in .env."
-            }
-            link="https://developer.ebay.com/my/keys"
+        <Section icon={ShieldCheck} title="Data sources & credentials" description="Credentials live in the local .env, never in the database or browser.">
+          <EbayCredentialCard
+            status={settings.environment.ebay}
+            form={ebayForm}
+            onChange={setEbayForm}
+            busy={ebayBusy}
+            test={ebayTest}
+            error={ebayError}
+            onSave={() => void saveEbay()}
+            onTest={() => void testEbay()}
+            onRemove={() => void removeEbay()}
           />
           <StatusRow
             icon={Gauge}
@@ -400,6 +500,122 @@ export function SettingsPage({ onToast, onRefreshSummary }: Props) {
           Save changes
         </button>
       </div>
+    </div>
+  );
+}
+
+function EbayCredentialCard({
+  status,
+  form,
+  onChange,
+  busy,
+  test,
+  error,
+  onSave,
+  onTest,
+  onRemove,
+}: {
+  status: EbayCredentialsStatus;
+  form: { client_id: string; client_secret: string; environment: string };
+  onChange: (value: { client_id: string; client_secret: string; environment: string }) => void;
+  busy: boolean;
+  test: EbayConnectionTest | null;
+  error: string | null;
+  onSave: () => void;
+  onTest: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="rounded-lg border border-ink-700 bg-ink-900/40 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <KeyRound className="h-3.5 w-3.5 text-mist-500" />
+          <span className="text-xs font-medium text-mist-200">eBay Browse API</span>
+        </div>
+        <span className={cn("chip", status.configured ? "border-lime-400/20 bg-lime-400/5 text-lime-300" : "border-ink-500 bg-ink-700/40 text-mist-500")}>
+          {status.configured ? `Configured${status.client_id_hint ? ` · ${status.client_id_hint}` : ""}` : "Free developer keys required"}
+        </span>
+      </div>
+      <p className="mt-1.5 text-[10px] leading-relaxed text-mist-500">
+        Official UK Browse API only; HTML scraping is never attempted. Keys are written to the gitignored local
+        <code className="mx-1 text-mist-300">.env</code> with owner-only permissions and are never returned to the browser.
+      </p>
+
+      <div className="mt-3 grid gap-2">
+        <div className="grid gap-2 sm:grid-cols-2">
+          <input
+            className="field !py-2"
+            placeholder={status.configured ? "Client ID saved — enter a new one to rotate" : "EBAY_CLIENT_ID"}
+            value={form.client_id}
+            onChange={(event) => onChange({ ...form, client_id: event.target.value })}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <input
+            className="field !py-2"
+            type="password"
+            placeholder={status.configured ? "Secret saved — enter a new secret to rotate" : "EBAY_CLIENT_SECRET"}
+            value={form.client_secret}
+            onChange={(event) => onChange({ ...form, client_secret: event.target.value })}
+            autoComplete="new-password"
+          />
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            className="field !w-auto !py-2 !text-[11px]"
+            value={form.environment}
+            onChange={(event) => onChange({ ...form, environment: event.target.value })}
+            aria-label="eBay API environment"
+          >
+            <option value="production">Production</option>
+            <option value="sandbox">Sandbox</option>
+          </select>
+          <button className="btn-primary !py-2 !text-[11px]" onClick={onSave} disabled={busy}>
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
+            Save & test connection
+          </button>
+          {status.configured && (
+            <button className="btn-secondary !py-2 !text-[11px]" onClick={onTest} disabled={busy}>
+              Test connection
+            </button>
+          )}
+          {status.can_clear && (
+            <button
+              className="inline-flex items-center gap-1 rounded-md px-2 py-2 text-[11px] text-mist-500 transition hover:bg-ink-700/60 hover:text-rose disabled:opacity-50"
+              onClick={onRemove}
+              disabled={busy}
+            >
+              <Trash2 className="h-3.5 w-3.5" /> Remove
+            </button>
+          )}
+          <a href="https://developer.ebay.com/my/keys" target="_blank" rel="noopener noreferrer" className="ml-auto inline-flex items-center gap-1 text-[10px] text-mist-400 hover:text-mist-200">
+            Developer portal <ExternalLink className="h-2.5 w-2.5" />
+          </a>
+        </div>
+      </div>
+
+      {test?.ok && (
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-lime-400/20 bg-lime-400/[0.04] px-2.5 py-2 text-[10px] text-lime-300">
+          <span className="inline-flex items-center gap-1"><Check className="h-3 w-3" /> Connected</span>
+          <span>{test.marketplace} · {test.currency}</span>
+          <span>{test.sample_count ?? 0} live UK listings in test query</span>
+          <span>{test.latency_ms ?? 0} ms</span>
+          <span className="text-mist-500">Results not inserted</span>
+        </div>
+      )}
+      {(error || (test && !test.ok)) && (
+        <div className="mt-2 flex items-start gap-1.5 rounded-md border border-rose/20 bg-rose/[0.04] px-2.5 py-2 text-[10px] leading-relaxed text-rose">
+          <CircleAlert className="mt-0.5 h-3 w-3 shrink-0" />
+          {error ?? test?.error ?? "Connection test failed"}
+        </div>
+      )}
+      {status.configured && (
+        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[9px] text-mist-600">
+          <span>Source: {status.credential_source}</span>
+          <span>Environment: {status.environment}</span>
+          <span>Stored: {status.storage}</span>
+        </div>
+      )}
     </div>
   );
 }

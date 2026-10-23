@@ -29,7 +29,7 @@ export function Logo({ compact = false }: { compact?: boolean }) {
       </span>
       {!compact && (
         <span className="font-mono text-[15px] font-semibold tracking-[0.18em] text-mist-100">
-          RIG<span className="text-lime-400">RADAR</span>
+          FLIP<span className="text-lime-400">INTEL</span>
         </span>
       )}
     </div>
@@ -54,6 +54,7 @@ export function StatusPill({ state, running }: { state: string; running?: boolea
     scanning: { label: "Scanning", classes: "border-sky-400/25 bg-sky-400/10 text-sky-300", dot: "bg-sky-400" },
     degraded: { label: "Degraded", classes: "border-ember/30 bg-ember/10 text-ember", dot: "bg-ember" },
     blocked: { label: "Blocked", classes: "border-rose/30 bg-rose/10 text-rose", dot: "bg-rose" },
+    cooldown: { label: "Cooling down", classes: "border-ember/30 bg-ember/10 text-ember", dot: "bg-ember" },
     error: { label: "Error", classes: "border-rose/30 bg-rose/10 text-rose", dot: "bg-rose" },
     paused: { label: "Paused", classes: "border-ink-500 bg-ink-700/40 text-mist-400", dot: "bg-mist-500" },
     not_configured: { label: "Needs API key", classes: "border-ember/25 bg-ember/5 text-ember", dot: "bg-ember" },
@@ -82,6 +83,7 @@ const CATEGORY_ICONS: Record<string, typeof Cpu> = {
   monitor: Monitor,
   phone: Smartphone,
   tablet: Tablet,
+  networking: Box,
   other: Box,
 };
 

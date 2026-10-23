@@ -1,0 +1,153 @@
+"""Collector configuration, eBay parser edges and scan instrumentation."""
+from __future__ import annotations
+
+import asyncio
+
+from app.collectors.base import BaseCollector, RawListing, SearchOutcome, run_queries
+from app.collectors.ebay import EbayCollector
+from app.db import Database
+from app.scanner import Scanner
+from app.utils import iso
+
+
+def _ebay_item(**overrides):
+    base = {
+        "title": "NVIDIA RTX 4070 Founders Edition",
+        "itemId": "v1|123|0",
+        "itemWebUrl": "https://www.ebay.co.uk/itm/123?campid=1",
+        "price": {"value": "450.00", "currency": "GBP"},
+        "shippingOptions": [{"shippingCost": {"value": "5.00", "currency": "GBP"}}],
+        "condition": "Used",
+        "buyingOptions": ["FIXED_PRICE"],
+        "itemLocation": {"city": "London", "country": "GB"},
+        "seller": {"username": "seller"},
+        "image": {"imageUrl": "https://i.ebayimg.com/images/g/abc/s-l1600.jpg"},
+        "itemCreationDate": "2026-09-01T10:00:00.000Z",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_ebay_missing_credentials_are_reported_without_network():
+    db = Database(":memory:")
+    collector = EbayCollector(db)
+    try:
+        available, reason = collector.available
+        assert available is False
+        assert reason and "developer" in reason.lower()
+        outcome = asyncio.run(run_queries(collector, ["rtx 4070"]))
+        assert outcome.status == "not_configured"
+        assert outcome.items == []
+    finally:
+        asyncio.run(collector.close())
+        db.close()
+
+
+def test_ebay_parser_rejects_wrong_currency_auction_and_bad_urls():
+    db = Database(":memory:")
+    collector = EbayCollector(db)
+    try:
+        assert collector._parse_item(_ebay_item(price={"value": "450", "currency": "USD"}), "x") is None
+        assert collector._parse_item(_ebay_item(price={"value": "450"}), "x") is None
+        assert collector._parse_item(_ebay_item(buyingOptions=["AUCTION"]), "x") is None
+        assert collector._parse_item(_ebay_item(itemWebUrl="https://evil.example/item/123"), "x") is None
+        assert collector._parse_item(_ebay_item(itemWebUrl="javascript:alert(1)"), "x") is None
+        assert collector._parse_item(
+            _ebay_item(shippingOptions=[{"shippingCost": {"value": "5", "currency": "USD"}}]), "x"
+        ) is None
+        assert collector._parse_item(_ebay_item(title=""), "x") is None
+        item = collector._parse_item(
+            _ebay_item(image={"imageUrl": "javascript:bad"}, condition="Very Good"), "x"
+        )
+        assert item is not None
+        assert item.image_url is None
+        assert item.condition_raw == "Very Good"
+        assert item.shipping == 5.0
+        assert item.price == 450.0
+        assert item.url == "https://www.ebay.co.uk/itm/123"
+        assert item.is_auction is False
+        assert item.raw["currency"] == "GBP"
+        assert item.raw["marketplace"] == "EBAY_GB"
+    finally:
+        asyncio.run(collector.close())
+        db.close()
+
+
+def test_ebay_duplicate_ingestion_is_idempotent(tmp_path):
+    db = Database(tmp_path / "ebay-dupe.db")
+    collector = EbayCollector(db)
+    try:
+        item = collector._parse_item(_ebay_item(), "rtx 4070")
+        assert item is not None
+        scanner = Scanner(db, collectors={})
+        first = scanner._ingest([item], "ebay")
+        second = scanner._ingest([item], "ebay")
+        assert first == (1, 1, 0)
+        assert second == (1, 0, 0)
+        row = db.query_one("SELECT marketplace, currency, price, shipping FROM listings")
+        assert row == {"marketplace": "ebay", "currency": "GBP", "price": 450.0, "shipping": 5.0}
+    finally:
+        asyncio.run(collector.close())
+        db.close()
+
+
+class _StubCollector(BaseCollector):
+    marketplace = "vinted"
+    label = "Stub Vinted"
+    min_interval = 0.0
+
+    async def search(self, queries, max_pages=1):
+        return await run_queries(self, queries, max_pages)
+
+    async def search_query(self, query, max_pages=1):
+        item = RawListing(
+            marketplace="vinted",
+            external_id="stub-1",
+            url="https://www.vinted.co.uk/items/stub-1",
+            title="NVIDIA RTX 4070 12GB graphics card",
+            price=250.0,
+            condition_raw="Good",
+            search_query=query,
+        )
+        return [item], 1, 200
+
+
+def test_scan_records_stage_and_query_performance_metrics(tmp_path):
+    db = Database(tmp_path / "metrics.db")
+    stub = _StubCollector(db)
+    try:
+        scanner = Scanner(db, collectors={"vinted": stub})
+        outcome = asyncio.run(scanner._scan(stub))
+        assert outcome.status == "ok"
+        row = db.query_one("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1")
+        assert row["items_found"] == 1
+        assert row["items_new"] == 1
+        assert row["duration_ms"] is not None
+        detail = __import__("json").loads(row["detail"])
+        assert {"collect", "ingest", "valuation"} <= set(detail["stage_ms"])
+        assert detail["collector_ms"] >= 0
+        assert detail["total_ms"] >= detail["collector_ms"]
+        assert detail["listings_processed"] == 1
+        assert detail["query_timings"]
+        assert detail["query_timings"][0]["query"]
+        assert detail["query_timings"][0]["items"] >= 1
+        assert "ms" in detail["query_timings"][0]
+        assert db.scalar("SELECT COUNT(*) FROM listings") == 1
+    finally:
+        asyncio.run(stub.close())
+        db.close()
+
+
+def test_interleaved_queries_cover_more_than_core_categories():
+    from app.config import DISCOVERY_QUERIES
+    from app.scanner import interleaved_queries
+
+    queries = interleaved_queries()
+    categories = {category for category, _ in queries}
+    words = " ".join(query for _, query in queries).lower()
+    assert {"gpu", "cpu", "ram", "ssd", "console", "laptop", "handheld", "retro", "motherboard"} <= categories
+    assert "external ssd" in words
+    assert "steam deck" in words
+    assert "game boy" in words
+    assert len(DISCOVERY_QUERIES) >= 10
+    assert len(queries) == len(set(query for _, query in queries))

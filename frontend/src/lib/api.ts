@@ -1,7 +1,15 @@
 import type {
+  CalibrationReport,
+  CompInput,
+  CompsResponse,
   DealDetail,
   DealFilters,
   DealsResponse,
+  EbayConnectionTest,
+  EbayCredentialsStatus,
+  EvidenceCoverage,
+  EvidenceImportResult,
+  EvidenceResponse,
   HealthResponse,
   Overview,
   ScanRun,
@@ -61,9 +69,51 @@ export const api = {
     }),
   restore: (id: number) => request<{ dismissed: boolean }>(`/deals/${id}/restore`, { method: "POST" }),
   scans: () => request<{ scans: ScanRun[] }>("/scans"),
+  comps: (productKey: string, kind?: string | null) =>
+    request<CompsResponse>(
+      `/comps${queryString({ product_key: productKey, kind: kind ?? undefined, limit: 60 })}`,
+    ),
+  addComp: (payload: CompInput) =>
+    request<{ comp: unknown; refreshed: boolean }>("/comps", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  deleteComp: (id: number) => request<{ deleted: boolean }>(`/comps/${id}`, { method: "DELETE" }),
+  evidence: (filters: Record<string, unknown> = {}) =>
+    request<EvidenceResponse>(`/evidence${queryString(filters)}`),
+  evidenceCoverage: () => request<EvidenceCoverage>("/evidence/coverage"),
+  importEvidence: (payload: { filename: string; content: string; commit: boolean }) =>
+    request<EvidenceImportResult>("/evidence/import", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateEvidence: (id: number, payload: Record<string, unknown>) =>
+    request<{ comp: unknown }>(`/evidence/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteEvidence: (id: number) => request<{ deleted: boolean }>(`/evidence/${id}`, { method: "DELETE" }),
+  calibration: () => request<CalibrationReport>("/calibration"),
+  review: (id: number, payload: { decision: string; note?: string; product_key?: string; product_name?: string; kind?: string }) =>
+    request<{ decision: string; confidence_boosted: boolean }>(`/deals/${id}/review`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  undoReview: (id: number) => request<{ decision: null }>(`/deals/${id}/review`, { method: "DELETE" }),
+  evidenceTemplateUrl: () => `${BASE}/evidence/template`,
+  evidenceExportUrl: (filters: Record<string, unknown> = {}) =>
+    `${BASE}/evidence/export${queryString(filters)}`,
   settings: () => request<Settings>("/settings"),
   updateSettings: (payload: Record<string, unknown>) =>
     request<Settings>("/settings", { method: "PUT", body: JSON.stringify(payload) }),
+  saveEbayCredentials: (payload: { client_id: string; client_secret: string; environment: string }) =>
+    request<{ credentials: EbayCredentialsStatus; settings: Settings }>("/settings/ebay", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  testEbayConnection: () => request<EbayConnectionTest>("/settings/ebay/test", { method: "POST" }),
+  removeEbayCredentials: () =>
+    request<{ credentials: EbayCredentialsStatus; settings: Settings }>("/settings/ebay", { method: "DELETE" }),
   scan: (marketplace?: string) =>
     request<{ accepted: string[]; message: string }>("/scan", {
       method: "POST",

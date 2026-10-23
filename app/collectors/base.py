@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ..config import settings
+from ..usage import record_api_usage
 
 
 class CollectorError(Exception):
@@ -138,6 +139,11 @@ class BaseCollector:
     def available(self) -> tuple[bool, str | None]:
         return True, None
 
+    @property
+    def backoff_seconds(self) -> int:
+        """Remaining circuit-breaker cooldown, exposed to scanner health."""
+        return max(0, int(self._circuit_open_until - time.monotonic()))
+
     async def close(self) -> None:
         if self._owns_client:
             await self.client.aclose()
@@ -146,7 +152,7 @@ class BaseCollector:
         wait = self.min_interval - (time.monotonic() - self._last_request)
         if wait > 0:
             await asyncio.sleep(wait)
-        await asyncio.sleep(random.uniform(0.05, 0.4))
+        await asyncio.sleep(random.uniform(0.03, 0.15))
         self._last_request = time.monotonic()
 
     async def _request(self, url: str, params: dict[str, Any] | None = None, headers: dict | None = None) -> httpx.Response:
@@ -163,6 +169,16 @@ class BaseCollector:
                 response = await self.client.get(url, params=params, headers=headers)
                 self.last_http_status = response.status_code
                 self.last_latency_ms = int((time.monotonic() - started) * 1000)
+                record_api_usage(
+                    self.db,
+                    self.marketplace,
+                    status=response.status_code,
+                    latency_ms=self.last_latency_ms,
+                    error=(
+                        f"HTTP {response.status_code}"
+                        if response.status_code >= 400 else None
+                    ),
+                )
                 if response.status_code == 403:
                     self._note_failure()
                     raise CollectorError(
@@ -196,6 +212,10 @@ class BaseCollector:
                     raise
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 last_error = exc
+                record_api_usage(
+                    self.db, self.marketplace,
+                    error=f"{type(exc).__name__}: {exc}"[:300],
+                )
                 if attempt >= settings.max_retries:
                     self._note_failure()
                     raise CollectorError(f"Network error: {type(exc).__name__}", "network")
@@ -227,8 +247,10 @@ async def run_queries(collector: BaseCollector, queries: list[str], max_pages: i
     all_items: list[RawListing] = []
     ok = failed = pages = 0
     errors: list[str] = []
+    timings: list[dict[str, Any]] = []
     last_http: int | None = None
     for query in queries:
+        query_started = time.monotonic()
         try:
             items, page_count, http_status = await collector.search_query(query, max_pages)
             if items:
@@ -236,6 +258,11 @@ async def run_queries(collector: BaseCollector, queries: list[str], max_pages: i
                 pages += page_count
                 all_items.extend(items)
                 last_http = http_status or last_http
+                timings.append({
+                    "query": query, "status": "ok", "items": len(items),
+                    "pages": page_count,
+                    "ms": int((time.monotonic() - query_started) * 1000),
+                })
             else:
                 # A 200 with zero parsed rows is a parser/regression signal, not success.
                 ok += 1
@@ -243,9 +270,19 @@ async def run_queries(collector: BaseCollector, queries: list[str], max_pages: i
                 if page_count == 0:
                     failed += 1
                     errors.append(f"No results parsed for '{query}'")
+                timings.append({
+                    "query": query, "status": "empty" if page_count else "parse_failed",
+                    "items": 0, "pages": page_count,
+                    "ms": int((time.monotonic() - query_started) * 1000),
+                })
         except CollectorError as exc:
             failed += 1
             errors.append(f"{query}: {exc.message}")
+            timings.append({
+                "query": query, "status": exc.kind, "items": 0, "pages": 0,
+                "ms": int((time.monotonic() - query_started) * 1000),
+                "error": exc.message[:240],
+            })
             if exc.status:
                 last_http = exc.status
             if exc.kind in {"blocked", "robots", "cooldown"}:
@@ -253,6 +290,11 @@ async def run_queries(collector: BaseCollector, queries: list[str], max_pages: i
         except Exception as exc:  # isolate a single marketplace parser failure
             failed += 1
             errors.append(f"{query}: {type(exc).__name__}: {exc}")
+            timings.append({
+                "query": query, "status": "parse_failed", "items": 0, "pages": 0,
+                "ms": int((time.monotonic() - query_started) * 1000),
+                "error": f"{type(exc).__name__}: {exc}"[:240],
+            })
     elapsed = int((time.monotonic() - started) * 1000)
     if failed and not ok:
         first_error = errors[0] if errors else "Scan failed"
@@ -267,7 +309,7 @@ async def run_queries(collector: BaseCollector, queries: list[str], max_pages: i
             latency_ms=elapsed,
             error=first_error,
             http_status=last_http,
-            detail={"errors": errors},
+            detail={"errors": errors, "query_timings": timings},
         )
     status = "degraded" if failed else "ok"
     return SearchOutcome(
@@ -280,5 +322,5 @@ async def run_queries(collector: BaseCollector, queries: list[str], max_pages: i
         latency_ms=elapsed,
         error="; ".join(errors[:3]) if errors else None,
         http_status=last_http,
-        detail={"errors": errors},
+        detail={"errors": errors, "query_timings": timings},
     )

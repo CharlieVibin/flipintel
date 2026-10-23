@@ -18,7 +18,7 @@ import {
 import { api } from "../lib/api";
 import type { HealthResponse, ScanRun, SourceStatus } from "../lib/types";
 import { cn, StatusPill } from "../components/ui";
-import { formatDuration, marketplaceMeta, timeAgo, pct } from "../lib/format";
+import { formatDuration, marketplaceMeta, timeAgo, timeUntil } from "../lib/format";
 
 interface Props {
   health: HealthResponse | null;
@@ -75,6 +75,7 @@ export function ScannersPage({ health, refreshTick, onToast, onRefresh }: Props)
   }
 
   const sources = health?.scanner.sources ?? [];
+  const coverage = health?.scanner.coverage;
   const scansToday = scans.filter((scan) => scan.started_at.slice(0, 10) === new Date().toISOString().slice(0, 10)).length;
 
   return (
@@ -101,7 +102,12 @@ export function ScannersPage({ health, refreshTick, onToast, onRefresh }: Props)
       <div className="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <OpsStat icon={Database} label="Active listings" value={(health?.counts.active_listings ?? 0).toLocaleString()} />
         <OpsStat icon={Radar} label="Deals found" value={(health?.counts.deals ?? 0).toLocaleString()} accent />
-        <OpsStat icon={Activity} label="Scans today" value={String(scansToday)} />
+        <OpsStat
+          icon={Activity}
+          label="Review queue"
+          value={(health?.counts.review ?? 0).toLocaleString()}
+          sub={(health?.counts.duplicates ?? 0) ? `${health?.counts.duplicates} probable duplicate(s)` : "No duplicate flags"}
+        />
         <OpsStat
           icon={CircleCheck}
           label="Last refresh"
@@ -163,6 +169,101 @@ export function ScannersPage({ health, refreshTick, onToast, onRefresh }: Props)
         </div>
       </div>
 
+      {coverage && (
+        <div className="panel mt-5 overflow-hidden">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-ink-700 px-5 py-4">
+            <div>
+              <h2 className="text-sm font-semibold text-mist-100">Category coverage</h2>
+              <p className="mt-0.5 text-[11px] text-mist-500">
+                What the collectors actually found, not just what the search list asks for. Thin categories are
+                prioritised in the next query cycle.
+              </p>
+            </div>
+            <span className="chip border-ink-600 bg-ink-800 text-mist-400">
+              {coverage.covered_categories}/{coverage.categories.length} covered · {coverage.queries_per_cycle} queries/cycle
+            </span>
+          </div>
+          <div className="grid gap-px bg-ink-700/60 sm:grid-cols-2 lg:grid-cols-4">
+            {coverage.categories.map((category) => (
+              <div key={category.key} className="bg-ink-900 px-4 py-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-medium text-mist-200">{category.label}</span>
+                  <span className={cn(
+                    "chip border-ink-600 bg-ink-800 text-[9px]",
+                    category.coverage === "covered" ? "text-lime-300" : category.coverage === "thin" ? "text-ember" : "text-mist-500",
+                  )}>
+                    {category.coverage}
+                  </span>
+                </div>
+                <div className="mt-2 flex items-end justify-between gap-2">
+                  <p className="numeric text-lg font-semibold text-mist-100">{category.active.toLocaleString()}</p>
+                  <p className="text-right text-[9px] leading-relaxed text-mist-500">
+                    +{category.new_24h} new / 24h<br />
+                    {category.valued.toLocaleString()} valued · {category.deals} deals
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-ink-700 px-5 py-3 text-[10px] text-mist-500">
+            <span>{coverage.active_total.toLocaleString()} active listings across measured categories</span>
+            <span>{coverage.thin_categories} thin</span>
+            <span>{coverage.empty_categories} empty</span>
+            <span>{coverage.query_categories} discovery categories configured</span>
+          </div>
+        </div>
+      )}
+
+      {scans[0]?.detail?.query_timings?.length ? (
+        <div className="panel mt-5 overflow-hidden">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-ink-700 px-5 py-4">
+            <div>
+              <h2 className="text-sm font-semibold text-mist-100">Latest query timings</h2>
+              <p className="mt-0.5 text-[11px] text-mist-500">
+                {marketplaceMeta(scans[0].marketplace).label} · collector {formatDuration(scans[0].detail.collector_ms ?? null)} · total {formatDuration(scans[0].duration_ms)}
+              </p>
+            </div>
+            <span className="chip border-ink-600 bg-ink-800 text-mist-400">
+              {scans[0].detail.query_timings.length} queries
+            </span>
+          </div>
+          <div className="grid gap-4 p-4 lg:grid-cols-[280px_minmax(0,1fr)]">
+            <div className="space-y-2">
+              <p className="eyebrow">Stage breakdown</p>
+              {Object.entries(scans[0].detail.stage_ms ?? {}).map(([stage, ms]) => (
+                <div key={stage} className="flex items-center justify-between gap-2 text-[11px]">
+                  <span className="capitalize text-mist-400">{stage.replaceAll("_", " ")}</span>
+                  <span className="numeric text-mist-300">{formatDuration(ms)}</span>
+                </div>
+              ))}
+              <p className="border-t border-ink-700 pt-2 text-[9px] leading-relaxed text-mist-600">
+                Collection is paced sequentially per host. Ingestion, duplicate detection and valuation are measured
+                separately so network latency is not mistaken for processing cost.
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              {[...scans[0].detail.query_timings]
+                .sort((a, b) => b.ms - a.ms)
+                .slice(0, 8)
+                .map((timing) => {
+                  const max = Math.max(...scans[0].detail.query_timings!.map((item) => item.ms), 1);
+                  return (
+                    <div key={`${timing.query}-${timing.ms}`}>
+                      <div className="flex items-center justify-between gap-2 text-[10px]">
+                        <span className="truncate text-mist-400">{timing.query}</span>
+                        <span className="numeric shrink-0 text-mist-500">{timing.items} rows · {formatDuration(timing.ms)}</span>
+                      </div>
+                      <div className="mt-1 h-1 overflow-hidden rounded-full bg-ink-700">
+                        <div className={cn("h-full rounded-full", timing.status === "ok" ? "bg-lime-400/60" : "bg-ember/60")} style={{ width: `${Math.max(3, (timing.ms / max) * 100)}%` }} />
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="panel mt-5 overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-ink-700 px-5 py-4">
           <div>
@@ -196,6 +297,7 @@ export function ScannersPage({ health, refreshTick, onToast, onRefresh }: Props)
                   <th className="px-3 py-2.5 text-right font-medium">Found</th>
                   <th className="px-3 py-2.5 text-right font-medium">New</th>
                   <th className="px-3 py-2.5 text-right font-medium">Drops</th>
+                  <th className="px-3 py-2.5 text-right font-medium">Dup.</th>
                   <th className="px-3 py-2.5 text-right font-medium">Duration</th>
                   <th className="px-5 py-2.5 font-medium">Detail</th>
                 </tr>
@@ -220,6 +322,7 @@ export function ScannersPage({ health, refreshTick, onToast, onRefresh }: Props)
                     <td className="numeric px-3 py-2.5 text-right text-mist-300">{scan.items_found}</td>
                     <td className="numeric px-3 py-2.5 text-right text-lime-300/90">{scan.items_new}</td>
                     <td className="numeric px-3 py-2.5 text-right text-mist-300">{scan.price_drops}</td>
+                    <td className="numeric px-3 py-2.5 text-right text-mist-400">{scan.duplicates ?? 0}</td>
                     <td className="numeric px-3 py-2.5 text-right text-mist-400">{formatDuration(scan.duration_ms)}</td>
                     <td className="max-w-[240px] px-5 py-2.5">
                       {scan.error ? (
@@ -318,6 +421,10 @@ function SourceCard({
           </dd>
         </div>
         <div>
+          <dt className="text-mist-500">Last attempt</dt>
+          <dd className="mt-0.5 text-mist-300">{source.last_attempt_at ? timeAgo(source.last_attempt_at) : "Never"}</dd>
+        </div>
+        <div>
           <dt className="text-mist-500">Last run</dt>
           <dd className="numeric mt-0.5 text-mist-300">{formatDuration(source.last_duration_ms)}</dd>
         </div>
@@ -325,7 +432,95 @@ function SourceCard({
           <dt className="text-mist-500">Listings parsed</dt>
           <dd className="numeric mt-0.5 text-mist-300">{source.listings_seen.toLocaleString()}</dd>
         </div>
+        <div>
+          <dt className="text-mist-500">Failures / backoff</dt>
+          <dd className={cn("mt-0.5", source.consecutive_failures || source.backoff_seconds ? "text-ember" : "text-mist-300")}>
+            {source.backoff_seconds
+              ? `Cooling down ${Math.ceil(source.backoff_seconds / 60)}m`
+              : source.consecutive_failures
+                ? `${source.consecutive_failures} consecutive`
+                : "None"}
+          </dd>
+        </div>
       </dl>
+
+      {isEbay && (
+        <div className={cn(
+          "mt-3 flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-[10px]",
+          ebayConfigured
+            ? "border-lime-400/20 bg-lime-400/[0.04] text-lime-300"
+            : "border-ember/20 bg-ember/[0.04] text-ember",
+        )}>
+          <span className="flex items-center gap-1.5"><KeyRound className="h-3 w-3" /> API credentials</span>
+          <span>{ebayConfigured ? "Configured · EBAY_GB / GBP" : "Not configured"}</span>
+        </div>
+      )}
+
+      {source.api_usage && (
+        <div className="mt-3 rounded-lg border border-ink-700 bg-ink-900/50 px-3 py-2 text-[10px] text-mist-500">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span>{isEbay ? "API calls" : "Requests"} today</span>
+            <span className="numeric text-mist-300">
+              {source.api_usage.today.requests} requests · {source.api_usage.today.errors} errors
+            </span>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
+            <span>Last {source.api_usage.window_days} days</span>
+            <span className="numeric text-mist-300">
+              {source.api_usage.window_requests} / {source.api_usage.window_errors} errors
+            </span>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
+            <span>Last request</span>
+            <span className="text-mist-400">
+              {source.api_usage.last_request_at ? timeAgo(source.api_usage.last_request_at) : "None yet"}
+            </span>
+          </div>
+          <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
+            <span>Last successful request</span>
+            <span className="text-mist-400">
+              {source.api_usage.last_success_at ? timeAgo(source.api_usage.last_success_at) : "None recorded"}
+            </span>
+          </div>
+          <div className="mt-1 flex items-center justify-between gap-2 border-t border-ink-700/60 pt-1">
+            <span>{isEbay ? "Provider quota" : "Quota"}</span>
+            <span className={cn(
+              "numeric text-right",
+              source.api_usage.quota.state === "low" || source.api_usage.quota.state === "exhausted" ? "text-ember" : "text-mist-400",
+            )}>
+              {source.api_usage.quota.state === "unknown"
+                ? "unknown — local counters shown"
+                : source.api_usage.quota.remaining != null
+                  ? `${source.api_usage.quota.remaining}${source.api_usage.quota.limit ? ` / ${source.api_usage.quota.limit}` : ""} remaining${source.api_usage.quota.reset_at ? ` · resets ${timeUntil(source.api_usage.quota.reset_at)}` : ""}`
+                  : source.api_usage.quota.state}
+            </span>
+          </div>
+          {source.api_usage.history.length > 0 && (
+            <div className="mt-2 border-t border-ink-700/60 pt-2">
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <span>Daily requests</span>
+                <span>{source.api_usage.history.length} day(s)</span>
+              </div>
+              <div className="flex items-end gap-1" aria-label="Daily request history">
+                {source.api_usage.history.map((day) => {
+                  const max = Math.max(...source.api_usage!.history.map((item) => item.requests), 1);
+                  return (
+                    <div key={day.day} className="flex-1" title={`${day.day}: ${day.requests} requests, ${day.errors} errors`}>
+                      <div className="flex h-5 items-end overflow-hidden rounded-sm bg-ink-800">
+                        <div
+                          className={cn("w-full", day.errors > 0 ? "bg-ember/60" : "bg-sky-400/50")}
+                          style={{ height: `${Math.max(8, (day.requests / max) * 100)}%` }}
+                        />
+                      </div>
+                      <p className="mt-0.5 text-center text-[8px] text-mist-600">{day.day.slice(5)}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {(source.last_error || source.availability_reason) && (
         <div className="mt-4 rounded-lg border border-ink-700 bg-ink-900/50 p-3 text-[11px] leading-relaxed text-mist-400">
@@ -341,6 +536,18 @@ function SourceCard({
               </p>
               EBAY_CLIENT_ID=…<br />
               EBAY_CLIENT_SECRET=…
+              <a
+                href="https://developer.ebay.com/my/keys"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-2 flex items-center gap-1 font-sans text-[10px] text-sky-300 hover:underline"
+              >
+                Open eBay developer keys <ArrowUpRight className="h-3 w-3" />
+              </a>
+              <p className="mt-1.5 font-sans text-[9px] leading-relaxed text-mist-500">
+                Save both values in Settings → Data sources & credentials. They activate without a restart and
+                secrets are never shown in this dashboard.
+              </p>
             </div>
           )}
           {isFacebook && (

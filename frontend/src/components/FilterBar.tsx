@@ -1,4 +1,4 @@
-import { Search, SlidersHorizontal, X } from "lucide-react";
+import { CircleAlert, Search, SlidersHorizontal, X } from "lucide-react";
 import type { DealFilters, SortKey } from "../lib/types";
 import { CATEGORY_LABELS, MARKETPLACE_META } from "../lib/format";
 import { cn } from "./ui";
@@ -12,14 +12,17 @@ interface Props {
   total: number;
   loading: boolean;
   categories: { category: string; count: number }[];
+  reviewCount?: number;
 }
 
 const MARKETPLACES = ["vinted", "gumtree", "ebay"];
 
-export function FilterBar({ filters, onChange, onReset, query, onQueryChange, total, loading, categories }: Props) {
+export function FilterBar({ filters, onChange, onReset, query, onQueryChange, total, loading, categories, reviewCount = 0 }: Props) {
   const active =
-    Boolean(filters.category || filters.marketplace || filters.min_profit || filters.max_age_hours) ||
-    query.trim().length > 0;
+    Boolean(
+      filters.category || filters.marketplace || filters.condition || filters.min_profit ||
+      filters.min_confidence || filters.max_age_hours || filters.review,
+    ) || query.trim().length > 0;
   return (
     <div className="panel sticky top-3 z-20 p-3 backdrop-blur-xl">
       <div className="flex flex-col gap-3">
@@ -69,6 +72,41 @@ export function FilterBar({ filters, onChange, onReset, query, onQueryChange, to
             <option value={50}>£50+ profit</option>
             <option value={100}>£100+ profit</option>
             <option value={200}>£200+ profit</option>
+          </select>
+
+          <button
+            className={cn("filter-chip shrink-0", filters.review && "filter-chip-active")}
+            onClick={() => onChange({ review: filters.review ? undefined : true })}
+            title="Show listings suppressed from automatic recommendations"
+          >
+            <CircleAlert className="h-3 w-3" /> Review{reviewCount > 0 ? ` ${reviewCount}` : ""}
+          </button>
+
+          <select
+            className="field !w-auto !py-2"
+            value={filters.condition ?? ""}
+            onChange={(event) => onChange({ condition: event.target.value || undefined })}
+            aria-label="Condition"
+          >
+            <option value="">Any condition</option>
+            <option value="new">New</option>
+            <option value="like_new">Like new</option>
+            <option value="good">Good</option>
+            <option value="used">Used</option>
+            <option value="fair">Fair</option>
+            <option value="faulty">Faulty</option>
+          </select>
+
+          <select
+            className="field !w-auto !py-2"
+            value={filters.min_confidence ?? 0}
+            onChange={(event) => onChange({ min_confidence: Number(event.target.value) || undefined })}
+            aria-label="Minimum confidence"
+          >
+            <option value={0}>Any confidence</option>
+            <option value={0.42}>42%+ confidence</option>
+            <option value={0.55}>55%+ confidence</option>
+            <option value={0.7}>70%+ confidence</option>
           </select>
 
           <select
@@ -137,9 +175,13 @@ export function FilterBar({ filters, onChange, onReset, query, onQueryChange, to
       </div>
       <div className="mt-2 hidden items-center justify-between border-t border-ink-700/60 pt-2 text-[10px] text-mist-500 sm:flex">
         <span>
-          {loading ? "Refreshing opportunities…" : `${total.toLocaleString()} qualifying deal${total === 1 ? "" : "s"}`}
+          {loading
+            ? "Refreshing opportunities…"
+            : filters.review
+              ? `${total.toLocaleString()} item${total === 1 ? "" : "s"} awaiting manual review`
+              : `${total.toLocaleString()} qualifying deal${total === 1 ? "" : "s"}`}
         </span>
-        <span>Ranked by profit, ROI, confidence and freshness</span>
+        <span>{filters.review ? "Suppressed from automatic recommendations" : "Ranked by profit, ROI, confidence and freshness"}</span>
       </div>
     </div>
   );

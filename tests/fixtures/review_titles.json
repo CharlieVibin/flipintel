@@ -1,0 +1,384 @@
+[
+  {
+    "title": "Corsair Vengeance RGB DDR5 32GB RAM 6400MHZ CL36",
+    "review_price": 80.0,
+    "expect_key": "ram:ddr5:32gb:6400",
+    "expect_category": "ram"
+  },
+  {
+    "title": "DDR5 RAM - 64GB (2x32GB) 6400MHz Kit",
+    "review_price": 160.0,
+    "expect_key": "ram:ddr5:64gb:6400:2x32",
+    "expect_category": "ram"
+  },
+  {
+    "title": "Corsair Vengeance LPX DDR4 3600MHz RAM - 2x16GB, As Good As New",
+    "review_price": 30.0,
+    "expect_key": "ram:ddr4:32gb:3600:2x16",
+    "expect_category": "ram"
+  },
+  {
+    "title": "Samsung 990 Pro 4TB PCle 4.0 NVMe SSD",
+    "review_price": 80.0,
+    "expect_key": "ssd:nvme:unspecified:4tb:samsung:990-pro:pcie4",
+    "expect_category": "ssd"
+  },
+  {
+    "title": "WD blue sn5000 4tb nvme ssd",
+    "review_price": 80.0,
+    "expect_key": "ssd:nvme:unspecified:4tb:wd:sn5000",
+    "expect_category": "ssd"
+  },
+  {
+    "title": "Kioxia SSD 512 GB",
+    "review_price": 43.0,
+    "expect_key": "ssd:ssd:unspecified:512gb:kioxia",
+    "expect_category": "ssd"
+  },
+  {
+    "title": "Union Memory Internal Ssd 512GB 100%",
+    "review_price": 36.0,
+    "expect_key": "ssd:ssd:internal:512gb:union-memory",
+    "expect_category": "ssd"
+  },
+  {
+    "title": "512GB M2 ssd",
+    "review_price": 65.0,
+    "expect_key": "ssd:nvme:m2:512gb",
+    "expect_category": "ssd"
+  },
+  {
+    "title": "2.5 Solid state drive 256GB (99% health)",
+    "review_price": 20.0,
+    "expect_key": "ssd:sata:2.5:256gb",
+    "expect_category": "ssd"
+  },
+  {
+    "title": "solid state drive Capacity 512GB",
+    "review_price": 45.0,
+    "expect_key": null,
+    "expect_category": "other",
+    "note": "No interface, form factor, brand or model: too ambiguous to group."
+  },
+  {
+    "title": "Boxed 2TB External ssd",
+    "review_price": 25.0,
+    "expect_key": "ssd:usb:external:2tb",
+    "expect_category": "ssd"
+  },
+  {
+    "title": "Seagate desktop HDD 2000GB",
+    "review_price": 15.0,
+    "expect_key": "hdd:internal:2tb",
+    "expect_category": "ssd"
+  },
+  {
+    "title": "Intel i3 6100 processor",
+    "review_price": 5.0,
+    "expect_key": "cpu:intel:core-i3-6100",
+    "expect_category": "cpu"
+  },
+  {
+    "title": "ViewSonic VX2458-C-MHD 24-inch Curved Gaming Monitor 144Hz",
+    "review_price": 10.0,
+    "expect_key": "monitor:24in-144hz:viewsonic:vx2458-c-mhd",
+    "expect_category": "monitor"
+  },
+  {
+    "title": "Naruto PS5",
+    "review_price": 30.0,
+    "expect_key": null,
+    "expect_category": "other",
+    "expect_flags": [
+      "console_game"
+    ]
+  },
+  {
+    "title": "Helldivers Ps5",
+    "review_price": 20.0,
+    "expect_key": null,
+    "expect_category": "other",
+    "expect_flags": [
+      "console_game"
+    ]
+  },
+  {
+    "title": "Wolverine PS5",
+    "review_price": 55.0,
+    "expect_key": null,
+    "expect_category": "other",
+    "expect_flags": [
+      "console_game"
+    ]
+  },
+  {
+    "title": "Xbox Series X Pragmata",
+    "review_price": 35.0,
+    "expect_key": null,
+    "expect_category": "other",
+    "expect_flags": [
+      "console_game"
+    ]
+  },
+  {
+    "title": "Ps5 assassins creed Valhalla disc",
+    "review_price": 45.0,
+    "expect_key": null,
+    "expect_category": "other",
+    "expect_flags": [
+      "console_game"
+    ]
+  },
+  {
+    "title": "Watch dogs PS4( free digital upgrade to ps5)",
+    "review_price": 8.5,
+    "expect_key": null,
+    "expect_category": "other",
+    "expect_flags": [
+      "console_game"
+    ]
+  },
+  {
+    "title": "Sony PS4 PlayStation Camera V2 CUH-ZEY2 PSVR Motion Sensor Black Tested",
+    "review_price": 10.0,
+    "expect_key": null,
+    "expect_category": "console",
+    "expect_flags": [
+      "accessory_or_box"
+    ]
+  },
+  {
+    "title": "PS5 digital casing.",
+    "review_price": 20.0,
+    "expect_key": null,
+    "expect_category": "console",
+    "expect_flags": [
+      "accessory_or_box"
+    ]
+  },
+  {
+    "title": "Xbox One S WiFi Wireless Network Board",
+    "review_price": 5.0,
+    "expect_key": null,
+    "expect_category": "console",
+    "expect_flags": [
+      "accessory_or_box"
+    ]
+  },
+  {
+    "title": "brand new casetify iphone 16 promax magsafe miffy for noah",
+    "review_price": 11.35,
+    "expect_key": null,
+    "expect_category": "phone",
+    "expect_flags": [
+      "accessory_or_box"
+    ]
+  },
+  {
+    "title": "Black IPhone 14 Pro Max Alligator/Crocodile Pattern",
+    "review_price": 10.59,
+    "expect_key": null,
+    "expect_category": "phone",
+    "expect_flags": [
+      "accessory_or_box"
+    ]
+  },
+  {
+    "title": "Privacy Screen Macbook Pro 13 Inch(2016-2022, M1, M2) & Macbook Air 13 In(2018-2021, M1",
+    "review_price": 14.99,
+    "expect_key": null,
+    "expect_category": "laptop",
+    "expect_flags": [
+      "accessory_or_box"
+    ]
+  },
+  {
+    "title": "Empty Apple iPhone 14 Pro Max -deep purple",
+    "review_price": 2.0,
+    "expect_key": null,
+    "expect_category": "phone",
+    "expect_flags": [
+      "accessory_or_box"
+    ]
+  },
+  {
+    "title": "Lead For Apple iPhone 11 12 13 14",
+    "review_price": 3.0,
+    "expect_key": null,
+    "expect_category": "phone",
+    "expect_flags": [
+      "accessory_or_box"
+    ]
+  },
+  {
+    "title": "Genuine Apple iPhone 14 Midnight Mid Frame / Chassis With Camera & Parts",
+    "review_price": 34.99,
+    "expect_key": null,
+    "expect_category": "phone",
+    "expect_flags": [
+      "parts_only"
+    ]
+  },
+  {
+    "title": "iPhone 17 pro max / 18 pro max",
+    "review_price": 4.0,
+    "expect_key": null,
+    "expect_category": "phone",
+    "expect_bundle": true,
+    "expect_flags": [
+      "multiple_models"
+    ]
+  },
+  {
+    "title": "Iphone 17 Pro Max| 18 Pro Max - Plum/Burgundy",
+    "review_price": 5.0,
+    "expect_key": null,
+    "expect_category": "phone",
+    "expect_bundle": true
+  },
+  {
+    "title": "PS5 with 2 games",
+    "review_price": 300.0,
+    "expect_key": "console:ps5",
+    "expect_category": "console",
+    "expect_bundle": true
+  },
+  {
+    "title": "PS5 game bundle",
+    "review_price": 30.0,
+    "expect_key": null,
+    "expect_category": "console",
+    "expect_bundle": true,
+    "expect_flags": [
+      "console_game"
+    ]
+  },
+  {
+    "title": "Xbox series X",
+    "review_price": 35.0,
+    "expect_key": "console:xbox-series-x",
+    "expect_category": "console"
+  },
+  {
+    "title": "Sony PlayStation 5 Disc Console",
+    "review_price": 320.0,
+    "expect_key": "console:ps5",
+    "expect_category": "console"
+  },
+  {
+    "title": "Apple iPhone 12",
+    "review_price": 30.0,
+    "expect_key": "phone:iphone-12",
+    "expect_category": "phone"
+  },
+  {
+    "title": "Intel core i5-12400F Rtx 4060 ti 8gb 32GB DDR4 ram 1TB SSD",
+    "review_price": 500.0,
+    "expect_key": "pc:gpu:rtx-4060-ti-8gb",
+    "expect_category": "pc"
+  },
+  {
+    "title": "asus tuf Gaming GeForce RTX 5090 OC 32GB Graphics Card",
+    "review_price": 125.1,
+    "expect_key": "gpu:rtx-5090-32gb",
+    "expect_category": "gpu"
+  },
+  {
+    "title": "Ex Display Apple MacBook Pro 16” 6-Core-32GB with Apple Logic Pro 11 & Microsoft Office 2024",
+    "review_price": 425.0,
+    "expect_key": null,
+    "expect_category": "laptop",
+    "note": "Bundled software year must not become the laptop model year."
+  },
+  {
+    "title": "Switch 2 Pokopia",
+    "review_price": 35.0,
+    "expect_key": null,
+    "expect_category": "other",
+    "expect_flags": [
+      "console_game"
+    ]
+  },
+  {
+    "title": "Pro Evolution Soccer PES 2016 Day One Edition PlayStation 4",
+    "review_price": 15.0,
+    "expect_key": null,
+    "expect_category": "other",
+    "expect_flags": [
+      "console_game"
+    ]
+  },
+  {
+    "title": "Hanns.G HE225DPB 21.5-inch monitor",
+    "review_price": 12.0,
+    "expect_key": "monitor:21in:hannsg:he225dpb",
+    "expect_category": "monitor"
+  },
+  {
+    "title": "Osmo interactive play bundle 2 x games like new for iPad",
+    "review_price": 20.0,
+    "expect_key": null,
+    "expect_category": "tablet",
+    "expect_bundle": true,
+    "expect_flags": [
+      "accessory_or_box"
+    ]
+  },
+  {
+    "title": "Hastraith White Stylus for Apple iPad",
+    "review_price": 8.0,
+    "expect_key": null,
+    "expect_category": "tablet",
+    "expect_flags": [
+      "accessory_or_box"
+    ]
+  },
+  {
+    "title": "Ps5 portal",
+    "review_price": 120.0,
+    "expect_key": "console:playstation-portal",
+    "expect_category": "console"
+  },
+  {
+    "title": "gaming monitor 240hz",
+    "review_price": 45.0,
+    "expect_key": null,
+    "expect_category": "other"
+  },
+  {
+    "title": "The Crew 2 Xbox one",
+    "review_price": 1.99,
+    "expect_key": null,
+    "expect_category": "other",
+    "expect_flags": [
+      "console_game"
+    ]
+  },
+  {
+    "title": "UFC 3 Xbox One",
+    "review_price": 4.99,
+    "expect_key": null,
+    "expect_category": "other",
+    "expect_flags": [
+      "console_game"
+    ]
+  },
+  {
+    "title": "Xbox one kinect",
+    "review_price": 3.0,
+    "expect_key": null,
+    "expect_category": "console",
+    "expect_flags": [
+      "accessory_or_box"
+    ]
+  },
+  {
+    "title": "Xbox one Kinect sensor",
+    "review_price": 5.0,
+    "expect_key": null,
+    "expect_category": "console",
+    "expect_flags": [
+      "accessory_or_box"
+    ]
+  }
+]

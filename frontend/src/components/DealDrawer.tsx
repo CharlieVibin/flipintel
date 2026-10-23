@@ -3,17 +3,24 @@ import {
   ArrowUpRight,
   Bookmark,
   BookmarkCheck,
+  Check,
   CheckCircle2,
   CircleAlert,
+  Database,
   ExternalLink,
   Info,
+  Loader2,
+  Pencil,
+  Plus,
   ReceiptText,
+  RotateCcw,
   ShieldCheck,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 import { api, ApiError } from "../lib/api";
-import type { DealDetail } from "../lib/types";
+import type { CompsResponse, DealDetail } from "../lib/types";
 import { CATEGORY_LABELS, conditionLabel, confidenceTone, methodLabel, money, pct, timeAgo } from "../lib/format";
 import { cn, ConfidenceMeter, MarketBadge, ProductImage, ScoreRing } from "./ui";
 
@@ -28,6 +35,20 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
   const [deal, setDeal] = useState<DealDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [evidence, setEvidence] = useState<CompsResponse | null>(null);
+  const [evidenceError, setEvidenceError] = useState<string | null>(null);
+  const [compBusy, setCompBusy] = useState(false);
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [showCorrection, setShowCorrection] = useState(false);
+  const [correction, setCorrection] = useState({ product_key: "", product_name: "", kind: "gpu" });
+  const [compForm, setCompForm] = useState({
+    title: "",
+    price: "",
+    condition: "good",
+    postage: "0",
+    url: "",
+    notes: "",
+  });
 
   useEffect(() => {
     let active = true;
@@ -45,6 +66,38 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
       active = false;
     };
   }, [dealId]);
+
+  useEffect(() => {
+    if (!deal?.product_key) {
+      setEvidence(null);
+      return;
+    }
+    let active = true;
+    api
+      .comps(deal.product_key, deal.kind)
+      .then((data) => {
+        if (active) {
+          setEvidence(data);
+          setEvidenceError(null);
+        }
+      })
+      .catch((err: unknown) => {
+        if (active) setEvidenceError(err instanceof Error ? err.message : "Could not load evidence");
+      });
+    return () => {
+      active = false;
+    };
+  }, [deal?.product_key, deal?.kind]);
+
+  useEffect(() => {
+    if (deal) {
+      setCorrection({
+        product_key: deal.product_key ?? "",
+        product_name: deal.product_name ?? "",
+        kind: deal.kind ?? "gpu",
+      });
+    }
+  }, [deal?.id, deal?.product_key, deal?.product_name, deal?.kind]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -80,6 +133,112 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
     }
   }
 
+  async function addComp() {
+    if (!deal?.product_key || compBusy) return;
+    const price = Number(compForm.price);
+    if (!Number.isFinite(price) || price <= 0) {
+      onToast("Enter a valid sold price", "error");
+      return;
+    }
+    setCompBusy(true);
+    try {
+      await api.addComp({
+        product_key: deal.product_key,
+        kind: deal.kind,
+        title: compForm.title.trim() || `${deal.product_name ?? deal.product_key} completed sale`,
+        price,
+        condition: compForm.condition,
+        postage: Number(compForm.postage) || 0,
+        url: compForm.url.trim() || undefined,
+        notes: compForm.notes.trim() || undefined,
+        verified: true,
+      });
+      setCompForm({ title: "", price: "", condition: "good", postage: "0", url: "", notes: "" });
+      const [updatedDeal, updatedEvidence] = await Promise.all([
+        api.deal(deal.id),
+        api.comps(deal.product_key, deal.kind),
+      ]);
+      setDeal(updatedDeal);
+      setEvidence(updatedEvidence);
+      onToast("Sold evidence saved — valuation refreshed", "success");
+      onChanged();
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "Could not save sold evidence", "error");
+    } finally {
+      setCompBusy(false);
+    }
+  }
+
+  async function removeComp(id: number) {
+    if (!deal?.product_key || compBusy) return;
+    setCompBusy(true);
+    try {
+      await api.deleteComp(id);
+      const [updatedDeal, updatedEvidence] = await Promise.all([
+        api.deal(deal.id),
+        api.comps(deal.product_key, deal.kind),
+      ]);
+      setDeal(updatedDeal);
+      setEvidence(updatedEvidence);
+      onToast("Manual evidence removed", "success");
+      onChanged();
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "Could not remove evidence", "error");
+    } finally {
+      setCompBusy(false);
+    }
+  }
+
+  async function submitReview(decision: "approved" | "rejected" | "corrected") {
+    if (!deal || reviewBusy) return;
+    setReviewBusy(true);
+    try {
+      await api.review(deal.id, {
+        decision,
+        product_key: decision === "corrected" ? correction.product_key.trim().toLowerCase() : undefined,
+        product_name: decision === "corrected" ? correction.product_name.trim() || undefined : undefined,
+        kind: decision === "corrected" ? correction.kind : undefined,
+        note:
+          decision === "approved"
+            ? "Checked manually; no independent evidence added by this decision."
+            : decision === "rejected"
+              ? "Rejected as an incorrect opportunity after manual review."
+              : "Product identification corrected manually.",
+      });
+      const updated = await api.deal(deal.id);
+      setDeal(updated);
+      setShowCorrection(false);
+      onChanged();
+      onToast(
+        decision === "approved"
+          ? "Marked as genuine. Confidence was not increased."
+          : decision === "rejected"
+            ? "Listing rejected and removed from the pending review queue"
+            : "Identification corrected; valuation evidence is recalculating",
+        "success",
+      );
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "Could not save the review decision", "error");
+    } finally {
+      setReviewBusy(false);
+    }
+  }
+
+  async function undoReview() {
+    if (!deal || reviewBusy) return;
+    setReviewBusy(true);
+    try {
+      await api.undoReview(deal.id);
+      setDeal(await api.deal(deal.id));
+      onChanged();
+      onToast("Review decision cleared");
+    } catch {
+      onToast("Could not clear the review decision", "error");
+    } finally {
+      setReviewBusy(false);
+    }
+  }
+
   async function dismiss() {
     if (!deal || busy) return;
     setBusy(true);
@@ -99,6 +258,8 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
   const breakdown = deal?.breakdown;
   const purchase = breakdown?.purchase;
   const resale = breakdown?.resale;
+  const risk = breakdown?.risk;
+  const evidenceInfo = breakdown?.evidence;
   const riskFlags = (deal?.flags ?? []).filter((flag) =>
     ["condition_caution", "faulty_or_parts", "accessory_or_box", "bundle", "model_unclear"].includes(flag),
   );
@@ -178,6 +339,116 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
                   />
                 </div>
 
+                {deal.needs_review && (
+                  <div className="rounded-xl border border-ember/25 bg-ember/[0.06] p-3.5">
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <p className="flex items-center gap-2 text-xs font-semibold text-ember">
+                        <CircleAlert className="h-3.5 w-3.5" /> Manual review required
+                      </p>
+                      {deal.review_decision && (
+                        <span className="chip border-ink-500 bg-ink-800 text-mist-300">
+                          {deal.review_decision === "approved" ? "Approved" : deal.review_decision === "rejected" ? "Rejected" : "Corrected"}
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-1 text-[11px] leading-relaxed text-mist-400">
+                      {deal.review_reason ?? "This listing is suppressed from automatic recommendations until the price and contents are verified."}
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {deal.flags.map((flag) => (
+                        <span key={flag} className="chip border-ink-500 bg-ink-900/70 font-mono text-[9px] text-mist-400">
+                          {flag.replaceAll("_", " ")}
+                        </span>
+                      ))}
+                    </div>
+                    {!deal.review_decision ? (
+                      <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                        <button className="btn-primary !py-1.5 !text-[11px]" onClick={() => void submitReview("approved")} disabled={reviewBusy}>
+                          <Check className="h-3 w-3" /> Genuine opportunity
+                        </button>
+                        <button className="btn-secondary !py-1.5 !text-[11px]" onClick={() => void submitReview("rejected")} disabled={reviewBusy}>
+                          <X className="h-3 w-3" /> Reject
+                        </button>
+                        <button className="btn-secondary !py-1.5 !text-[11px]" onClick={() => setShowCorrection((value) => !value)} disabled={reviewBusy}>
+                          <Pencil className="h-3 w-3" /> Correct identification
+                        </button>
+                      </div>
+                    ) : (
+                      <button className="mt-2 inline-flex items-center gap-1 text-[10px] text-mist-500 hover:text-mist-300" onClick={() => void undoReview()} disabled={reviewBusy}>
+                        <RotateCcw className="h-3 w-3" /> Undo decision
+                      </button>
+                    )}
+                    {showCorrection && !deal.review_decision && (
+                      <div className="mt-3 grid gap-2 rounded-lg border border-ink-600 bg-ink-900/70 p-3 sm:grid-cols-2">
+                        <input
+                          className="field !py-2"
+                          placeholder="product:key"
+                          value={correction.product_key}
+                          onChange={(event) => setCorrection((value) => ({ ...value, product_key: event.target.value }))}
+                        />
+                        <input
+                          className="field !py-2"
+                          placeholder="Product name"
+                          value={correction.product_name}
+                          onChange={(event) => setCorrection((value) => ({ ...value, product_name: event.target.value }))}
+                        />
+                        <select
+                          className="field !py-2"
+                          value={correction.kind}
+                          onChange={(event) => setCorrection((value) => ({ ...value, kind: event.target.value }))}
+                        >
+                          {["gpu", "cpu", "ram", "ssd", "motherboard", "pc", "laptop", "console", "monitor", "phone", "tablet"].map((kind) => (
+                            <option key={kind} value={kind}>{CATEGORY_LABELS[kind] ?? kind}</option>
+                          ))}
+                        </select>
+                        <button className="btn-primary !py-2" onClick={() => void submitReview("corrected")} disabled={reviewBusy || !correction.product_key.trim()}>
+                          Save correction
+                        </button>
+                        <p className="text-[9px] leading-relaxed text-mist-500 sm:col-span-2">
+                          Correcting identification changes which comparables are used. It does not raise the valuation
+                          confidence or convert this listing into a recommendation by itself.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {deal.duplicate_of && (
+                  <div className="rounded-xl border border-ink-600 bg-ink-850/60 p-3 text-[11px] text-mist-400">
+                    Possible cross-marketplace duplicate of listing #{deal.duplicate_of}. Both original records are preserved.
+                  </div>
+                )}
+
+                {risk && risk.score >= 30 && (
+                  <div
+                    className={cn(
+                      "rounded-xl border p-3.5",
+                      risk.level === "high"
+                        ? "border-rose/30 bg-rose/[0.06]"
+                        : "border-amber-400/25 bg-amber-400/[0.05]",
+                    )}
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <p className={cn("flex items-center gap-2 text-xs font-semibold", risk.level === "high" ? "text-rose" : "text-amber-300")}>
+                        <CircleAlert className="h-3.5 w-3.5" /> Marketplace risk {Math.round(risk.score)}/100
+                      </p>
+                      <span className="chip border-ink-600 bg-ink-900/70 text-[9px] uppercase text-mist-400">
+                        {risk.level}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-[11px] leading-relaxed text-mist-400">
+                      This is a verification score, not an accusation. A low price alone is never treated as proof of fraud.
+                    </p>
+                    <ul className="mt-2 space-y-1.5">
+                      {risk.reasons.map((reason) => (
+                        <li key={reason} className="flex items-start gap-2 text-[11px] leading-relaxed text-mist-400">
+                          <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-mist-500" /> {reason}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
                 <div className="panel-soft p-4">
                   <div className="flex items-start justify-between gap-4">
                     <div>
@@ -200,8 +471,27 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
                     ))}
                   </ul>
                   <p className={cn("mt-3 text-[11px]", tone.text)}>
-                    {tone.label} · estimate range {money(deal.resale_low)}–{money(deal.resale_high)}
+                    {tone.label}
+                    {resale?.range_supported && deal.resale_low != null && deal.resale_high != null
+                      ? ` · supported range ${money(deal.resale_low)}–${money(deal.resale_high)}`
+                      : " · resale range unavailable: evidence is too thin or dispersed"}
                   </p>
+                  {resale?.range_supported && (
+                    <p className="mt-1 text-[10px] leading-relaxed text-mist-500">
+                      Conservative / central / optimistic resale: {money(resale.conservative)} / {money(resale.central)} / {money(resale.optimistic)}. {resale.range_basis}
+                    </p>
+                  )}
+                  {evidenceInfo?.confidence_low != null && evidenceInfo?.confidence_high != null && (
+                    <p className="mt-1 text-[10px] leading-relaxed text-mist-500">
+                      80% evidence interval {money(evidenceInfo.confidence_low)}–{money(evidenceInfo.confidence_high)} from {evidenceInfo.sold_evidence ? "completed sales" : "live asking prices"}.
+                      {evidenceInfo.trend_note ? ` ${evidenceInfo.trend_note}` : ""}
+                    </p>
+                  )}
+                  {!evidenceInfo?.sold_evidence && (
+                    <p className="mt-1 text-[10px] font-medium leading-relaxed text-amber-300/80">
+                      Asking-only valuation: no completed-sale evidence supports this resale estimate yet.
+                    </p>
+                  )}
                 </div>
 
                 {purchase && resale && (
@@ -221,6 +511,7 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
                           <Row label={`Resale via ${resale.channel}`} value={money(resale.expected)} />
                           <Row label="Selling fees" value={`−${money(resale.fees)}`} />
                           <Row label="Outbound delivery + packaging" value={`−${money(resale.shipping + resale.packaging)}`} />
+                          {Boolean(resale.other) && <Row label="Other / refurbishment costs" value={`−${money(resale.other)}`} />}
                           <Row
                             label="Estimated net profit"
                             value={`${(deal.net_profit ?? 0) > 0 ? "+" : ""}${money(deal.net_profit)}`}
@@ -295,6 +586,125 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
                         </li>
                       ))}
                     </ul>
+                  )}
+                </div>
+
+                <div>
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="flex items-center gap-2 text-sm font-semibold text-mist-100">
+                      <Database className="h-4 w-4 text-mist-400" /> Verified sold evidence
+                    </h3>
+                    <span className="chip border-ink-600 bg-ink-800 text-mist-400">
+                      {evidence?.summary.manual_count ?? 0} manual · {evidence?.summary.sold_count ?? 0} sold
+                    </span>
+                  </div>
+                  {evidenceError && <p className="mb-2 text-[11px] text-rose">{evidenceError}</p>}
+                  <div className="space-y-1.5">
+                    {(evidence?.comps ?? []).filter((comp) => comp.is_sold).slice(0, 12).map((comp) => (
+                      <div
+                        key={comp.id}
+                        className="flex items-center justify-between gap-3 rounded-lg border border-lime-400/15 bg-lime-400/[0.03] px-3 py-2"
+                      >
+                        <div className="min-w-0">
+                          <p className="truncate text-[12px] text-mist-200">{comp.title}</p>
+                          <p className="mt-0.5 text-[10px] text-mist-500">
+                            {comp.source === "manual" ? "User entered" : comp.source === "manual_csv" ? "CSV import" : "Marketplace sale"} · {conditionLabel(comp.condition_norm)} ·{" "}
+                            {timeAgo(comp.observed_at)}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <p className="numeric text-[12.5px] font-medium text-lime-300">{money(comp.price)}</p>
+                          {comp.url && (
+                            <a href={comp.url} target="_blank" rel="noopener noreferrer" aria-label="Open sold evidence" className="text-mist-500 hover:text-mist-200">
+                              <ExternalLink className="h-3 w-3" />
+                            </a>
+                          )}
+                          {["manual", "manual_csv"].includes(comp.source) && (
+                            <button
+                              onClick={() => void removeComp(comp.id)}
+                              disabled={compBusy}
+                              className="text-mist-600 hover:text-rose disabled:opacity-50"
+                              aria-label="Delete user-supplied evidence"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                    {!evidence?.comps.some((comp) => comp.is_sold) && (
+                      <div className="rounded-lg border border-ink-700 bg-ink-850/50 p-3 text-[11px] leading-relaxed text-mist-400">
+                        No completed-sale evidence yet. Add a verified sold price below; the valuation will prefer it over asking prices.
+                      </div>
+                    )}
+                  </div>
+
+                  {deal.product_key ? (
+                    <div className="mt-3 rounded-xl border border-ink-700 bg-ink-900/70 p-3.5">
+                      <p className="mb-2 flex items-center gap-1.5 text-[11px] font-medium text-mist-300">
+                        <Plus className="h-3.5 w-3.5" /> Add verified sold price for {deal.product_key}
+                      </p>
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <input
+                          className="field !py-2"
+                          placeholder="Sold title (e.g. RTX 4070 12GB)"
+                          value={compForm.title}
+                          onChange={(event) => setCompForm((prev) => ({ ...prev, title: event.target.value }))}
+                        />
+                        <div className="grid grid-cols-2 gap-2">
+                          <input
+                            className="field !py-2"
+                            inputMode="decimal"
+                            placeholder="Sold price £"
+                            value={compForm.price}
+                            onChange={(event) => setCompForm((prev) => ({ ...prev, price: event.target.value }))}
+                          />
+                          <input
+                            className="field !py-2"
+                            inputMode="decimal"
+                            placeholder="Postage £"
+                            value={compForm.postage}
+                            onChange={(event) => setCompForm((prev) => ({ ...prev, postage: event.target.value }))}
+                          />
+                        </div>
+                        <select
+                          className="field !py-2"
+                          value={compForm.condition}
+                          onChange={(event) => setCompForm((prev) => ({ ...prev, condition: event.target.value }))}
+                          aria-label="Sold item condition"
+                        >
+                          <option value="new">New</option>
+                          <option value="like_new">Like new</option>
+                          <option value="excellent">Excellent</option>
+                          <option value="very_good">Very good</option>
+                          <option value="good">Good</option>
+                          <option value="used">Used</option>
+                          <option value="fair">Fair</option>
+                          <option value="poor">Poor</option>
+                        </select>
+                        <input
+                          className="field !py-2"
+                          placeholder="Evidence URL (optional)"
+                          value={compForm.url}
+                          onChange={(event) => setCompForm((prev) => ({ ...prev, url: event.target.value }))}
+                        />
+                      </div>
+                      <input
+                        className="field mt-2 !py-2"
+                        placeholder="Notes (optional, e.g. eBay sold 14 Oct, 12GB model)"
+                        value={compForm.notes}
+                        onChange={(event) => setCompForm((prev) => ({ ...prev, notes: event.target.value }))}
+                      />
+                      <div className="mt-2 flex items-center justify-between gap-2">
+                        <p className="text-[10px] text-mist-500">Only add prices you have actually seen for a completed sale.</p>
+                        <button className="btn-secondary !py-1.5 !text-[11px]" onClick={() => void addComp()} disabled={compBusy}>
+                          {compBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                          Save sold price
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="mt-3 text-[11px] text-mist-500">This listing has no resolved product key, so it cannot be valued or given manual evidence.</p>
                   )}
                 </div>
 

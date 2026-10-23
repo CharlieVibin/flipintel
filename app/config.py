@@ -81,7 +81,11 @@ class Settings:
 
     @property
     def ebay_configured(self) -> bool:
-        return bool(self.ebay_client_id and self.ebay_client_secret)
+        # Read through the credential store so keys saved from Settings take
+        # effect immediately, without requiring a process restart.
+        from .credentials import credential_store
+
+        return credential_store.ebay_configured
 
     @property
     def archil_configured(self) -> bool:
@@ -98,14 +102,42 @@ settings = Settings()
 # rotates these and then enriches popular models automatically from the
 # catalogue. Keep this list category-level rather than specific listings.
 DISCOVERY_QUERIES: dict[str, tuple[str, ...]] = {
-    "gpu": ("graphics card", "gaming gpu", "rtx gpu", "radeon gpu"),
-    "cpu": ("computer processor", "amd ryzen cpu", "intel core cpu"),
-    "pc": ("gaming pc", "desktop computer"),
-    "laptop": ("gaming laptop", "laptop"),
-    "console": ("games console", "playstation 5", "xbox series x", "steam deck", "nintendo switch"),
-    "ram": ("ddr5 ram", "ddr4 ram"),
-    "ssd": ("nvme ssd", "solid state drive"),
-    "other": ("gaming monitor", "macbook", "ipad", "iphone"),
+    "gpu": (
+        "graphics card", "gaming gpu", "rtx gpu", "radeon gpu", "rtx 5070",
+        "rx 9070", "rtx 4070", "rx 7800 xt", "intel arc gpu",
+    ),
+    "cpu": (
+        "computer processor", "amd ryzen cpu", "intel core cpu", "ryzen 7",
+        "core i7", "ryzen 5", "core i5", "ryzen 9",
+    ),
+    "pc": ("gaming pc", "desktop computer", "gaming desktop", "mini pc", "workstation pc"),
+    "laptop": (
+        "gaming laptop", "laptop", "macbook pro", "macbook air", "thinkpad",
+        "windows laptop", "student laptop",
+    ),
+    "console": (
+        "games console", "playstation 5", "xbox series x", "nintendo switch",
+        "playstation 4", "xbox one", "nintendo switch lite", "xbox series s",
+    ),
+    "handheld": ("steam deck", "rog ally", "legion go", "playstation portal", "handheld gaming"),
+    "retro": (
+        "retro console", "game boy", "nintendo 64", "sega mega drive",
+        "super nintendo", "gamecube", "ps vita",
+    ),
+    "ram": ("ddr5 ram", "ddr4 ram", "ddr5 32gb", "ddr4 16gb", "ddr5 64gb", "laptop ram"),
+    "ssd": (
+        "nvme ssd", "solid state drive", "sata ssd", "external ssd", "hard drive",
+        "m.2 ssd", "portable ssd",
+    ),
+    "motherboard": ("motherboard", "b650 motherboard", "am5 motherboard", "z790 motherboard"),
+    "monitor": ("gaming monitor", "4k monitor", "1440p monitor", "ultrawide monitor", "oled monitor"),
+    "phone": ("iphone", "samsung galaxy", "google pixel", "smartphone"),
+    "tablet": ("ipad", "ipad pro", "samsung tablet", "lenovo tablet"),
+    "networking": (
+        "wifi router", "mesh wifi", "network switch", "unifi", "netgear router",
+        "tp-link router", "access point",
+    ),
+    "other": ("macbook", "gaming headset", "capture card"),
 }
 
 DEFAULT_SETTINGS: dict[str, str] = {
@@ -115,13 +147,15 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "max_age_hours": "0",
     "ebay_fvf": "0.1322",
     "ebay_fixed_fee": "0.30",
+    "resale_channel": "ebay",
     "resale_shipping": "4.50",
     "packaging_cost": "1.00",
     "collection_cost": "0.00",
+    "other_costs": "0.00",
     "vinted_buyer_fee_pct": "0.05",
     "vinted_buyer_fee_fixed": "0.70",
     "vinted_shipping": "3.49",
-    "asking_to_sold_factor": "0.90",
+    "asking_to_sold_factor": "0.85",
     "cex_private_factor": "0.80",
     "notifications_enabled": "false",
     "discord_webhook_url": "",
@@ -148,6 +182,7 @@ CATEGORY_LABELS: dict[str, str] = {
     "monitor": "Monitors",
     "phone": "Phones",
     "tablet": "Tablets",
+    "networking": "Networking",
     "other": "Other tech",
 }
 

@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS listings (
     is_faulty INTEGER NOT NULL DEFAULT 0,
     is_wanted INTEGER NOT NULL DEFAULT 0,
     is_bundle INTEGER NOT NULL DEFAULT 0,
+    duplicate_of INTEGER,
+    duplicate_score REAL,
     flags TEXT,
     attrs TEXT,
     is_auction INTEGER NOT NULL DEFAULT 0,
@@ -74,11 +76,68 @@ CREATE TABLE IF NOT EXISTS market_comps (
     kind TEXT,
     condition_norm TEXT,
     is_sold INTEGER NOT NULL DEFAULT 0,
+    postage REAL NOT NULL DEFAULT 0,
+    notes TEXT,
+    verified INTEGER NOT NULL DEFAULT 0,
+    evidence_confidence REAL NOT NULL DEFAULT 1.0,
     url TEXT,
     observed_at TEXT NOT NULL,
+    created_at TEXT,
+    currency TEXT NOT NULL DEFAULT 'GBP',
+    product_name TEXT,
+    condition_raw TEXT,
+    variants TEXT,
+    import_id INTEGER,
+    updated_at TEXT,
     UNIQUE (source, source_id)
 );
 CREATE INDEX IF NOT EXISTS idx_comps_key ON market_comps(product_key, kind);
+CREATE INDEX IF NOT EXISTS idx_comps_sold ON market_comps(product_key, is_sold, observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS market_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_key TEXT NOT NULL,
+    kind TEXT,
+    marketplace TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    price REAL NOT NULL,
+    condition_norm TEXT,
+    observed_at TEXT NOT NULL,
+    observed_day TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (marketplace, source_id, observed_day)
+);
+CREATE INDEX IF NOT EXISTS idx_market_obs_key ON market_observations(product_key, observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS api_usage_daily (
+    marketplace TEXT NOT NULL,
+    day TEXT NOT NULL,
+    requests INTEGER NOT NULL DEFAULT 0,
+    errors INTEGER NOT NULL DEFAULT 0,
+    last_status INTEGER,
+    last_error TEXT,
+    last_request_at TEXT,
+    last_success_at TEXT,
+    quota_remaining INTEGER,
+    quota_limit INTEGER,
+    quota_reset_at TEXT,
+    PRIMARY KEY (marketplace, day)
+);
+CREATE INDEX IF NOT EXISTS idx_api_usage_day ON api_usage_daily(day DESC);
+
+CREATE TABLE IF NOT EXISTS evidence_imports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    file_sha256 TEXT,
+    total_rows INTEGER NOT NULL DEFAULT 0,
+    imported INTEGER NOT NULL DEFAULT 0,
+    updated INTEGER NOT NULL DEFAULT 0,
+    skipped INTEGER NOT NULL DEFAULT 0,
+    rejected INTEGER NOT NULL DEFAULT 0,
+    detail TEXT
+);
 
 CREATE TABLE IF NOT EXISTS external_quotes (
     product_key TEXT PRIMARY KEY,
@@ -106,9 +165,13 @@ CREATE TABLE IF NOT EXISTS deals (
     resale_shipping REAL NOT NULL DEFAULT 0,
     packaging REAL NOT NULL DEFAULT 0,
     net_profit REAL NOT NULL DEFAULT 0,
+    net_profit_conservative REAL,
+    net_profit_optimistic REAL,
     roi REAL NOT NULL DEFAULT 0,
     score REAL NOT NULL DEFAULT 0,
     is_deal INTEGER NOT NULL DEFAULT 0,
+    needs_review INTEGER NOT NULL DEFAULT 0,
+    review_reason TEXT,
     reasons TEXT,
     breakdown TEXT,
     computed_at TEXT NOT NULL
@@ -137,6 +200,7 @@ CREATE TABLE IF NOT EXISTS scan_runs (
     items_found INTEGER NOT NULL DEFAULT 0,
     items_new INTEGER NOT NULL DEFAULT 0,
     price_drops INTEGER NOT NULL DEFAULT 0,
+    duplicates INTEGER NOT NULL DEFAULT 0,
     duration_ms INTEGER,
     error TEXT,
     detail TEXT
@@ -172,6 +236,16 @@ CREATE TABLE IF NOT EXISTS notifications (
     UNIQUE (listing_id, channel)
 );
 
+CREATE TABLE IF NOT EXISTS review_decisions (
+    listing_id INTEGER PRIMARY KEY REFERENCES listings(id) ON DELETE CASCADE,
+    decision TEXT NOT NULL,
+    note TEXT,
+    product_key TEXT,
+    kind TEXT,
+    decided_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_review_decisions ON review_decisions(decision, decided_at DESC);
+
 CREATE TABLE IF NOT EXISTS comp_cache (
     product_key TEXT NOT NULL,
     marketplace TEXT NOT NULL,
@@ -196,9 +270,63 @@ class Database:
             self.conn.execute("PRAGMA foreign_keys=ON")
             self.conn.execute("PRAGMA busy_timeout=30000")
             self.conn.executescript(SCHEMA)
+            self._migrate()
             self._seed_settings()
             self._seed_marketplaces()
             self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Additive migrations only. Never drops user listings or evidence."""
+        migrations: dict[str, dict[str, str]] = {
+            "listings": {
+                "duplicate_of": "INTEGER",
+                "duplicate_score": "REAL",
+            },
+            "market_comps": {
+                "postage": "REAL NOT NULL DEFAULT 0",
+                "notes": "TEXT",
+                "verified": "INTEGER NOT NULL DEFAULT 0",
+                "evidence_confidence": "REAL NOT NULL DEFAULT 1.0",
+                "created_at": "TEXT",
+                "currency": "TEXT NOT NULL DEFAULT 'GBP'",
+                "product_name": "TEXT",
+                "condition_raw": "TEXT",
+                "variants": "TEXT",
+                "import_id": "INTEGER",
+                "updated_at": "TEXT",
+            },
+            "deals": {
+                "needs_review": "INTEGER NOT NULL DEFAULT 0",
+                "review_reason": "TEXT",
+                "net_profit_conservative": "REAL",
+                "net_profit_optimistic": "REAL",
+                "risk_score": "REAL NOT NULL DEFAULT 0",
+                "risk_level": "TEXT",
+                "risk_reasons": "TEXT",
+            },
+            "scan_runs": {
+                "duplicates": "INTEGER NOT NULL DEFAULT 0",
+            },
+            "api_usage_daily": {
+                "last_success_at": "TEXT",
+            },
+        }
+        for table, columns in migrations.items():
+            existing = {
+                row[1] for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            for name, definition in columns.items():
+                if name not in existing:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_listings_duplicate ON listings(duplicate_of)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_deals_review ON deals(needs_review, computed_at DESC)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_comps_import ON market_comps(import_id)"
+        )
 
     def _seed_settings(self) -> None:
         now = iso()
