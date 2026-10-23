@@ -45,10 +45,11 @@ Ending-soon auction discovery now uses the same configuration instead of a
 separate all-branch rotation. It refuses to start without a saved configuration,
 stops when eBay is disabled, rotates only the enabled eBay branches, applies the
 same GBP auction price window, filters shortlisted auctions by enabled leaf and
-saved total-cost budget before notification, and filters over-budget bids again
-during ingest. The existing auction monitor, ending-window rule and recheck of
-known shortlisted auctions are preserved; changing a toggle takes effect on the
-next auction pass without a restart.
+saved total-cost budget, passes only those shortlisted listing ids to Discord
+alerts, and filters over-budget bids again during ingest. The existing auction
+monitor, ending-window rule and recheck of known shortlisted auctions are
+preserved; changing a toggle takes effect on the next auction pass without a
+restart.
 
 Measured request coverage on the current configuration (28 leaves selected):
 

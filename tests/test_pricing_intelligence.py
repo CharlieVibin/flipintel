@@ -435,6 +435,7 @@ def test_auction_alerts_deduplicate_and_respect_cooldown():
 
         notifier._send = fake_send  # type: ignore[assignment]
         try:
+            assert asyncio.run(notifier.notify_auctions(limit=4, allowed_ids=set())) == 0
             assert asyncio.run(notifier.notify_auctions(limit=4)) == 1
             assert asyncio.run(notifier.notify_auctions(limit=4)) == 0
             assert len(sent) == 1

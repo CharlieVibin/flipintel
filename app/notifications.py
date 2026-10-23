@@ -180,8 +180,15 @@ class Notifier:
         options = raw.get("buying_options") or []
         return "BEST_OFFER" in options
 
-    async def notify_auctions(self, limit: int = 4) -> int:
-        """Alert on profitable auctions inside the notification window."""
+    async def notify_auctions(
+        self, limit: int = 4, allowed_ids: set[int] | None = None
+    ) -> int:
+        """Alert on profitable auctions inside the notification window.
+
+        ``allowed_ids`` lets the scanner apply the saved scan configuration to
+        alerts as well as discovery. ``None`` keeps the notifier usable on its
+        own (for diagnostics and existing callers).
+        """
         webhook = await self._webhook()
         if not webhook:
             return 0
@@ -215,6 +222,8 @@ class Notifier:
         sent = 0
         for row in rows:
             listing_id = int(row["id"])
+            if allowed_ids is not None and listing_id not in allowed_ids:
+                continue
             last = self.db.query_one(
                 "SELECT bid, sent_at FROM auction_alerts WHERE listing_id=? "
                 "ORDER BY id DESC LIMIT 1",

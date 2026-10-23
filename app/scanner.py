@@ -1801,7 +1801,11 @@ class Scanner:
     async def _notify(self) -> None:
         try:
             await self.notifier.notify_new_deals()
-            await self.notifier.notify_auctions()
+            # The saved scan configuration also gates auction alerts. Compute
+            # the same shortlist the scanner's own timer uses, so disabling a
+            # category cannot leave an old auction alerting in the background.
+            allowed_ids = {int(row["id"]) for row in self._shortlisted_auctions()}
+            await self.notifier.notify_auctions(allowed_ids=allowed_ids)
         except Exception:
             log.exception("Notification dispatch failed")
 
