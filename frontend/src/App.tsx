@@ -6,6 +6,7 @@ import {
   Database,
   LayoutGrid,
   RefreshCw,
+  Wallet,
   Radar,
   Settings2,
   SlidersHorizontal,
@@ -17,16 +18,18 @@ import { cn, Logo, Toast, type ToastData } from "./components/ui";
 import { DealDrawer } from "./components/DealDrawer";
 import { DealsPage } from "./pages/DealsPage";
 import { EvidencePage } from "./pages/EvidencePage";
+import { FlipsPage } from "./pages/FlipsPage";
 import { SavedPage } from "./pages/SavedPage";
 import { ScannersPage } from "./pages/ScannersPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
-const TABS = ["deals", "saved", "evidence", "scanners", "settings"] as const;
+const TABS = ["deals", "saved", "flips", "evidence", "scanners", "settings"] as const;
 type Tab = (typeof TABS)[number];
 
 const TAB_META: Record<Tab, { label: string; title: string; subtitle: string; icon: typeof LayoutGrid }> = {
   deals: { label: "Deal feed", title: "Deal desk", subtitle: "Ranked opportunities from live UK listings", icon: LayoutGrid },
   saved: { label: "Shortlist", title: "Shortlist", subtitle: "Saved and dismissed opportunities", icon: Bookmark },
+  flips: { label: "My flips", title: "My flips", subtitle: "Purchases, price cuts and realised results", icon: Wallet },
   evidence: { label: "Evidence", title: "Evidence lab", subtitle: "Completed sales, imports and valuation calibration", icon: Database },
   scanners: { label: "Scanners", title: "Scanner health", subtitle: "Collection status, coverage and scan history", icon: Activity },
   settings: { label: "Settings", title: "Settings", subtitle: "Deal thresholds, costs and scan cadence", icon: SlidersHorizontal },
@@ -243,6 +246,16 @@ export default function App() {
               onToast={pushToast}
               onRefreshSummary={() => void fetchSummary()}
               onNavigate={navigate}
+            />
+          )}
+          {tab === "flips" && (
+            <FlipsPage
+              refreshTick={refreshTick}
+              onToast={pushToast}
+              onRefreshSummary={() => {
+                void fetchSummary();
+                setRefreshTick((value) => value + 1);
+              }}
             />
           )}
           {tab === "evidence" && (

@@ -18,7 +18,7 @@ import {
 import { api } from "../lib/api";
 import type { HealthResponse, ScanRun, SourceStatus } from "../lib/types";
 import { cn, StatusPill } from "../components/ui";
-import { formatDuration, marketplaceMeta, timeAgo, timeUntil } from "../lib/format";
+import { formatDuration, marketplaceMeta, money, timeAgo, timeUntil } from "../lib/format";
 
 interface Props {
   health: HealthResponse | null;
@@ -153,9 +153,29 @@ export function ScannersPage({ health, refreshTick, onToast, onRefresh }: Props)
             </span>
           </div>
           <p className="mt-3 text-[12px] leading-relaxed text-mist-400">
-            Used only as an optional resale anchor for models with active listings. CeX sits behind Cloudflare
-            and may refuse this network; quotes are cached for 24 hours when available.
+            Independent retail and trade-in reference, matched to the exact product identity. Retail is adjusted
+            to private-resale level using each product's observed asking market and is never counted as a
+            completed sale.
           </p>
+          <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+            <div className="rounded-lg border border-ink-700 bg-ink-900/60 px-2 py-2">
+              <p className="font-mono text-sm text-mist-100">{health?.scanner.cex.stats?.products ?? 0}</p>
+              <p className="text-[10px] text-mist-500">products</p>
+            </div>
+            <div className="rounded-lg border border-ink-700 bg-ink-900/60 px-2 py-2">
+              <p className="font-mono text-sm text-mist-100">{health?.scanner.cex.stats?.observations ?? 0}</p>
+              <p className="text-[10px] text-mist-500">observations</p>
+            </div>
+            <div className="rounded-lg border border-ink-700 bg-ink-900/60 px-2 py-2">
+              <p className="font-mono text-sm text-mist-100">{health?.scanner.pricing?.products ?? 0}</p>
+              <p className="text-[10px] text-mist-500">price memories</p>
+            </div>
+          </div>
+          {health?.scanner.cex.last_success_at && (
+            <p className="mt-2 text-[10px] text-mist-500">
+              Last live quote {timeAgo(health.scanner.cex.last_success_at)} · reused for {health.scanner.cex.reuse_hours ?? 168} hours · {health.scanner.pricing?.snapshots ?? 0} stored snapshots
+            </p>
+          )}
           {health?.scanner.cex.error && (
             <p className="mt-3 rounded-lg border border-ink-700 bg-ink-900/60 p-2.5 text-[11px] leading-relaxed text-mist-500">
               {health.scanner.cex.error}
@@ -164,11 +184,45 @@ export function ScannersPage({ health, refreshTick, onToast, onRefresh }: Props)
           <div className="mt-4 flex items-center gap-2 text-[11px] text-mist-500">
             <CircleDashed className="h-3.5 w-3.5" />
             {health?.scanner.cex.status === "blocked"
-              ? "Deals are still valued from live marketplace comparables; confidence is capped without sold evidence."
-              : "CeX is never treated as a successful listing source."}
+              ? "Deals are still valued from live marketplace comparables; CeX is skipped until it recovers."
+              : "CeX is a pricing reference, never treated as a successful listing source."}
           </div>
         </div>
       </div>
+
+      {health?.scanner.auctions && (
+        <div className="panel mt-5 overflow-hidden">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-ink-700 px-5 py-4">
+            <div>
+              <h2 className="text-sm font-semibold text-mist-100">Ending-soon watchlist</h2>
+              <p className="mt-0.5 text-[11px] text-mist-500">
+                Auctions inside the next {health.scanner.auctions.window_minutes} minutes whose current bid is still
+                below the maximum profitable bid. Rechecked every {health.scanner.auctions.urgent_seconds}s while close
+                to ending.
+              </p>
+            </div>
+            <span className="chip border-ink-600 bg-ink-800 text-mist-400">
+              {health.scanner.auctions.shortlisted.length} shortlisted
+            </span>
+          </div>
+          {health.scanner.auctions.shortlisted.length === 0 ? (
+            <p className="px-5 py-6 text-center text-[12px] text-mist-500">
+              No profitable auctions inside the window. eBay auction scanning requires developer API keys.
+            </p>
+          ) : (
+            <div className="divide-y divide-ink-700/60">
+              {health.scanner.auctions.shortlisted.map((auction) => (
+                <div key={auction.id} className="flex flex-wrap items-center gap-3 px-5 py-3 text-[12px]">
+                  <span className="min-w-0 flex-1 truncate text-mist-200">{auction.title}</span>
+                  <span className="font-mono text-mist-300">bid {money(auction.current_bid ?? auction.price)}</span>
+                  <span className="font-mono text-lime-300">ceiling {money(auction.max_bid)}</span>
+                  <span className="text-mist-500">{timeUntil(auction.auction_end_at)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {coverage && (
         <div className="panel mt-5 overflow-hidden">

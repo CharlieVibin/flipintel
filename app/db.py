@@ -39,6 +39,10 @@ CREATE TABLE IF NOT EXISTS listings (
     flags TEXT,
     attrs TEXT,
     is_auction INTEGER NOT NULL DEFAULT 0,
+    auction_end_at TEXT,
+    current_bid REAL,
+    bid_count INTEGER,
+    min_next_bid REAL,
     posted_at TEXT,
     first_seen TEXT NOT NULL,
     last_seen TEXT NOT NULL,
@@ -89,6 +93,7 @@ CREATE TABLE IF NOT EXISTS market_comps (
     variants TEXT,
     import_id INTEGER,
     updated_at TEXT,
+    seller TEXT,
     UNIQUE (source, source_id)
 );
 CREATE INDEX IF NOT EXISTS idx_comps_key ON market_comps(product_key, kind);
@@ -145,9 +150,57 @@ CREATE TABLE IF NOT EXISTS external_quotes (
     title TEXT,
     sell_price REAL,
     cash_price REAL,
+    voucher_price REAL,
+    grade TEXT,
+    sample_count INTEGER NOT NULL DEFAULT 0,
     url TEXT,
     status TEXT NOT NULL,
-    fetched_at TEXT NOT NULL
+    fetched_at TEXT NOT NULL,
+    checked_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS cex_price_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_key TEXT NOT NULL,
+    box_id TEXT,
+    product_id TEXT,
+    matched_name TEXT,
+    grade TEXT,
+    sell_price REAL,
+    cash_price REAL,
+    voucher_price REAL,
+    cash_pct INTEGER,
+    voucher_pct INTEGER,
+    condition TEXT,
+    status TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    raw TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_cex_history_key ON cex_price_history(product_key, observed_at DESC);
+
+CREATE TABLE IF NOT EXISTS valuation_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    resale_good REAL,
+    resale_low REAL,
+    resale_high REAL,
+    confidence REAL NOT NULL DEFAULT 0,
+    evidence_level TEXT,
+    sample_size INTEGER NOT NULL DEFAULT 0,
+    sold_count INTEGER NOT NULL DEFAULT 0,
+    sources TEXT,
+    method TEXT,
+    refreshed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_valuation_snapshots_key ON valuation_snapshots(product_key, refreshed_at DESC);
+
+CREATE TABLE IF NOT EXISTS pricing_research (
+    product_key TEXT PRIMARY KEY,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS deals (
@@ -178,6 +231,7 @@ CREATE TABLE IF NOT EXISTS deals (
     input_fingerprint TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_deals_feed ON deals(is_deal, score DESC);
+CREATE INDEX IF NOT EXISTS idx_deals_product_key ON deals(product_key);
 CREATE INDEX IF NOT EXISTS idx_deals_profit ON deals(net_profit DESC);
 
 CREATE TABLE IF NOT EXISTS saved_deals (
@@ -226,6 +280,57 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS flips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER REFERENCES listings(id) ON DELETE SET NULL,
+    product_key TEXT,
+    title TEXT NOT NULL,
+    kind TEXT,
+    marketplace TEXT,
+    condition_norm TEXT,
+    purchase_price REAL NOT NULL DEFAULT 0,
+    purchase_shipping REAL NOT NULL DEFAULT 0,
+    preparation_cost REAL NOT NULL DEFAULT 0,
+    other_costs REAL NOT NULL DEFAULT 0,
+    ask_price REAL,
+    final_price REAL,
+    fees REAL NOT NULL DEFAULT 0,
+    postage REAL NOT NULL DEFAULT 0,
+    channel TEXT,
+    status TEXT NOT NULL DEFAULT 'held',
+    listed_at TEXT,
+    sold_at TEXT,
+    predicted_resale REAL,
+    predicted_profit REAL,
+    predicted_confidence REAL,
+    predicted_evidence TEXT,
+    prediction_reasons TEXT,
+    recommendation TEXT,
+    feedback INTEGER,
+    feedback_note TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_flips_status ON flips(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_flips_key ON flips(product_key);
+
+CREATE TABLE IF NOT EXISTS flip_price_changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    flip_id INTEGER NOT NULL REFERENCES flips(id) ON DELETE CASCADE,
+    price REAL NOT NULL,
+    changed_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auction_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL DEFAULT 'discord',
+    bid REAL,
+    profitable INTEGER NOT NULL DEFAULT 1,
+    sent_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_auction_alerts_listing ON auction_alerts(listing_id, sent_at DESC);
 
 CREATE TABLE IF NOT EXISTS notifications (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -334,6 +439,10 @@ class Database:
             "listings": {
                 "duplicate_of": "INTEGER",
                 "duplicate_score": "REAL",
+                "auction_end_at": "TEXT",
+                "current_bid": "REAL",
+                "bid_count": "INTEGER",
+                "min_next_bid": "REAL",
             },
             "market_comps": {
                 "postage": "REAL NOT NULL DEFAULT 0",
@@ -347,6 +456,13 @@ class Database:
                 "variants": "TEXT",
                 "import_id": "INTEGER",
                 "updated_at": "TEXT",
+                "seller": "TEXT",
+            },
+            "external_quotes": {
+                "voucher_price": "REAL",
+                "grade": "TEXT",
+                "sample_count": "INTEGER NOT NULL DEFAULT 0",
+                "checked_at": "TEXT",
             },
             "deals": {
                 "needs_review": "INTEGER NOT NULL DEFAULT 0",
@@ -357,6 +473,14 @@ class Database:
                 "risk_level": "TEXT",
                 "risk_reasons": "TEXT",
                 "input_fingerprint": "TEXT",
+                "evidence_level": "TEXT",
+                "resale_strategy": "TEXT",
+                "resale_quick": "REAL",
+                "resale_balanced": "REAL",
+                "resale_max": "REAL",
+                "max_bid": "REAL",
+                "estimated_days": "REAL",
+                "valuation_refreshed_at": "TEXT",
             },
             "scan_runs": {
                 "duplicates": "INTEGER NOT NULL DEFAULT 0",

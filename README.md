@@ -38,9 +38,18 @@ clear a profit, ROI and confidence floor.
   a model name inside an accessory title is not evidence of the device.
 - **Comparable-market valuation** that prefers recently completed sales,
   keeps sold and asking evidence separate, uses weighted medians/quartiles,
-  trims outliers, caps confidence honestly and supports complete-PC component
-  fallback. Asking-only confidence is capped at 52% (56% with a CeX anchor), and
-  a single user-entered sale never becomes independent confirmation.
+  trims outliers and supports complete-PC component fallback. Confidence is
+  computed from identification quality, sample size, dispersion, source
+  diversity and freshness, and is reported as a descriptive evidence level
+  (Insufficient / Limited / Moderate / Strong) instead of a repeatable
+  percentage. A single user-entered sale never becomes independent confirmation.
+- **CeX UK pricing reference** (live, no HTML scraping). Product search uses the
+  same public search index as uk.webuy.com and returns retail, cash and voucher
+  offers, grade, stock and the last price change. Matching requires the exact
+  model, capacity and variant: special editions, all-digital models, GPU Ti
+  variants and accessories are rejected rather than blended. CeX retail is
+  converted to private-resale level from the product's own observed asking
+  market and is always labelled a retail reference, never a completed sale.
 - **Incremental revaluation.** Each listing has a fingerprint of the fields that
   affect its valuation, and each product key has a signature of its comparable
   pool and sold evidence. A scan re-evaluates only new or changed listings and
@@ -65,8 +74,27 @@ clear a profit, ROI and confidence floor.
   range, the dashboard shows conservative, central and optimistic resale values
   plus profit at the conservative and central estimates; otherwise it says the
   range is unsupported.
+- **Resale strategies**: quick sale, balanced and maximum-profit targets, each
+  with a suggested initial asking price and an expected final selling price.
+  The deal's profit uses the configured strategy; the other two stay visible.
+- **Permanent price memory.** Every valuation is appended to
+  `valuation_snapshots` with its evidence and marketplaces. A product is reused
+  for 7 days, then marked stale and scheduled for refresh, prioritising products
+  attached to live deals and ending auctions. Concurrent research for the same
+  product is deduplicated, and history is never overwritten.
+- **Ending-soon auctions** through the official Browse API: auctions are
+  requested sorted by ending time and filtered locally to the configured window,
+  with current bid, bid count, postage, end time and a maximum profitable bid
+  that honours fees, postage, minimum profit and the ROI tier. Shortlisted
+  auctions are rechecked every five minutes while they are close to ending.
+  Nothing is bid automatically and ended auctions leave the feed.
+- **My Flips**: mark a detected deal as purchased, record actual costs, price
+  cuts and the final sale, and compare the realised result with the original
+  prediction. Completed outcomes slowly adjust resale estimates per kind once at
+  least three sales exist; a single bad flip cannot move the market.
 - **Cost accounting**: purchase price, delivery/buyer fee, configurable resale
   channel, selling fees, outbound delivery, packaging, other costs and ROI.
+  Purchases above the high-value threshold must clear a higher ROI.
 - **Grouped review queue** for missing phone variants. Pending `variant_unclear`
   phones are grouped by exact model, with counts, price spread, source mix and
   examples. Opening a group filters the queue to those listings; explicit
@@ -85,7 +113,11 @@ clear a profit, ROI and confidence floor.
   age), sorting, deal drawer, evidence, verified-sold import, images, direct
   listing links, saved/dismissed deals, review queue, scanner health, scan
   history and settings.
-- **Notifications**: optional Discord webhook and browser notifications.
+- **Typed Discord alerts**: new Buy-It-Now deals, Best Offer opportunities,
+  auctions ending soon and material bid changes. Alerts include the image,
+  listing URL, total cost, expected resale, net profit, ROI, evidence level,
+  maximum offer/bid and ending time. Auction alerts are deduplicated with a
+  configurable cooldown and are never sent for ended auctions.
 - **Single-user local app**: SQLite, no paid APIs, no cloud dependency.
 
 ## Quick start (Windows)
@@ -132,9 +164,9 @@ then restart FlipIntel. Until keys are present, the dashboard shows
 | --- | --- | --- |
 | Vinted UK | Working | Category browse verified on all 10 branches; 96 cards per page, newest first, marketplace caps pagination at page 10. |
 | Gumtree UK | Working | Category browse verified on all 6 branches; 30 cards per page, newest first. Authoritative JSON-LD on search pages and per-card anchors on category pages. |
-| eBay UK | Requires free API keys | Official Browse API only. Category search sends `category_ids` without a keyword, 200 items/page, 4 requests/cycle; not exercised live without keys. |
+| eBay UK | Working with API keys | Official Browse API only. Category search sends `category_ids` without a keyword, 200 items/page, 4 requests/cycle. Fixed-price and auction searches were both verified live against production eBay (HTTP 200); the auction request uses `sort=endingSoonest` and a local time window. |
 | Facebook Marketplace | Not available | Requires a signed-in session and prohibits automated collection; no listings are fabricated. |
-| CeX UK | Often blocked | Used only as an optional price anchor. Cloudflare returned HTTP 403 in testing; valuations continue from live comparables. |
+| CeX UK | Working | Live pricing through the public search index used by uk.webuy.com: retail, cash and voucher offers, grades and stock. No HTML scraping and no attempt to defeat access controls. HTTP 403/429 is reported as blocked and paused. |
 
 All collectors can be repaired independently under `app/collectors/`.
 
@@ -155,14 +187,17 @@ All collectors can be repaired independently under `app/collectors/`.
    cannot drag the comparable market down.
 4. **Subtract costs**: purchase price, delivery/buyer fee, configured resale
    channel fees, outbound shipping, packaging and other configured costs.
-5. **Score confidence** from identification quality, sample size, price
-   dispersion, evidence type and freshness. Asking-only valuations are capped
-   at 52% (56% with a CeX anchor) and shown as unverified.
+5. **Score evidence** from identification quality, sample size, price
+   dispersion, source diversity and freshness. Asking-only evidence has a
+   computed ceiling that rises with the number of independent observations and
+   marketplaces; it is displayed as Insufficient, Limited, Moderate or Strong,
+   and never presented as a completed sale.
 6. **Recommend only if all gates pass**: at least 4 comparables, 55% model
-   match, minimum profit/ROI/confidence, not faulty/wanted/bundle, not flagged
-   for manual review, and either sold evidence or a strong five-sample asking
-   valuation. A listing priced far below the asking median, or missing key
-   storage/memory/chip specs, goes to review instead of the automatic feed.
+   match, minimum profit/ROI/confidence (a higher ROI above the high-value
+   threshold), not faulty/wanted/bundle, not flagged for manual review, and
+   either sold evidence or a strong five-sample asking valuation. A listing
+   priced far below the asking median, or missing key storage/memory/chip specs,
+   goes to review instead of the automatic feed.
 7. **Purge/refresh** valuations after every successful source scan, at startup
    and after threshold/evidence/review changes. A version counter prevents a
    refresh from being skipped when two sources scan seconds apart.
@@ -172,9 +207,22 @@ All collectors can be repaired independently under `app/collectors/`.
    any artificial confidence boost; a rejected listing stays out of the feed.
 
 Defaults are editable in the Settings page: £20 minimum profit, 12% minimum
-ROI, 42% minimum confidence, 13.22% eBay fee, £4.50 outbound delivery, £1
-packaging, zero other costs and the eBay resale channel. Vinted and Facebook
-can be selected as the resale channel when that is where the item will be sold.
+ROI (18% above £250 of tied-up capital), 42% minimum evidence score, 13.22%
+eBay fee, £4.50 outbound delivery, £1 packaging, zero other costs and the eBay
+resale channel. Vinted and Facebook can be selected as the resale channel when
+that is where the item will be sold. The resale strategy, 7-day price reuse
+window, CeX lookups per scan and the auction window/interval are configurable
+there too.
+
+### Auction bid ceiling
+
+For each auction the ceiling is the lower of two limits: expected proceeds after
+selling fees, outbound postage and packaging minus the minimum profit, and the
+same proceeds divided by `1 + required ROI`. The price used is eBay's
+`currentBidPrice`, not a fixed-price field. Postage to you is included in the
+total cost. An auction is shortlisted only while its current bid is at or below
+that ceiling; no automatic bidding is implemented and the final decision is
+manual.
 
 ## Architecture
 
@@ -255,9 +303,8 @@ Interactive docs: <http://127.0.0.1:8765/docs>
 - **Vinted exposes only 10 pages per category branch.** Large branches are
   continuously covered at the newest edge, but are not exhaustively crawled;
   the Scanner page marks capped branches `partial` and small completed branches
-  `full`. **eBay category browsing is implemented from the documented Browse API
-  contract but has not been exercised live here** because no developer keys are
-  configured; the dashboard labels it `unverified`. No eBay HTML is scraped.
+  `full`. eBay category browsing and both auction/fixed-price searches have been
+  exercised live against production keys; no eBay HTML is scraped.
 - **Grouped review covers the dominant variant gap, not every queue reason.**
   Bulk actions are explicit-ID-only and capped at 200 rows; there is no
   filter-based bulk update. Approving a variant group does not add evidence or
@@ -269,7 +316,8 @@ Interactive docs: <http://127.0.0.1:8765/docs>
   supports bulk and one-off sold evidence and only calibrates when the database
   contains enough matched sales, but the current local database has no saved
   sold evidence yet. Most live valuations therefore still start from asking
-  prices and are capped at 52% confidence and labelled unverified.
+  prices, carry a Limited/Moderate evidence level and are labelled
+  asking-only. This is a real limitation, not an estimate of sold prices.
 - Calibration requires at least 2 sold observations and 4 recent asks for a
   product, at least 5 products per category, and held-out error under 15%. Until
   then the conservative fallback remains active and the Evidence page explains
@@ -283,18 +331,22 @@ Interactive docs: <http://127.0.0.1:8765/docs>
 - Gumtree promoted cards are deliberately excluded. They are not part of the
   JSON-LD ItemList and previously caused the wrong URL to be paired with a
   price. The full canonical listing is used instead.
-- CeX is frequently blocked by Cloudflare. When unavailable, it is reported as
-  blocked rather than silently ignored.
+- CeX search is an undocumented public index with no contract. If it is
+  blocked, rate-limited or changes shape, the quote is marked blocked/failed and
+  paused; no price is invented and valuations continue from live comparables.
+  CeX retail is not treated as a completed sale and its high-street premium is
+  removed using the observed asking market when one exists.
 - Facebook Marketplace is intentionally unsupported.
 - Model parsing is rule-based. It is conservative, but unusual titles can still
   be missed or grouped too broadly (especially games without a known title and
   generic drives that omit interface or capacity). Ambiguous items are kept for
   review rather than valued as deals.
-- eBay has not been exercised end-to-end in this environment because no
-  developer credentials are configured. Missing credentials are reported as
-  `not_configured`; the token, quota, parser and authentication error paths are
-  tested, and the Settings connection test performs a real API probe once keys
-  are saved.
+- eBay auctions are requested with `sort=endingSoonest` because the Browse API
+  has no documented ending-time filter; the 30-minute window is applied locally.
+  This means a very busy query could return fewer than 200 auctions before the
+  window ends, so two targeted queries are scanned per pass rather than relying
+  on one broad search. Missing credentials are still reported as
+  `not_configured`; token, quota, parser and authentication failures are tested.
 - A local single-process SQLite app, not a multi-user hosted service.
 
 ## Source reuse and licences
@@ -304,6 +356,12 @@ The implementation is original, informed by the MIT-licensed
 and [samWidlund/resell-helper](https://github.com/samWidlund/resell-helper)
 projects. No Scrapy runtime is required. Marketplace HTML/API formats can
 change without notice; collectors are isolated so each can be repaired alone.
+
+`app/pricing_cex.py` adapts the matching approach and measured threshold from
+the MIT-licensed [cex-uk-prices](https://github.com/casareanderson/cex-uk-prices)
+project by Christian Asare-Anderson. The reference copy was temporary and has
+been removed; no runtime import depends on it. The full MIT notice is in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Operational notes
 

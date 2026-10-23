@@ -4,6 +4,7 @@ import {
   BellRing,
   Check,
   CircleAlert,
+  Database,
   ExternalLink,
   Gauge,
   KeyRound,
@@ -34,6 +35,12 @@ type NumericKey =
   | "other_costs"
   | "vinted_shipping"
   | "asking_to_sold_pct"
+  | "min_roi_high_value_pct"
+  | "high_value_threshold"
+  | "history_reuse_days"
+  | "cex_refresh_limit"
+  | "auction_window_minutes"
+  | "auction_scan_seconds"
   | "scan_interval_vinted"
   | "scan_interval_gumtree"
   | "scan_interval_ebay"
@@ -49,6 +56,12 @@ const EMPTY_NUMBERS: Record<NumericKey, string> = {
   other_costs: "0.00",
   vinted_shipping: "3.49",
   asking_to_sold_pct: "85",
+  min_roi_high_value_pct: "18",
+  high_value_threshold: "250",
+  history_reuse_days: "7",
+  cex_refresh_limit: "6",
+  auction_window_minutes: "30",
+  auction_scan_seconds: "600",
   scan_interval_vinted: "240",
   scan_interval_gumtree: "300",
   scan_interval_ebay: "300",
@@ -60,6 +73,7 @@ export function SettingsPage({ onToast, onRefreshSummary }: Props) {
   const [numbers, setNumbers] = useState<Record<NumericKey, string>>(EMPTY_NUMBERS);
   const [enabled, setEnabled] = useState({ vinted: true, gumtree: true, ebay: true });
   const [resaleChannel, setResaleChannel] = useState<"ebay" | "vinted" | "facebook">("ebay");
+  const [resaleStrategy, setResaleStrategy] = useState<"quick" | "balanced" | "max">("balanced");
   const [notify, setNotify] = useState(false);
   const [webhook, setWebhook] = useState("");
   const [removeWebhook, setRemoveWebhook] = useState(false);
@@ -95,6 +109,12 @@ export function SettingsPage({ onToast, onRefreshSummary }: Props) {
           other_costs: String(data.fees.other_costs),
           vinted_shipping: String(data.fees.vinted_shipping),
           asking_to_sold_pct: String(round(data.fees.asking_to_sold_factor * 100, 1)),
+          min_roi_high_value_pct: String(round(data.fees.min_roi_high_value * 100, 1)),
+          high_value_threshold: String(data.fees.high_value_threshold),
+          history_reuse_days: String(data.pricing.history_reuse_days),
+          cex_refresh_limit: String(data.pricing.cex_refresh_limit),
+          auction_window_minutes: String(data.auctions.window_minutes),
+          auction_scan_seconds: String(data.auctions.scan_seconds),
           scan_interval_vinted: String(data.scanning.scan_interval_vinted),
           scan_interval_gumtree: String(data.scanning.scan_interval_gumtree),
           scan_interval_ebay: String(data.scanning.scan_interval_ebay),
@@ -106,6 +126,7 @@ export function SettingsPage({ onToast, onRefreshSummary }: Props) {
           ebay: data.scanning.enabled_ebay,
         });
         setResaleChannel(data.fees.resale_channel);
+        setResaleStrategy(data.fees.resale_strategy);
         setNotify(data.notifications.enabled);
       })
       .catch((error: unknown) => {
@@ -135,6 +156,13 @@ export function SettingsPage({ onToast, onRefreshSummary }: Props) {
         other_costs: num(numbers.other_costs, 0),
         vinted_shipping: num(numbers.vinted_shipping, 3.49),
         asking_to_sold_factor: num(numbers.asking_to_sold_pct, 85) / 100,
+        resale_strategy: resaleStrategy,
+        min_roi_high_value: num(numbers.min_roi_high_value_pct, 18) / 100,
+        high_value_threshold: num(numbers.high_value_threshold, 250),
+        history_reuse_days: Math.max(1, Math.round(num(numbers.history_reuse_days, 7))),
+        cex_refresh_limit: Math.max(0, Math.round(num(numbers.cex_refresh_limit, 6))),
+        auction_window_minutes: Math.max(5, Math.round(num(numbers.auction_window_minutes, 30))),
+        auction_scan_seconds: Math.max(120, Math.round(num(numbers.auction_scan_seconds, 600))),
         scan_interval_vinted: Math.max(120, Math.round(num(numbers.scan_interval_vinted, 240))),
         scan_interval_gumtree: Math.max(120, Math.round(num(numbers.scan_interval_gumtree, 300))),
         scan_interval_ebay: Math.max(120, Math.round(num(numbers.scan_interval_ebay, 300))),
@@ -340,6 +368,65 @@ export function SettingsPage({ onToast, onRefreshSummary }: Props) {
             value={numbers.asking_to_sold_pct}
             onChange={(v) => updateNumber("asking_to_sold_pct", v)}
             hint="Conservative fallback for live asking prices. Categories with validated completed-sale calibration override this automatically."
+          />
+          <div>
+            <label className="label">Resale strategy</label>
+            <select
+              className="field"
+              value={resaleStrategy}
+              onChange={(event) => {
+                setResaleStrategy(event.target.value as "quick" | "balanced" | "max");
+                setDirty(true);
+              }}
+            >
+              <option value="quick">Quick sale — lower price, faster turnover</option>
+              <option value="balanced">Balanced — realistic price and selling time</option>
+              <option value="max">Maximum profit — higher ask, slower sale</option>
+            </select>
+          </div>
+          <Field
+            label="Minimum ROI for high-value stock"
+            suffix="%"
+            value={numbers.min_roi_high_value_pct}
+            onChange={(v) => updateNumber("min_roi_high_value_pct", v)}
+            hint="Applied when the total purchase cost is above the high-value threshold."
+          />
+          <Field
+            label="High-value threshold"
+            suffix="£"
+            value={numbers.high_value_threshold}
+            onChange={(v) => updateNumber("high_value_threshold", v)}
+          />
+        </Section>
+
+        <Section icon={Database} title="Price memory & auctions" description="Products are researched once, reused across marketplaces and refreshed after the reuse window.">
+          <Field
+            label="Price reuse window"
+            suffix="days"
+            value={numbers.history_reuse_days}
+            onChange={(v) => updateNumber("history_reuse_days", v)}
+            hint="After this the price is marked stale and scheduled for refresh. History is never deleted."
+          />
+          <Field
+            label="CeX lookups per scan"
+            suffix="products"
+            value={numbers.cex_refresh_limit}
+            onChange={(v) => updateNumber("cex_refresh_limit", v)}
+            hint="Prioritises products attached to live deals and ending auctions."
+          />
+          <Field
+            label="Auction ending window"
+            suffix="min"
+            value={numbers.auction_window_minutes}
+            onChange={(v) => updateNumber("auction_window_minutes", v)}
+            hint="Only auctions ending inside this window enter the watchlist and alerts."
+          />
+          <Field
+            label="Auction scan interval"
+            suffix="sec"
+            value={numbers.auction_scan_seconds}
+            onChange={(v) => updateNumber("auction_scan_seconds", v)}
+            hint="Shortened automatically to five minutes while shortlisted auctions are close to ending."
           />
         </Section>
 

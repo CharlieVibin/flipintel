@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import base64
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -75,6 +75,16 @@ class EbayCollector(BaseCollector):
         "deliveryCountry:GB",
         "priceCurrency:GBP",
         "price:[5..25000]",
+    ])
+    # Browse API has no documented ending-time-window filter, so auctions are
+    # requested sorted by "endingSoonest" and filtered to the window locally.
+    # This is the documented contract, but it has not been verified live here.
+    AUCTION_FILTER = ",".join([
+        "buyingOptions:{AUCTION}",
+        "itemLocationCountry:GB",
+        "deliveryCountry:GB",
+        "priceCurrency:GBP",
+        "price:[1..25000]",
     ])
 
     def __init__(self, db, client=None) -> None:
@@ -180,6 +190,76 @@ class EbayCollector(BaseCollector):
 
     async def search(self, queries: list[str], max_pages: int = 1) -> SearchOutcome:
         return await run_queries(self, queries, max_pages)
+
+    async def search_auctions(
+        self, queries: list[str], ending_within_minutes: int = 30, max_queries: int = 3
+    ) -> SearchOutcome:
+        """Auctions ending inside the next window, newest ending first.
+
+        Only auctions are requested. Anything ending outside the window is
+        discarded before it can enter the feed, so the scanner is not rechecking
+        auctions that end hours from now.
+        """
+        available, reason = self.available
+        if not available:
+            return SearchOutcome(
+                marketplace=self.marketplace, status="not_configured", error=reason
+            )
+        now = datetime.now(timezone.utc)
+        horizon = now + timedelta(minutes=max(5, ending_within_minutes))
+        items: list[RawListing] = []
+        seen: set[str] = set()
+        ok = failed = 0
+        error_text = None
+        for query in queries[: max(1, max_queries)]:
+            try:
+                raw_items, _count, _status = await self._browse_request(
+                    {
+                        "q": query,
+                        "limit": 200,
+                        "sort": "endingSoonest",
+                        "filter": self.AUCTION_FILTER,
+                    },
+                    f"auction:{query}",
+                )
+            except CollectorError as exc:
+                failed += 1
+                error_text = exc.message
+                if exc.kind in {"auth", "rate_limited"}:
+                    break
+                continue
+            ok += 1
+            for item in raw_items:
+                if item.external_id in seen:
+                    continue
+                end = item.auction_end_at
+                if not end:
+                    continue
+                try:
+                    when = datetime.fromisoformat(end.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=timezone.utc)
+                if when <= now or when > horizon:
+                    continue
+                seen.add(item.external_id)
+                items.append(item)
+        status = "ok" if ok and not failed else "degraded" if ok else "failed"
+        return SearchOutcome(
+            marketplace=self.marketplace,
+            status=status,
+            items=items,
+            queries_ok=ok,
+            queries_failed=failed,
+            pages=ok,
+            error=error_text if failed else None,
+            detail={
+                "kind": "ending_soon",
+                "window_minutes": ending_within_minutes,
+                "queries": queries[: max(1, max_queries)],
+            },
+        )
 
     async def probe(self) -> dict[str, Any]:
         """Run a real, read-only connection test against the configured keys."""
@@ -349,8 +429,21 @@ class EbayCollector(BaseCollector):
         title = (raw.get("title") or "").strip()
         item_id = str(raw.get("itemId") or "")
         url = raw.get("itemWebUrl") or ""
+        buying_options = raw.get("buyingOptions") or []
+        is_auction = "AUCTION" in buying_options
+        if buying_options and not ({"FIXED_PRICE", "AUCTION"} & set(buying_options)):
+            return None
         price_data = raw.get("price") or {}
-        price = parse_money(price_data.get("value"))
+        bid_data = raw.get("currentBidPrice") or {}
+        bid_value = parse_money(bid_data.get("value"))
+        if is_auction:
+            # eBay returns `price: null` for auctions; the current bid is the
+            # only purchase figure available and lives in currentBidPrice.
+            price = bid_value if bid_value is not None else parse_money(price_data.get("value"))
+            currency = bid_data.get("currency") or price_data.get("currency")
+        else:
+            price = parse_money(price_data.get("value"))
+            currency = price_data.get("currency")
         if not title or not item_id or not url or price is None:
             return None
         from urllib.parse import urlparse
@@ -360,12 +453,8 @@ class EbayCollector(BaseCollector):
             "www.ebay.co.uk", "ebay.co.uk",
         }:
             return None
-        # Never import a non-GBP or non-fixed-price result through a parser bug
-        # or an API filter regression.
-        if price_data.get("currency") != "GBP":
-            return None
-        buying_options = raw.get("buyingOptions") or []
-        if buying_options and "FIXED_PRICE" not in buying_options:
+        # Never import a non-GBP result through a parser bug or filter change.
+        if currency != "GBP":
             return None
         location_data = raw.get("itemLocation") or {}
         country = str(location_data.get("country") or "").strip().upper()
@@ -420,7 +509,16 @@ class EbayCollector(BaseCollector):
             condition_raw=raw.get("condition") or "",
             location=location,
             seller=seller_name,
-            is_auction="AUCTION" in buying_options,
+            is_auction=is_auction,
+            auction_end_at=(
+                str(raw.get("itemEndDate")) if is_auction and raw.get("itemEndDate") else None
+            ),
+            current_bid=bid_value if is_auction else None,
+            bid_count=(
+                int(raw.get("bidCount")) if is_auction and raw.get("bidCount") is not None else None
+            ),
+            min_next_bid=parse_money((raw.get("minimumToBid") or {}).get("value"))
+            if is_auction else None,
             posted_at=raw.get("itemCreationDate"),
             search_query=query,
             raw={

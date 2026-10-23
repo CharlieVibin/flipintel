@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import { api, ApiError } from "../lib/api";
 import type { CompsResponse, DealDetail } from "../lib/types";
-import { CATEGORY_LABELS, conditionLabel, confidenceTone, methodLabel, money, pct, timeAgo } from "../lib/format";
+import { CATEGORY_LABELS, conditionLabel, confidenceTone, methodLabel, money, pct, timeAgo, timeUntil } from "../lib/format";
 import { cn, ConfidenceMeter, MarketBadge, ProductImage, ScoreRing } from "./ui";
 
 interface Props {
@@ -236,6 +236,24 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
       onToast("Could not clear the review decision", "error");
     } finally {
       setReviewBusy(false);
+    }
+  }
+
+  async function markPurchased() {
+    if (!deal) return;
+    setBusy(true);
+    try {
+      await api.startFlip({
+        listing_id: deal.id,
+        purchase_price: deal.price,
+        purchase_shipping: deal.shipping,
+      });
+      onToast("Added to My flips with the original prediction attached");
+      onChanged();
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : "Could not record this purchase", "error");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -470,6 +488,26 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
                       </li>
                     ))}
                   </ul>
+                  <p className="mt-3 text-[11px] text-mist-400">
+                    Evidence: <span className="font-medium text-mist-200">{deal.evidence_level ?? "insufficient"}</span>
+                    {evidenceInfo?.sources && Object.keys(evidenceInfo.sources).length > 0 && (
+                      <> from {Object.entries(evidenceInfo.sources).map(([name, count]) => `${name} ${count}`).join(", ")}</>
+                    )}
+                    {deal.valuation_refreshed_at ? ` · price memory refreshed ${timeAgo(deal.valuation_refreshed_at)}` : " · not yet in price memory"}
+                  </p>
+                  {resale?.strategies && (
+                    <p className="mt-1 text-[10px] leading-relaxed text-mist-500">
+                      Resale strategies: quick {money(resale.strategies.quick?.expected)} · balanced {money(resale.strategies.balanced?.expected)} · maximum {money(resale.strategies.max?.expected)}.
+                      {resale.initial_ask ? ` Start the balanced listing at about ${money(resale.initial_ask)}; the expected final sale is the lower figure.` : ""}
+                      {resale.holding_days ? ` Typical selling time ${resale.holding_days} days.` : ""}
+                    </p>
+                  )}
+                  {deal.is_auction && (
+                    <p className="mt-1 text-[10px] leading-relaxed text-amber-300/80">
+                      Auction ending {timeUntil(deal.auction_end_at)} · current bid {money(deal.current_bid ?? deal.price)} · {deal.bid_count ?? 0} bid(s).
+                      {deal.max_bid ? ` Maximum profitable bid ${money(deal.max_bid)} — bid yourself before it ends.` : " No profitable bid ceiling at this price."}
+                    </p>
+                  )}
                   <p className={cn("mt-3 text-[11px]", tone.text)}>
                     {tone.label}
                     {resale?.range_supported && deal.resale_low != null && deal.resale_high != null
@@ -749,6 +787,10 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
 
         {deal && (
           <div className="flex items-center gap-2 border-t border-ink-700 bg-ink-900/95 px-5 py-3 backdrop-blur">
+            <button onClick={markPurchased} className="btn-secondary !px-3 !py-2.5" disabled={busy} title="Record this purchase in My flips">
+              <Check className="h-4 w-4 text-lime-300" />
+              <span className="hidden sm:inline">Purchased</span>
+            </button>
             <button onClick={toggleSave} className="btn-secondary flex-1 !py-2.5" disabled={busy}>
               {deal.saved ? <BookmarkCheck className="h-4 w-4 text-lime-400" /> : <Bookmark className="h-4 w-4" />}
               {deal.saved ? "Saved" : "Save deal"}

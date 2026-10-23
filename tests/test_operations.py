@@ -50,13 +50,30 @@ def test_ebay_missing_credentials_are_reported_without_network(tmp_path, monkeyp
         db.close()
 
 
-def test_ebay_parser_rejects_wrong_currency_auction_and_bad_urls():
+def test_ebay_parser_rejects_wrong_currency_and_bad_urls_but_keeps_auctions():
     db = Database(":memory:")
     collector = EbayCollector(db)
     try:
         assert collector._parse_item(_ebay_item(price={"value": "450", "currency": "USD"}), "x") is None
         assert collector._parse_item(_ebay_item(price={"value": "450"}), "x") is None
-        assert collector._parse_item(_ebay_item(buyingOptions=["AUCTION"]), "x") is None
+        auction = collector._parse_item(
+            _ebay_item(
+                buyingOptions=["AUCTION"],
+                currentBidPrice={"value": "120.00", "currency": "GBP"},
+                bidCount=7,
+                itemEndDate="2026-10-23T18:05:00.000Z",
+            ),
+            "x",
+        )
+        assert auction is not None
+        assert auction.is_auction is True
+        assert auction.price == 120.0
+        assert auction.current_bid == 120.0
+        assert auction.bid_count == 7
+        assert auction.auction_end_at == "2026-10-23T18:05:00.000Z"
+        assert collector._parse_item(
+            _ebay_item(buyingOptions=["CLASSIFIED"]), "x"
+        ) is None
         assert collector._parse_item(_ebay_item(itemWebUrl="https://evil.example/item/123"), "x") is None
         assert collector._parse_item(_ebay_item(itemWebUrl="javascript:alert(1)"), "x") is None
         assert collector._parse_item(

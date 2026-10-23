@@ -22,6 +22,10 @@ export interface Deal {
   is_faulty: boolean;
   is_wanted: boolean;
   is_auction: boolean;
+  auction_end_at?: string | null;
+  current_bid?: number | null;
+  bid_count?: number | null;
+  min_next_bid?: number | null;
   is_bundle: boolean;
   duplicate_of: number | null;
   duplicate_score: number | null;
@@ -35,8 +39,16 @@ export interface Deal {
   resale_low: number | null;
   resale_high: number | null;
   confidence: number;
+  evidence_level?: "insufficient" | "limited" | "moderate" | "strong" | null;
   sample_size: number;
   valuation_method: string | null;
+  valuation_refreshed_at?: string | null;
+  resale_strategy?: "quick" | "balanced" | "max" | null;
+  resale_quick?: number | null;
+  resale_balanced?: number | null;
+  resale_max?: number | null;
+  max_bid?: number | null;
+  estimated_days?: number | null;
   purchase_total: number;
   net_profit: number | null;
   net_profit_conservative?: number | null;
@@ -138,6 +150,11 @@ export interface Breakdown {
     packaging: number;
     collection: number;
     other?: number;
+    strategy?: "quick" | "balanced" | "max";
+    initial_ask?: number | null;
+    strategies?: Record<string, { expected: number; ask: number }>;
+    holding_days?: number | null;
+    max_bid?: number | null;
   };
   comps?: Comp[];
   sample_size?: number;
@@ -152,6 +169,8 @@ export interface Breakdown {
     sold_count: number;
     asking_count: number;
     method: string;
+    level?: "insufficient" | "limited" | "moderate" | "strong";
+    sources?: Record<string, number>;
     confidence: number;
     confidence_low?: number | null;
     confidence_high?: number | null;
@@ -303,7 +322,39 @@ export interface HealthResponse {
   scanner: {
     scanner_running: boolean;
     sources: SourceStatus[];
-    cex: { enabled: boolean; status: string; error: string | null };
+    cex: {
+      enabled: boolean;
+      status: string;
+      error: string | null;
+      last_success_at?: string | null;
+      reuse_hours?: number;
+      stats?: { observations: number; products: number };
+    };
+    pricing?: {
+      snapshots: number;
+      products: number;
+      latest_snapshot_at: string | null;
+      running_research: number;
+      reuse_days: number;
+    };
+    auctions?: {
+      alerts_enabled: boolean;
+      window_minutes: number;
+      scan_seconds: number;
+      urgent_seconds: number;
+      shortlisted: Array<{
+        id: number;
+        title: string;
+        price: number;
+        current_bid: number | null;
+        bid_count: number | null;
+        auction_end_at: string | null;
+        expected_resale: number | null;
+        net_profit: number | null;
+        max_bid: number | null;
+        evidence_level: string | null;
+      }>;
+    };
     coverage?: Coverage;
     discovery?: Discovery;
     last_refresh_at: string | null;
@@ -452,6 +503,16 @@ export interface Settings {
     other_costs: number;
     vinted_shipping: number;
     asking_to_sold_factor: number;
+    resale_strategy: "quick" | "balanced" | "max";
+    min_roi_high_value: number;
+    high_value_threshold: number;
+  };
+  pricing: { history_reuse_days: number; cex_refresh_limit: number };
+  auctions: {
+    scan_seconds: number;
+    urgent_seconds: number;
+    window_minutes: number;
+    alerts_enabled: boolean;
   };
   scanning: {
     scan_interval_vinted: number;
@@ -462,7 +523,7 @@ export interface Settings {
     enabled_gumtree: boolean;
     enabled_ebay: boolean;
   };
-  notifications: { enabled: boolean; webhook_configured: boolean };
+  notifications: { enabled: boolean; webhook_configured: boolean; cooldown_minutes?: number };
   environment: {
     ebay_configured: boolean;
     facebook_available: boolean;
@@ -657,4 +718,117 @@ export interface DealFilters {
   min_confidence?: number;
   page?: number;
   limit?: number;
+}
+
+export interface Flip {
+  id: number;
+  listing_id: number | null;
+  product_key: string | null;
+  title: string;
+  kind: string | null;
+  marketplace: string | null;
+  condition_norm: string | null;
+  purchase_price: number;
+  purchase_shipping: number;
+  preparation_cost: number;
+  other_costs: number;
+  ask_price: number | null;
+  final_price: number | null;
+  fees: number;
+  postage: number;
+  channel: string | null;
+  status: "held" | "listed" | "sold" | "unsold";
+  listed_at: string | null;
+  sold_at: string | null;
+  predicted_resale: number | null;
+  predicted_profit: number | null;
+  predicted_confidence: number | null;
+  predicted_evidence: string | null;
+  prediction_reasons: string[];
+  feedback: number | null;
+  feedback_note: string | null;
+  total_invested: number;
+  net_profit: number | null;
+  roi: number | null;
+  prediction_error: number | null;
+  days_to_sell: number | null;
+  price_changes: { price: number; changed_at: string }[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FlipSummary {
+  counts: { held: number; listed: number; sold: number; unsold: number };
+  realised_profit: number;
+  predicted_profit: number;
+  prediction_mae: number | null;
+  average_days_to_sell: number | null;
+  capital_tied_up: number;
+  learned_factors: Record<string, number>;
+  feedback: { up: number; down: number };
+}
+
+export interface FlipsResponse {
+  flips: Flip[];
+  summary: FlipSummary;
+  generated_at: string;
+}
+
+export interface FlipPatch {
+  purchase_price?: number;
+  purchase_shipping?: number;
+  preparation_cost?: number;
+  other_costs?: number;
+  ask_price?: number;
+  final_price?: number;
+  fees?: number;
+  postage?: number;
+  channel?: string;
+  status?: Flip["status"];
+  condition_norm?: string;
+  sold_at?: string;
+  feedback?: number;
+  feedback_note?: string;
+}
+
+export interface ProductPricing {
+  product_key: string;
+  pricing: {
+    snapshot: {
+      resale_good: number;
+      low: number | null;
+      high: number | null;
+      confidence: number;
+      evidence_level: string;
+      sample_size: number;
+      sold_count: number;
+      method: string;
+      refreshed_at: string;
+      marketplaces: Record<string, number>;
+      strategies?: Record<string, { expected: number; ask: number }>;
+    } | null;
+    stale: boolean;
+    reuse_days: number;
+    history: { resale_good: number; confidence: number; refreshed_at: string }[];
+  };
+  cex: {
+    title: string | null;
+    sell_price: number | null;
+    cash_price: number | null;
+    voucher_price: number | null;
+    grade: string | null;
+    status: string;
+    fetched_at: string;
+    url: string | null;
+    sample_count: number;
+  } | null;
+  cex_history: {
+    matched_name: string;
+    grade: string;
+    sell_price: number;
+    cash_price: number;
+    voucher_price: number;
+    condition: string;
+    observed_at: string;
+  }[];
 }

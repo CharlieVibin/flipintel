@@ -43,6 +43,10 @@ class RawListing:
     location: str = ""
     seller: str = ""
     is_auction: bool = False
+    auction_end_at: str | None = None
+    current_bid: float | None = None
+    bid_count: int | None = None
+    min_next_bid: float | None = None
     posted_at: str | None = None
     search_query: str = ""
     category_id: str = ""

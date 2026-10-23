@@ -6,6 +6,10 @@ import type {
   DealDetail,
   DealFilters,
   DealsResponse,
+  Flip,
+  FlipPatch,
+  FlipSummary,
+  FlipsResponse,
   EbayConnectionTest,
   EbayCredentialsStatus,
   EvidenceCoverage,
@@ -13,6 +17,7 @@ import type {
   EvidenceResponse,
   HealthResponse,
   Overview,
+  ProductPricing,
   ReviewGroupsResponse,
   ScanRun,
   Settings,
@@ -127,4 +132,22 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ marketplace: marketplace ?? null }),
     }),
+  flips: (status = "all") => request<FlipsResponse>(`/flips${queryString({ status })}`),
+  startFlip: (payload: Record<string, unknown>) =>
+    request<{ flip: Flip; summary: FlipSummary }>("/flips", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateFlip: (id: number, payload: FlipPatch) =>
+    request<{ flip: Flip; summary: FlipSummary }>(`/flips/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  flipPrice: (id: number, price: number) =>
+    request<{ flip: Flip }>(`/flips/${id}/price`, {
+      method: "POST",
+      body: JSON.stringify({ price }),
+    }),
+  productPricing: (productKey: string) =>
+    request<ProductPricing>(`/products/${encodeURIComponent(productKey)}`),
 };

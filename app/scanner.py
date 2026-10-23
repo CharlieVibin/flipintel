@@ -35,6 +35,25 @@ from .valuation import ValuationEngine
 
 log = logging.getLogger(__name__)
 
+# Targeted auction searches. Broad words such as "gpu" or "cpu" return
+# coolers, food processors and other unrelated auctions; these phrases name the
+# hardware itself. Two are used per scan, rotating so coverage is broad without
+# spending the API allowance on repeats.
+AUCTION_QUERIES = [
+    "graphics card -games",
+    "playstation 5 console",
+    "xbox series x console",
+    "nintendo switch console",
+    "gaming laptop rtx",
+    "iphone unlocked",
+    "samsung galaxy phone",
+    "ipad tablet",
+    "steam deck",
+    "rtx 4070",
+    "ryzen cpu",
+    "ddr5 ram",
+]
+
 ALLOWED_HOSTS = {
     "vinted": {"www.vinted.co.uk"},
     "gumtree": {"www.gumtree.com"},
@@ -139,6 +158,7 @@ class Scanner:
         for marketplace in ("vinted", "gumtree", "ebay"):
             self._tasks.append(asyncio.create_task(self._loop(marketplace), name=f"scan-{marketplace}"))
         self._tasks.append(asyncio.create_task(self._maintenance_loop(), name="maintenance"))
+        self._tasks.append(asyncio.create_task(self._auction_loop(), name="auctions"))
         log.info("Scanner started for %s", ", ".join(self.collectors))
 
     async def stop(self) -> None:
@@ -249,6 +269,10 @@ class Scanner:
                 )
             except Exception:
                 log.exception("Stale listing maintenance failed")
+            try:
+                await self._refresh_cex_quotes()
+            except Exception:
+                log.exception("Scheduled price-memory refresh failed")
             try:
                 self.db.execute(
                     "DELETE FROM market_observations WHERE observed_at < ?",
@@ -1034,7 +1058,8 @@ class Scanner:
                         url=?, title=?, description=?, image_url=?, price=?, shipping=?,
                         condition_raw=?, condition_norm=?, location=?, seller=?, listing_kind=?,
                         category=?, product_key=?, product_name=?, identification_confidence=?,
-                        is_faulty=?, is_wanted=?, is_bundle=?, is_auction=?, posted_at=?,
+                        is_faulty=?, is_wanted=?, is_bundle=?, is_auction=?,
+                        auction_end_at=?, current_bid=?, bid_count=?, min_next_bid=?, posted_at=?,
                         last_seen=?, last_price=?, previous_price=?, price_dropped_at=?,
                         status='active', search_query=?, raw_json=?, flags=?, attrs=?, updated_at=?
                     WHERE id=?
@@ -1044,7 +1069,8 @@ class Scanner:
                         item.condition_raw, condition, item.location, item.seller, kind,
                         category, product_key, product_name, ident_confidence,
                         is_faulty, is_wanted, is_bundle,
-                        int(item.is_auction), item.posted_at, now, item.price,
+                        int(item.is_auction), item.auction_end_at, item.current_bid,
+                        item.bid_count, item.min_next_bid, item.posted_at, now, item.price,
                         old_price if price_dropped else None,
                         now if price_dropped else None,
                         item.search_query, raw_json, flags_json, attrs_json, now,
@@ -1070,10 +1096,12 @@ class Scanner:
                         image_url, price, shipping, currency, condition_raw, condition_norm,
                         location, seller, listing_kind, category, product_key, product_name,
                         identification_confidence, is_faulty, is_wanted, is_bundle, is_auction,
+                        auction_end_at, current_bid, bid_count, min_next_bid,
                         posted_at, first_seen, last_seen, last_price, status, search_query,
                         raw_json, flags, attrs, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'GBP', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'GBP',
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        'active', ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         marketplace, item.external_id, item.url, title, description,
@@ -1081,6 +1109,8 @@ class Scanner:
                         item.location, item.seller, kind, category, product_key,
                         product_name, ident_confidence, is_faulty,
                         is_wanted, is_bundle, int(item.is_auction),
+                        item.auction_end_at, item.current_bid, item.bid_count,
+                        item.min_next_bid,
                         item.posted_at, now, now, item.price, item.search_query,
                         raw_json, flags_json, attrs_json, now, now,
                     ),
@@ -1165,22 +1195,166 @@ class Scanner:
         return None
 
     async def _refresh_cex_quotes(self) -> None:
+        """Refresh stale product prices, most useful products first.
+
+        Products attached to a live deal or an auction ending soon come first,
+        then the models with the most active listings. Missing or older than the
+        configured reuse window means stale; a fresh snapshot is never re-fetched
+        just because a listing was scanned again.
+        """
         if not settings.cex_enabled:
             return
+        pricing = self.valuation.pricing
+        priority_rows = self.db.query(
+            """
+            SELECT DISTINCT d.product_key FROM deals d
+            JOIN listings l ON l.id = d.listing_id
+            WHERE l.status='active' AND d.product_key IS NOT NULL
+              AND (d.is_deal = 1 OR l.is_auction = 1)
+            """
+        )
+        priority = [row["product_key"] for row in priority_rows]
         models = self.db.query(
             """
-            SELECT product_key, product_name, COUNT(*) AS n FROM listings
-            WHERE status='active' AND product_key IS NOT NULL AND is_faulty=0 AND is_wanted=0
-              AND last_seen >= ?
-            GROUP BY product_key HAVING n >= 2 ORDER BY n DESC LIMIT 3
+            SELECT l.product_key, MAX(l.product_name) AS product_name,
+                   MAX(l.condition_norm) AS condition_norm, MAX(l.attrs) AS attrs,
+                   COUNT(*) AS n,
+                   MAX(CASE WHEN d.is_deal = 1 THEN 1 ELSE 0 END) AS deal_count,
+                   MAX(CASE WHEN l.is_auction = 1 THEN 1 ELSE 0 END) AS auction_count
+            FROM listings l
+            JOIN (SELECT DISTINCT product_key FROM valuation_snapshots) v
+                 ON v.product_key = l.product_key
+            LEFT JOIN deals d ON d.listing_id = l.id
+            WHERE l.status='active' AND l.product_key IS NOT NULL
+              AND l.is_faulty=0 AND l.is_wanted=0 AND l.last_seen >= ?
+              AND l.product_key NOT LIKE 'pc:%'
+            GROUP BY l.product_key
+            ORDER BY auction_count DESC, deal_count DESC, n DESC LIMIT 80
             """,
             (hours_ago(24 * 7),),
         )
         if not models:
             return
-        await self.cex.refresh_quotes(
-            [(row["product_key"], row["product_name"] or "") for row in models], limit=3
+        priority_set = set(priority)
+        models.sort(
+            key=lambda row: (
+                0 if row["product_key"] in priority_set else 1,
+                -int(row["auction_count"] or 0),
+                -int(row["deal_count"] or 0),
+                -int(row["n"] or 0),
+            )
         )
+        limit = max(1, self.db.setting_int("cex_refresh_limit", 6))
+        refreshed = 0
+        for row in models:
+            if refreshed >= limit:
+                break
+            product_key = str(row["product_key"])
+            if not self.cex.needs_refresh(product_key):
+                continue
+            if not pricing.claim(product_key):
+                continue
+            try:
+                attrs = json.loads(row["attrs"] or "{}")
+            except (TypeError, ValueError):
+                attrs = {}
+            outcome = await self.cex.refresh_quote(
+                product_key,
+                row["product_name"] or "",
+                row["condition_norm"] or "good",
+                attrs if isinstance(attrs, dict) else {},
+            )
+            status = str(outcome.get("status") or "failed")
+            pricing.release(product_key, status, outcome.get("error"))
+            refreshed += 1
+            if status in {"blocked", "paused"}:
+                break
+
+    # --- auctions -----------------------------------------------------------
+    def _shortlisted_auctions(self) -> list[dict[str, Any]]:
+        return self.db.query(
+            """
+            SELECT l.id, l.title, l.price, l.shipping, l.current_bid, l.bid_count,
+                   l.min_next_bid, l.auction_end_at, d.expected_resale, d.net_profit,
+                   d.max_bid, d.confidence, d.evidence_level
+            FROM listings l JOIN deals d ON d.listing_id = l.id
+            WHERE l.status='active' AND l.is_auction=1 AND l.auction_end_at IS NOT NULL
+              AND l.auction_end_at >= ? AND l.auction_end_at <= ?
+              AND d.max_bid IS NOT NULL AND l.price <= d.max_bid
+            ORDER BY l.auction_end_at ASC
+            LIMIT 60
+            """,
+            (iso(), iso(utcnow() + timedelta(days=2))),
+        )
+
+    async def scan_auctions(self) -> SearchOutcome | None:
+        """Scan ending-soon auctions and revalue anything newly collected.
+
+        The eBay Browse API is asked for auctions sorted by ending time, then
+        filtered locally to the configured window. Nothing is bid on; the sale
+        remains a manual decision.
+        """
+        collector = self.collectors.get("ebay")
+        if collector is None or not hasattr(collector, "search_auctions"):
+            return None
+        if not self.db.setting_bool("auction_alerts_enabled", True):
+            return None
+        window = self.db.setting_int("auction_window_minutes", 30)
+        cursor = self.db.setting_int("auction_query_cursor", 0) % len(AUCTION_QUERIES)
+        queries = [
+            AUCTION_QUERIES[(cursor + offset) % len(AUCTION_QUERIES)]
+            for offset in range(2)
+        ]
+        self.db.set_settings({"auction_query_cursor": str((cursor + 2) % len(AUCTION_QUERIES))})
+        started = utcnow()
+        outcome = await collector.search_auctions(queries, ending_within_minutes=window)
+        if not outcome.ok:
+            log.info("Auction scan unavailable: %s", outcome.error)
+            return outcome
+        run_id = self.db.execute(
+            "INSERT INTO scan_runs(marketplace, started_at, status, queries) "
+            "VALUES ('ebay', ?, 'running', ?)",
+            (iso(started), json_dumps(queries)),
+        ).lastrowid
+        return await self._finalize(
+            collector, outcome, started=started, run_id=run_id,
+            extra_detail={"kind": "ending_soon", "window_minutes": window},
+        )
+
+    async def _auction_loop(self) -> None:
+        await self._sleep(20)
+        while not self._stop.is_set():
+            try:
+                if self.db.setting_bool("auction_alerts_enabled", True):
+                    await self.scan_auctions()
+                    # An auction that has ended is no longer an opportunity; its
+                    # row remains for history but leaves the active feed.
+                    self.db.execute(
+                        "UPDATE listings SET status='stale' WHERE status='active' "
+                        "AND is_auction=1 AND auction_end_at IS NOT NULL "
+                        "AND auction_end_at < ?",
+                        (iso(),),
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.exception("Auction scan failed")
+                self.db.execute(
+                    "INSERT INTO scan_runs(marketplace, started_at, status, error) "
+                    "VALUES ('ebay', ?, 'failed', ?)",
+                    (iso(), f"auction: {type(exc).__name__}: {exc}"[:500]),
+                )
+            normal = max(120, self.db.setting_int("auction_scan_seconds", 600))
+            urgent = max(120, self.db.setting_int("auction_urgent_seconds", 300))
+            shortlist = self._shortlisted_auctions()
+            soon = False
+            for row in shortlist:
+                end = parse_iso(row.get("auction_end_at"))
+                if end and (end - utcnow()).total_seconds() <= 20 * 60:
+                    soon = True
+                    break
+            if await self._sleep(urgent if soon else normal):
+                return
 
     async def _run_refresh(self, force: bool = False) -> None:
         async with self._refresh_lock:
@@ -1201,6 +1375,7 @@ class Scanner:
     async def _notify(self) -> None:
         try:
             await self.notifier.notify_new_deals()
+            await self.notifier.notify_auctions()
         except Exception:
             log.exception("Notification dispatch failed")
 
@@ -1352,6 +1527,14 @@ class Scanner:
             "cex": self.cex.health(),
             "coverage": self.coverage_snapshot(),
             "discovery": self.category_discovery_snapshot(),
+            "pricing": self.valuation.pricing.stats(),
+            "auctions": {
+                "alerts_enabled": self.db.setting_bool("auction_alerts_enabled", True),
+                "window_minutes": self.db.setting_int("auction_window_minutes", 30),
+                "scan_seconds": self.db.setting_int("auction_scan_seconds", 600),
+                "urgent_seconds": self.db.setting_int("auction_urgent_seconds", 300),
+                "shortlisted": self._shortlisted_auctions()[:12],
+            },
             "last_refresh_at": self._last_refresh_at,
             "last_refresh": self._last_refresh_result,
         }

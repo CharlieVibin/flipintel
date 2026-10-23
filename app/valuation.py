@@ -17,6 +17,7 @@ from typing import Any
 
 from .db import Database
 from .identification import CONDITION_FACTORS
+from .pricing import PricingDatabase
 from .risk import RiskAssessment, assess_listing
 from .utils import (
     age_hours,
@@ -57,7 +58,10 @@ def _config_fingerprint(config: "ValuationConfig") -> str:
             config.other_costs, config.vinted_buyer_fee_pct,
             config.vinted_buyer_fee_fixed, config.vinted_shipping,
             config.asking_to_sold_factor, config.cex_private_factor,
+            config.cex_weight, config.resale_strategy, config.min_roi_high_value,
+            config.high_value_threshold, config.price_reuse_days,
             config.calibration_active, sorted(config.category_factors.items()),
+            sorted(config.outcome_factors.items()),
         ]
     )
 
@@ -82,7 +86,9 @@ def _listing_fingerprint(listing: dict[str, Any]) -> str:
             listing.get("product_key"), listing.get("listing_kind"),
             listing.get("identification_confidence"), listing.get("is_faulty"),
             listing.get("is_wanted"), listing.get("is_bundle"),
-            listing.get("is_auction"), bool(listing.get("image_url")),
+            listing.get("is_auction"), listing.get("auction_end_at"),
+            listing.get("current_bid"), listing.get("bid_count"),
+            listing.get("min_next_bid"), bool(listing.get("image_url")),
             listing.get("flags"), listing.get("attrs"), listing.get("duplicate_of"),
             listing.get("first_seen"), listing.get("review_decision"), seller_feedback,
         ]
@@ -106,7 +112,13 @@ class ValuationConfig:
     vinted_shipping: float = 3.49
     asking_to_sold_factor: float = 0.85
     cex_private_factor: float = 0.80
+    cex_weight: float = 2.0
+    resale_strategy: str = "balanced"
+    min_roi_high_value: float = 0.18
+    high_value_threshold: float = 250.0
+    price_reuse_days: int = 7
     category_factors: dict[str, float] = field(default_factory=dict)
+    outcome_factors: dict[str, float] = field(default_factory=dict)
     calibration_active: bool = False
     calibration_note: str = ""
 
@@ -139,6 +151,15 @@ class ValuationConfig:
             vinted_shipping=f("vinted_shipping", 3.49),
             asking_to_sold_factor=f("asking_to_sold_factor", 0.85),
             cex_private_factor=f("cex_private_factor", 0.80),
+            cex_weight=max(0.0, f("cex_weight", 2.0)),
+            resale_strategy=(
+                s("resale_strategy", "balanced")
+                if s("resale_strategy", "balanced") in {"quick", "balanced", "max"}
+                else "balanced"
+            ),
+            min_roi_high_value=f("min_roi_high_value", 0.18),
+            high_value_threshold=f("high_value_threshold", 250.0),
+            price_reuse_days=int(f("history_reuse_days", 7)),
         )
 
 
@@ -162,6 +183,9 @@ class MarketEstimate:
     trend_pct: float | None = None
     trend_note: str = ""
     market_values: list[float] = field(default_factory=list)
+    evidence_level: str = "insufficient"
+    strategies: dict[str, Any] = field(default_factory=dict)
+    sources: dict[str, int] = field(default_factory=dict)
 
 
 def _log_stats(values: list[float]) -> tuple[float, float]:
@@ -172,6 +196,34 @@ def _log_stats(values: list[float]) -> tuple[float, float]:
     deviations = [abs(v - med) for v in logs]
     mad = median(deviations) or 0.0
     return med, mad * 1.4826  # robust sigma
+
+
+def seller_weight(raw_json: Any) -> float:
+    """Evidence weight for a marketplace seller, from data the source gave us.
+
+    Established eBay sellers (95%+ feedback and a real history) count double a
+    small seller, as proposed. Missing data never earns the higher weight, and a
+    single seller is capped later so volume cannot dominate the estimate.
+    """
+    try:
+        raw = json.loads(raw_json or "{}")
+    except (TypeError, ValueError):
+        raw = {}
+    if not isinstance(raw, dict):
+        return 1.0
+    try:
+        percentage = float(str(raw.get("seller_feedback") or "").replace("%", "").strip())
+    except (TypeError, ValueError):
+        percentage = None
+    try:
+        score = int(float(raw.get("seller_feedback_score") or 0))
+    except (TypeError, ValueError):
+        score = 0
+    if percentage is not None and percentage >= 98.5 and score >= 100:
+        return 2.0
+    if percentage is not None and percentage < 95:
+        return 0.5
+    return 1.0
 
 
 def _clean_and_weight(
@@ -202,8 +254,11 @@ def _clean_and_weight(
         age = age_hours(row.get("observed_at") or row.get("last_seen"))
         recency = 0.65 + 0.35 * math.exp(-(age or 0) / (24 * 21))
         if source == "cex":
+            # Kept as a retail reference. It is converted to a private-resale
+            # level later using the observed asking market when one exists, so
+            # a high street retail price cannot masquerade as a sale price.
             adjusted = price * config.cex_private_factor
-            weight = 1.0
+            weight = max(0.1, config.cex_weight)
         elif is_sold:
             adjusted = price
             base_weight = 2.5 if source == "manual" else 1.9 if source == "manual_csv" else 2.2
@@ -213,7 +268,7 @@ def _clean_and_weight(
             asking_factor = config.category_factors.get(kind, config.asking_to_sold_factor)
             adjusted *= asking_factor
             weight = 0.62 if row.get("marketplace") != row.get("candidate_marketplace") else 0.55
-            weight *= recency
+            weight *= recency * seller_weight(row.get("raw_json"))
         cleaned.append(
             {
                 **row,
@@ -222,9 +277,39 @@ def _clean_and_weight(
                 "adjusted_price": round(adjusted, 2),
                 "weight": max(0.05, weight),
                 "is_sold": is_sold,
+                "cex_retail": price if source == "cex" else None,
+                "seller": row.get("seller") or row.get("source") or "",
             }
         )
     return cleaned
+
+
+def _cap_concentration(
+    rows: list[dict[str, Any]], cap: float = 0.30
+) -> list[dict[str, Any]]:
+    """Stop one dominant seller from setting the whole comparable market.
+
+    A high-volume seller with twenty similar listings would otherwise outweigh
+    ten independent observations. Their combined weight is scaled down to the
+    cap; individual listings are still counted, just not repeatedly.
+    """
+    total = sum(float(row.get("weight") or 0) for row in rows)
+    if total <= 0 or not rows:
+        return rows
+    by_seller: dict[str, float] = defaultdict(float)
+    for row in rows:
+        by_seller[str(row.get("seller") or "")] += float(row.get("weight") or 0)
+    if len(by_seller) < 2:
+        return rows
+    limit = total * cap
+    for row in rows:
+        seller = str(row.get("seller") or "")
+        weight = float(row.get("weight") or 0)
+        if seller and by_seller[seller] > limit and weight > 0:
+            row["weight"] = max(
+                0.05, weight * (limit / by_seller[seller])
+            )
+    return rows
 
 
 def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -247,6 +332,51 @@ def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen.add(key)
         unique.append(row)
     return unique
+
+
+def _evidence_level(
+    *, sold_count: int, sample: int, dispersion: float, sources: int, freshness: float
+) -> str:
+    """A descriptive evidence grade instead of an uncalibrated percentage.
+
+    The grade states what actually supports the estimate: completed sales, the
+    number of independent observations, how closely they agree, how many
+    marketplaces contributed and how recent they are. It is deliberately
+    conservative: without a completed sale the ceiling is "moderate".
+    """
+    if (
+        sold_count >= 3
+        and sample >= 8
+        and dispersion <= 0.25
+        and sources >= 2
+        and freshness >= 0.45
+    ):
+        return "strong"
+    if (
+        (sold_count >= 1 and sample >= 5 and dispersion <= 0.35)
+        or (sample >= 8 and dispersion <= 0.30 and sources >= 2 and freshness >= 0.5)
+    ):
+        return "moderate"
+    if sample >= MIN_COMPS or sold_count >= 1:
+        return "limited"
+    return "insufficient"
+
+
+def _evidence_sentence(
+    level: str, sold_count: int, sample: int, sources: list[str]
+) -> str:
+    source_text = ", ".join(sources[:4]) if sources else "no marketplaces"
+    if sold_count:
+        base = f"{sold_count} completed sale(s) and {sample} comparable observation(s) across {source_text}"
+    else:
+        base = f"{sample} live asking observation(s) across {source_text}, with no completed sales"
+    label = {
+        "strong": "Strong evidence",
+        "moderate": "Moderate evidence",
+        "limited": "Limited evidence",
+        "insufficient": "Insufficient evidence",
+    }[level]
+    return f"{label}: {base}."
 
 
 def _trim_pool(
@@ -316,10 +446,35 @@ def _estimate_from_rows(
     asking_rows = [c for c in cleaned if not c["is_sold"] and c.get("source") != "cex"]
     cex_rows = [c for c in cleaned if c.get("source") == "cex"]
     sold_pool = _trim_pool(sold_rows)
-    asking_pool = _trim_pool(asking_rows, asking_only=True)
+    asking_pool = _cap_concentration(_trim_pool(asking_rows, asking_only=True))
     cex_pool = _trim_pool(cex_rows)
     sold_count = len(sold_pool)
     has_cex = bool(cex_pool)
+    cex_factor = config.cex_private_factor
+    cex_note = ""
+    if has_cex and asking_pool:
+        # CeX retail is a high-street price with a warranty. Converting it to
+        # private resale with a fixed factor was wrong in both directions: it
+        # overvalued consoles and undervalued handhelds. Where a real asking
+        # market exists, use the observed relationship for this product.
+        retail = [
+            float(c["cex_retail"]) for c in cex_pool if c.get("cex_retail")
+        ]
+        asked = weighted_median(
+            (c["adjusted_price"], c["weight"]) for c in asking_pool
+        )
+        if retail and asked:
+            observed = asked / median(retail)
+            cex_factor = round(clamp(observed, 0.40, 0.95), 3)
+            for comp in cex_pool:
+                if comp.get("cex_retail"):
+                    comp["adjusted_price"] = round(
+                        float(comp["cex_retail"]) * cex_factor, 2
+                    )
+            cex_note = (
+                "CeX retail was converted to private-resale level using this product's "
+                f"observed asking market (×{cex_factor:.2f}), not a fixed discount."
+            )
     method = "insufficient_data"
     basis: list[dict[str, Any]] = []
     evidence_n = 0
@@ -382,6 +537,13 @@ def _estimate_from_rows(
     kept = sold_pool + asking_pool + cex_pool
     if not kept:
         return MarketEstimate(None, None, None, 0.0, 0, "insufficient_data")
+    distinct_sources = sorted(
+        {
+            str(comp.get("marketplace") or comp.get("source") or "")
+            for comp in kept
+            if comp.get("marketplace") or comp.get("source")
+        }
+    )
 
     values = [float(c["adjusted_price"]) for c in basis if float(c["adjusted_price"]) > 0]
     if not values or resale_good <= 0:
@@ -468,13 +630,19 @@ def _estimate_from_rows(
             "All completed-sale evidence is user-supplied; it is not independently confirmed."
         )
     if sold_count == 0:
-        confidence = min(confidence, 0.56 if has_cex else 0.52)
-    elif sold_count == 1:
-        confidence = min(confidence, 0.74)
-    elif sold_count == 2:
-        confidence = min(confidence, 0.84)
+        # Asking prices cannot prove a sale, so the ceiling depends on how much
+        # asking evidence there is instead of one arbitrary percentage. It
+        # varies with sample size and independent marketplaces, and it is shown
+        # as a descriptive evidence level rather than fake precision.
+        asking_ceiling = (
+            0.45
+            + 0.10 * min(len(asking_pool), 10) / 10
+            + (0.05 if len(distinct_sources) >= 2 else 0.0)
+            + (0.03 if has_cex else 0.0)
+        )
+        confidence = min(confidence, asking_ceiling)
     if len(kept) < 5:
-        confidence = min(confidence, 0.62)
+        confidence *= 0.90
         notes.append("Small evidence set — treat this estimate cautiously.")
     if len(kept) < MIN_COMPS:
         confidence = min(confidence, 0.28)
@@ -483,7 +651,7 @@ def _estimate_from_rows(
         confidence *= 0.72
         notes.append("Comparable prices are widely dispersed; the lower quartile is used to avoid inflation.")
     if iqr_ratio > 4.0:
-        confidence = min(confidence, 0.34)
+        confidence *= 0.62
         notes.append("Extreme price dispersion — verify the exact model and condition before buying.")
     if candidate_flags and "condition_caution" in candidate_flags:
         confidence *= 0.92
@@ -491,6 +659,8 @@ def _estimate_from_rows(
         confidence *= 0.94
     if candidate_condition == "faulty":
         notes.append("Faulty items are excluded from buy recommendations.")
+    if cex_note:
+        notes.append(cex_note)
     if config.calibration_active and kind in config.category_factors:
         notes.append(
             f"Asking prices use a {config.category_factors[kind]:.0%} completed-sale calibration "
@@ -503,6 +673,41 @@ def _estimate_from_rows(
         if range_supported else
         "Too few comparable observations or dispersion is too wide for a defensible range."
     )
+
+    level = _evidence_level(
+        sold_count=sold_count,
+        sample=len(kept),
+        dispersion=spread,
+        sources=len(distinct_sources),
+        freshness=freshness,
+    )
+    notes.append(_evidence_sentence(level, sold_count, len(kept), distinct_sources))
+
+    def value_at(q: float) -> float:
+        value = weighted_quantile(
+            ((c["adjusted_price"], c["weight"]) for c in basis), q
+        ) or resale_good
+        return round(value * condition_factor * range_damping, 2)
+
+    strategy_values = {
+        "quick": value_at(0.24),
+        "balanced": round(resale, 2),
+        "max": (
+            value_at(0.62)
+            if range_supported and spread <= 0.45
+            else round(resale * 1.05, 2)
+        ),
+    }
+    strategy_values["max"] = max(strategy_values["max"], strategy_values["balanced"])
+    strategy_values["quick"] = min(strategy_values["quick"], strategy_values["balanced"])
+    ask_premium = {"quick": 1.00, "balanced": 1.03, "max": 1.07}
+    strategies = {
+        name: {
+            "expected": round(value, 2),
+            "ask": round(value * ask_premium[name], 2),
+        }
+        for name, value in strategy_values.items()
+    }
 
     public_comps = []
     for comp in sorted(kept, key=lambda c: (not bool(c["is_sold"]), -float(c["weight"])))[:12]:
@@ -527,6 +732,10 @@ def _estimate_from_rows(
         )
 
     return MarketEstimate(
+        evidence_level=level,
+        strategies=strategies,
+        sources={name: sum(1 for c in kept if (c.get('marketplace') or c.get('source')) == name)
+                 for name in distinct_sources},
         resale_good=round(resale_good, 2),
         low=round((p25 or resale) * condition_factor * range_damping, 2),
         high=round((p75 or resale) * condition_factor * range_damping, 2),
@@ -551,7 +760,11 @@ def _estimate_from_rows(
 class ValuationEngine:
     def __init__(self, db: Database) -> None:
         self.db = db
+        self.pricing = PricingDatabase(db)
         self._comp_cache: dict[tuple[str, str], list[dict[str, Any]]] | None = None
+        self._estimates: dict[tuple[str, str], Any] = {}
+        self._snapshot_at: dict[str, str] = {}
+        self._snapshot_cache: dict[str, str | None] = {}
 
     # --- data gathering -----------------------------------------------------
     def _market_comps(self, product_key: str, kind: str, exclude_id: int) -> list[dict[str, Any]]:
@@ -563,12 +776,13 @@ class ValuationEngine:
             """
             SELECT id, title, price, condition_norm, marketplace, url, last_seen AS observed_at,
                    is_sold, source, candidate_marketplace, postage, notes, verified,
-                   evidence_confidence, source_id
+                   evidence_confidence, source_id, seller, raw_json
             FROM (
                 SELECT l.id, l.title, l.price, l.condition_norm, l.marketplace, l.url,
                        l.last_seen, 0 AS is_sold, l.marketplace AS source,
                        l.marketplace AS candidate_marketplace, 0 AS postage, NULL AS notes,
-                       0 AS verified, 1.0 AS evidence_confidence, 'listing:' || l.id AS source_id
+                       0 AS verified, 1.0 AS evidence_confidence, 'listing:' || l.id AS source_id,
+                       COALESCE(l.seller, '') AS seller, l.raw_json
                 FROM listings l
                 WHERE l.product_key = ? AND l.listing_kind = ? AND l.status = 'active'
                   AND l.last_seen >= ? AND l.id != ? AND l.is_faulty = 0 AND l.is_wanted = 0
@@ -584,7 +798,8 @@ class ValuationEngine:
             SELECT 0 AS id, o.title, o.price, o.condition_norm, o.marketplace, NULL AS url,
                    0 AS is_sold, o.marketplace AS source, '' AS candidate_marketplace,
                    0 AS postage, NULL AS notes, 0 AS verified,
-                   1.0 AS evidence_confidence, o.source_id, o.observed_at
+                   1.0 AS evidence_confidence, o.source_id, o.observed_at,
+                   COALESCE(l.seller, '') AS seller, l.raw_json
             FROM market_observations o
             LEFT JOIN listings l ON l.marketplace=o.marketplace
                 AND ('listing:' || l.id)=o.source_id
@@ -602,7 +817,8 @@ class ValuationEngine:
             """
             SELECT id, title, price, condition_norm, marketplace, url, observed_at,
                    is_sold, source, '' AS candidate_marketplace, postage, notes, verified,
-                   evidence_confidence, source_id
+                   evidence_confidence, source_id, COALESCE(seller, '') AS seller,
+                   NULL AS raw_json
             FROM market_comps
             WHERE product_key = ? AND (kind = ? OR kind IS NULL) AND observed_at >= ?
             ORDER BY is_sold DESC, observed_at DESC LIMIT 120
@@ -755,11 +971,39 @@ class ValuationEngine:
                 value = getattr(estimate, attribute)
                 if value:
                     setattr(estimate, attribute, round(value * contents_factor, 2))
+            for option in estimate.strategies.values():
+                for field_name in ("expected", "ask"):
+                    if option.get(field_name):
+                        option[field_name] = round(
+                            float(option[field_name]) * contents_factor, 2
+                        )
             notes.append(
                 "Resale estimate reduced by 12% because the listing states that controllers, "
                 "cables, charger or other included accessories are missing."
             )
-        expected_resale = estimate.resale_good if estimate else None
+        strategy_name = (
+            config.resale_strategy if config.resale_strategy in {"quick", "balanced", "max"} else "balanced"
+        )
+        option = (estimate.strategies or {}).get(strategy_name) if estimate else None
+        expected_resale = (
+            option["expected"] if option else (estimate.resale_good if estimate else None)
+        )
+        initial_ask = option.get("ask") if option else expected_resale
+        outcome_factor = config.outcome_factors.get(kind) if estimate else None
+        if expected_resale and outcome_factor and abs(outcome_factor - 1.0) >= 0.005:
+            expected_resale = round(expected_resale * outcome_factor, 2)
+            initial_ask = round((initial_ask or expected_resale) * outcome_factor, 2)
+            for name, values in (estimate.strategies or {}).items():
+                for field_name in ("expected", "ask"):
+                    if values.get(field_name):
+                        values[field_name] = round(
+                            float(values[field_name]) * outcome_factor, 2
+                        )
+            notes.append(
+                f"Resale adjusted {abs(1 - outcome_factor):.0%} "
+                f"{'down' if outcome_factor < 1 else 'up'} from your completed "
+                f"{kind} flips. The original market estimate is unchanged in history."
+            )
         # A price that is less than 30% of the modelled resale is far outside
         # normal negotiation. Treat it as a manual-review signal rather than
         # an automatic recommendation: these are often parts, empty boxes or
@@ -790,6 +1034,17 @@ class ValuationEngine:
         net_profit_conservative = None
         net_profit_optimistic = None
         roi = None
+        max_bid = None
+        initial_ask = expected_resale
+        required_roi = config.min_roi
+        strategy_name = getattr(config, "resale_strategy", "balanced")
+        holding_days = {"quick": 7, "balanced": 16, "max": 30}.get(strategy_name, 16)
+        holding_days = round(
+            holding_days
+            * {"laptop": 1.25, "pc": 1.35, "console": 1.0, "phone": 0.8, "gpu": 0.9}
+            .get(kind, 1.0),
+            1,
+        )
         score = 0.0
         is_deal = False
         review_decision = str(listing.get("review_decision") or "")
@@ -835,17 +1090,37 @@ class ValuationEngine:
                 resale_fees = round(expected_resale * config.ebay_fvf + config.ebay_fixed_fee, 2)
             else:
                 resale_fees = 0.0
-            def net_at(resale_value: float) -> float:
+            required_roi = (
+                config.min_roi
+                if purchase_total < config.high_value_threshold
+                else max(config.min_roi, config.min_roi_high_value)
+            )
+
+            def proceeds_at(resale_value: float) -> float:
                 fees = (
                     resale_value * config.ebay_fvf + config.ebay_fixed_fee
                     if channel == "ebay" else 0.0
                 )
-                proceeds = (
-                    resale_value - fees - config.resale_shipping - config.packaging_cost
-                    - config.collection_cost - config.other_costs
+                return (
+                    resale_value - fees - config.resale_shipping
+                    - config.packaging_cost - config.collection_cost - config.other_costs
                 )
-                return round(proceeds - purchase_total, 2)
 
+            def net_at(resale_value: float) -> float:
+                return round(proceeds_at(resale_value) - purchase_total, 2)
+
+            def price_ceiling() -> float:
+                """The most it is worth paying, honouring both thresholds.
+
+                A bid/offer at this level still clears the minimum profit and the
+                required return on the capital actually tied up.
+                """
+                net_of_purchase_costs = proceeds_at(expected_resale) - purchase_shipping
+                by_profit = net_of_purchase_costs - max(config.min_profit, expected_resale * 0.08)
+                by_roi = net_of_purchase_costs / (1.0 + required_roi)
+                return round(max(0.0, min(by_profit, by_roi)), 2)
+
+            max_bid = price_ceiling()
             net_profit = net_at(expected_resale)
             if estimate and estimate.range_supported and estimate.low is not None:
                 net_profit_conservative = net_at(estimate.low)
@@ -887,7 +1162,7 @@ class ValuationEngine:
                 )
             is_deal = (
                 net_profit >= config.min_profit
-                and (roi or 0) >= config.min_roi
+                and (roi or 0) >= required_roi
                 and confidence >= config.min_confidence
                 and not listing.get("is_faulty")
                 and not listing.get("is_wanted")
@@ -938,12 +1213,30 @@ class ValuationEngine:
                 reasons.append("Price has recently been reduced")
             if listing.get("is_bundle"):
                 reasons.append("Bundle listing — not valued as a single item")
-            if (roi or 0) < config.min_roi:
-                reasons.append(f"ROI below the {config.min_roi:.0%} threshold")
+            if (roi or 0) < required_roi:
+                tier = (
+                    "higher-value capital"
+                    if purchase_total >= config.high_value_threshold else "standard"
+                )
+                reasons.append(
+                    f"ROI below the {required_roi:.0%} threshold for {tier} purchases"
+                )
             if net_profit < config.min_profit:
                 reasons.append(f"Profit below the £{config.min_profit:.0f} threshold")
             if confidence < config.min_confidence:
                 reasons.append(f"Confidence below the {config.min_confidence:.0%} threshold")
+
+        if estimate is not None and product_key:
+            self._estimates[(str(product_key), str(kind))] = estimate
+            key_text = str(product_key)
+            if key_text not in self._snapshot_cache:
+                snapshot = self.pricing.latest(key_text)
+                self._snapshot_cache[key_text] = (
+                    str(snapshot["refreshed_at"])
+                    if snapshot and snapshot.get("refreshed_at") else None
+                )
+            if self._snapshot_cache[key_text]:
+                self._snapshot_at[key_text] = self._snapshot_cache[key_text] or ""
 
         breakdown = {
             "purchase": {
@@ -954,7 +1247,12 @@ class ValuationEngine:
             },
             "resale": {
                 "channel": channel_label,
+                "strategy": strategy_name,
                 "expected": expected_resale,
+                "initial_ask": initial_ask,
+                "strategies": estimate.strategies if estimate else {},
+                "holding_days": holding_days,
+                "max_bid": max_bid,
                 "low": estimate.low if estimate and estimate.range_supported else None,
                 "high": estimate.high if estimate and estimate.range_supported else None,
                 "range_supported": estimate.range_supported if estimate else False,
@@ -991,6 +1289,8 @@ class ValuationEngine:
                 "sold_count": estimate.sold_count if estimate else 0,
                 "asking_count": estimate.asking_count if estimate else 0,
                 "method": method,
+                "level": estimate.evidence_level if estimate else "insufficient",
+                "sources": estimate.sources if estimate else {},
                 "confidence": estimate.confidence if estimate else 0.0,
                 "confidence_low": estimate.ci_low if estimate else None,
                 "confidence_high": estimate.ci_high if estimate else None,
@@ -1026,6 +1326,14 @@ class ValuationEngine:
             "risk_reasons": risk.reasons,
             "reasons": reasons,
             "breakdown": breakdown,
+            "max_bid": max_bid,
+            "resale_strategy": strategy_name,
+            "resale_quick": (estimate.strategies.get("quick", {}) or {}).get("expected") if estimate else None,
+            "resale_balanced": (estimate.strategies.get("balanced", {}) or {}).get("expected") if estimate else None,
+            "resale_max": (estimate.strategies.get("max", {}) or {}).get("expected") if estimate else None,
+            "evidence_level": estimate.evidence_level if estimate else "insufficient",
+            "estimated_days": holding_days if expected_resale else None,
+            "valuation_refreshed_at": self._snapshot_at.get(str(product_key or "")),
             "computed_at": iso(),
         }
 
@@ -1179,11 +1487,16 @@ class ValuationEngine:
     def refresh(self, limit: int = 100000, full: bool = False) -> dict[str, int]:
         from .calibration import build_calibration
 
+        from .flips import resale_factors
+
         config = ValuationConfig.from_db(self.db)
         calibration = build_calibration(self.db)
         config.category_factors = dict(calibration.category_factors)
         config.calibration_active = calibration.active
         config.calibration_note = calibration.reason
+        # Learn slowly from completed flips. The factor only exists after at
+        # least three sales of the same kind, and it is clamped in flips.py.
+        config.outcome_factors = resale_factors(self.db)
         observed = self._record_market_observations()
         rows = self.db.query(
             """
@@ -1239,6 +1552,9 @@ class ValuationEngine:
 
         evaluated = deals = review = 0
         self._comp_cache = {}
+        self._estimates = {}
+        self._snapshot_cache = {}
+        self._snapshot_at = {}
         for listing in targets:
             result = self.evaluate(listing, config)
             self.db.execute(
@@ -1248,8 +1564,10 @@ class ValuationEngine:
                     resale_fees, resale_shipping, packaging, net_profit,
                     net_profit_conservative, net_profit_optimistic, roi, score, is_deal,
                     needs_review, review_reason, risk_score, risk_level, risk_reasons,
-                    reasons, breakdown, computed_at, input_fingerprint)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reasons, breakdown, computed_at, input_fingerprint,
+                    resale_strategy, resale_quick, resale_balanced, resale_max,
+                    evidence_level, max_bid, estimated_days, valuation_refreshed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(listing_id) DO UPDATE SET
                     product_key=excluded.product_key, kind=excluded.kind,
                     expected_resale=excluded.expected_resale, resale_low=excluded.resale_low,
@@ -1267,7 +1585,15 @@ class ValuationEngine:
                     risk_reasons=excluded.risk_reasons,
                     reasons=excluded.reasons,
                     breakdown=excluded.breakdown, computed_at=excluded.computed_at,
-                    input_fingerprint=excluded.input_fingerprint
+                    input_fingerprint=excluded.input_fingerprint,
+                    resale_strategy=excluded.resale_strategy,
+                    resale_quick=excluded.resale_quick,
+                    resale_balanced=excluded.resale_balanced,
+                    resale_max=excluded.resale_max,
+                    evidence_level=excluded.evidence_level,
+                    max_bid=excluded.max_bid,
+                    estimated_days=excluded.estimated_days,
+                    valuation_refreshed_at=excluded.valuation_refreshed_at
                 """,
                 (
                     result["listing_id"], result["product_key"], result["kind"],
@@ -1282,11 +1608,40 @@ class ValuationEngine:
                     json_dumps(result["risk_reasons"]), json_dumps(result["reasons"]),
                     json_dumps(result["breakdown"]), result["computed_at"],
                     fingerprints[int(result["listing_id"])],
+                    result["resale_strategy"], result["resale_quick"],
+                    result["resale_balanced"], result["resale_max"],
+                    result["evidence_level"], result["max_bid"],
+                    result["estimated_days"], result["valuation_refreshed_at"],
                 ),
             )
             evaluated += 1
             deals += result["is_deal"]
             review += result["needs_review"]
+        # Every product valuation is appended to the permanent price memory.
+        # Reuse comes from this table, so a product researched on eBay is
+        # available to a Vinted listing of the same identity.
+        snapshots = 0
+        for (product_key, kind), estimate in self._estimates.items():
+            if self.pricing.record(product_key, kind, estimate):
+                snapshots += 1
+        if self._estimates:
+            # One set-based statement. Updating key by key scanned the whole
+            # deals table once per product and turned a 25-second pass into
+            # minutes on a 70k-row database.
+            self.db.execute(
+                """
+                UPDATE deals SET valuation_refreshed_at = (
+                    SELECT s.refreshed_at FROM valuation_snapshots s
+                    WHERE s.product_key = deals.product_key
+                    ORDER BY s.id DESC LIMIT 1
+                )
+                WHERE product_key IN (
+                    SELECT s.product_key FROM valuation_snapshots s
+                    WHERE s.product_key = deals.product_key
+                )
+                """
+            )
+        self._estimates = {}
         # Clear only rows that are no longer part of the evaluated universe.
         # Keeping the previous flags during the loop avoids the empty/partial
         # feed that occurred when every deal was zeroed before being rebuilt.
@@ -1333,4 +1688,5 @@ class ValuationEngine:
             "observed": observed,
             "keys": len(changed_keys),
             "full": int(full),
+            "snapshots": snapshots,
         }

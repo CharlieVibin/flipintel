@@ -5,6 +5,191 @@
 **Runtime:** Python 3.10, FastAPI, SQLite, React 18 + Vite + Tailwind
 **Live dashboard:** http://127.0.0.1:8765 (while the local server is running)
 
+## Session 2026-10-23 — CeX, price memory, auctions and personal flips
+
+This session implemented the intelligence layer on top of the existing deal
+engine. It did not reset the database or rebuild any collector.
+
+### CeX UK is now a working, exact-identity pricing source
+
+- **Live, unauthenticated search index.** `uk.webuy.com` renders prices from
+  `search.webuy.io` (`prod_cex_uk`). A plain POST returns the same rows with
+  retail (`sellPrice`), cash (`cashPriceCalculated`), voucher
+  (`exchangePriceCalculated`), grade, box ID, category, stock and last price
+  change. Verified live from this machine: HTTP 200 for consoles, phones, GPUs
+  and handhelds. No HTML scraping and no access-control bypass.
+- **Matching was the hard part, and the first live run proved it.** A plain
+  "best score wins" rule returned a £700 Halo Infinite Xbox Series X for a
+  generic Series X product and a £600 Ghost of Yotei PS5 Slim. It also matched
+  "Xbox Series S" against "Xbox Series X" because one-character tokens were
+  being dropped. The fix has four parts: single-letter model tokens are kept;
+  model tokens are a veto; variant/capacity tokens must match exactly; and the
+  quote comes from the least-decorated product cohort (packaging/colour words
+  only), with special editions and all-digital models excluded and named in the
+  note. A cohort whose own prices disagree by more than 25% is rejected rather
+  than blended.
+- **Verified live selections:** Xbox Series X 1TB boxed £570 (not £700 Halo, not
+  Series S), PS5 Slim 1TB boxed £550 (not £600 Ghost of Yotei), Switch OLED 64GB
+  £195, RTX 4060 8GB £300 vs RTX 4060 Ti £375, iPhone 15 Pro 128GB £495.
+- **Failure handling.** 401/403/429 mark the source blocked and pause it for an
+  hour; network and shape errors fail without a price. `external_quotes` stores
+  the status, `cex_price_history` stores each grade observation, and no price is
+  fabricated on failure. Negative results (product genuinely not stocked) are
+  cached for the reuse window so junk keys are not re-queried every scan.
+- **Valuation integration.** CeX is a separate `cex_anchor` source, never a
+  sold comparable. Its weight is 2 (configurable), but its retail price is first
+  converted to private-resale level using the product's own observed asking
+  market (clamped 0.40–0.95 of retail). That replaced the fixed 0.80 factor,
+  which overvalued consoles (Xbox retail × 0.8 ≫ private market) and
+  undervalued handhelds. With no asking market, CeX is the sole anchor and the
+  estimate is labelled as such.
+- The temporary `third_party/cex-uk-prices` folder was removed after the port.
+  MIT attribution and the full licence text are in `THIRD_PARTY_NOTICES.md`.
+
+### Permanent product-price memory
+
+- `valuation_snapshots` appends one row per product and refresh (resale, range,
+  confidence, evidence level, sample, sold count, marketplaces, strategies,
+  method). Rows are never overwritten; `GET /api/products/<key>` returns the
+  latest, the full recent history and the CeX quote/history.
+- Reuse is 7 days (`history_reuse_days`). After that the snapshot is stale and
+  the scanner schedules a refresh, deals/ending auctions first, then models
+  with the most active listings. `pricing_research` suppresses simultaneous
+  research of the same product (15-minute abandoned-claim window).
+- Every product's valuation is reused across marketplaces because the key is
+  marketplace-independent; a Vinted listing and an eBay listing of the same
+  identity read the same snapshot.
+- Deal rows carry `valuation_refreshed_at`, shown in the drawer as "price
+  memory refreshed …".
+
+### Evidence weighting, strategies and honest confidence
+
+- Seller weight is derived from eBay feedback: ≥98.5% and ≥100 feedback = 2,
+  below 95% = 0.5, otherwise 1. A single seller's combined weight is capped at
+  30% of the asking pool, so a high-volume seller cannot set the market alone.
+- Source diversity and recency feed the score; the fixed repeated "52%" cap is
+  gone. Asking-only evidence has a computed ceiling that varies with sample and
+  marketplace count, and the UI shows an evidence level plus source counts.
+- Three resale strategies are stored per deal and shown with the underlying
+  distribution: quick (lower quartile), balanced (current estimate) and maximum
+  (upper distribution, only when dispersion supports it). Each has a suggested
+  initial asking price separate from the expected final sale.
+- Completed flips adjust resale per kind only after 3 sales, shrunk by sample
+  count and clamped to ±10% (`app/flips.py`).
+
+### eBay auctions and discovery
+
+- eBay was **live** in this environment. Fixed-price category discovery was
+  already working; the parsers were extended for auctions. The critical bug
+  found live: Browse returns `price: null` for auctions and puts the figure in
+  `currentBidPrice`, so every auction was being rejected. That is fixed and
+  verified against production responses (HTTP 200, 50 auctions returned,
+  bids/end dates/bid counts parsed).
+- Ending-soon scanning uses `buyingOptions:{AUCTION}`, `sort=endingSoonest`,
+  limit 200, then filters locally to the configured window because Browse has no
+  documented ending-time filter. Two targeted queries per pass rotate from a
+  hardware list; broad terms such as "gpu" and "cpu" were measured to return
+  coolers and food processors and were removed.
+- Auction rows store end time, current bid, bid count and next minimum bid. The
+  deal row stores `max_bid`: the lower of (proceeds after selling fees/postage −
+  minimum profit) and (proceeds / (1 + required ROI)), with the inbound postage
+  included in cost. Shortlisted auctions are rechecked every 5 minutes while
+  close to ending. Ended auctions are marked stale and leave the feed.
+- No automatic bidding exists anywhere in the codebase.
+
+### My Flips
+
+- New table and API: mark a deal purchased (from the drawer), record actual
+  costs, price cuts, listing/sale dates, final price, fees, postage, unsold
+  status, and thumbs-up/down with a note. The pre-purchase prediction is copied
+  at creation and never rewritten; realised profit, ROI, prediction error and
+  days-to-sell are computed from the record.
+- Dashboard page: summary (realised vs predicted, mean absolute error, capital
+  tied up, average days to sell, learned adjustments), status filters and a
+  manual-entry form.
+
+### Alerts
+
+- Discord alerts are typed: new BIN deal, Best Offer (when the API reports it),
+  auction ending soon, and a bid increase while still under the ceiling. Each
+  includes image, URL, cost, resale, profit, ROI, evidence level and the
+  auction/offer ceiling. Auction alerts deduplicate through `auction_alerts`
+  with a configurable cooldown (default 180 minutes) and never send ended
+  auctions.
+
+### Measured results (live database, 70,915 active listings)
+
+| Metric | Value |
+|---|---:|
+| Full reconciliation | 70,616 listings in **128.8 s** |
+| Automatic deals after the change | 68 |
+| Manual review | 913 |
+| Stored valuation snapshots | 1,762 products |
+| CeX live quotes | verified for consoles/phones/GPUs/handhelds |
+| eBay live | category BIN and auction searches both HTTP 200 |
+| Auction rows with end/bid data | 48 at first live auction scan (2 queries) |
+| Tests | **90 passed** |
+
+An earlier version of the snapshot refresh updated `deals` once per product key;
+that scanned the 70k-row table thousands of times and pushed a pass past seven
+minutes. It is now one set-based statement with an index on
+`deals(product_key)`, which brought the full pass back to ~2 minutes.
+
+### Live verification performed (not mocked)
+
+- CeX: multiple live `search.webuy.io` requests returned HTTP 200 and exact
+  product rows; graded retail/cash/voucher values were stored in
+  `external_quotes` and `cex_price_history` during the scanner run.
+- eBay: token request HTTP 200; fixed-price category requests HTTP 200; auction
+  request with `buyingOptions:{AUCTION}` and `sort=endingSoonest` HTTP 200,
+  returning current bids, bid counts and end dates. The auction parser was run
+  against that production response and 15 in-window auctions were parsed for a
+  240-minute test window; the live 30-minute scan ingested and valued 5.
+- Dashboard API: `/api/health` exposes `pricing` and `auctions`; `/api/deals`
+  returns `evidence_level`, strategy values, `max_bid`, `estimated_days` and
+  `valuation_refreshed_at`; `/api/products/<key>` returns snapshot history and
+  CeX quote/history.
+- My Flips was exercised against the live server: create from a real deal
+  (prediction £829.34 resale / £213.90 profit), record a £760 sale with £100
+  fees and £12 postage → net £148, ROI 29.6%, prediction error −£65.90, stored
+  feedback and price change. The test rows were then deleted, leaving the
+  user's flip history empty.
+
+### Honest limits of this session
+
+- **Auction supply is thin in the 30-minute window.** Two targeted queries
+  returned 5 auctions on the first pass; none was below its profitable ceiling
+  (e.g. a PS5 at £402 against a £209 ceiling). The shortlist was therefore empty,
+  which is the honest outcome, not a parser failure. Broader coverage needs more
+  queries per pass and therefore more API budget.
+- **CeX retail is a reference, not a sale.** With no completed-sale evidence the
+  XBOX/PS5 asking-only estimates still carry Limited/Moderate evidence. CeX cash
+  and voucher offers are stored and displayed but are not used as resale values.
+- **No genuine property sold data exists in this database.** The estimator
+  remains asking-price based; this session did not invent sold prices.
+- **eBay Best Offer support depends on the API returning `BEST_OFFER` in
+  `buyingOptions`.** The maximum offer equals the same profit/ROI ceiling as a
+  bid; it is not a separate negotiation model.
+- **The legacy 547 `is_auction` rows** collected before the auction parser fix
+  have no end time. They are not shortlisted (the watchlist requires an end
+  time) and will age out through normal stale-listing maintenance.
+- **Price memory is per product key, not per listing.** A product with several
+  variants under one key (where identification could not separate them) shares
+  one snapshot; the variant review gate still blocks automatic deals for those
+  listings.
+- Live CeX requests come from this network, so a future 403 is possible. It is
+  surfaced on the Scanner page and pauses lookups instead of failing scans.
+
+### Exact continuation point
+
+1. Add more targeted auction queries (or paginate) and measure whether the
+   30-minute window is reliably non-empty; the current loop and ceiling math are
+   finished and tested.
+2. Optionally convert CeX cash/voucher offers into a separate `trade_in_value`
+   field on the deal drawer; they are stored already.
+3. Import or record real sold evidence so the evidence level can reach Strong;
+   nothing in the new code blocks that.
+
 ## Session 2026-10-23 — discovery and deal-pipeline audit
 
 Before changing thresholds, the pipeline was measured listing by listing on a
@@ -439,10 +624,10 @@ delete listings or reset the database.
 | Category-discovered listings | 17,574 |
 | Completed-sale evidence rows | 0 |
 | Sources healthy | Vinted, Gumtree |
-| eBay | `not_configured` — free developer keys not set |
-| CeX | HTTP 403 from this network; surfaced honestly |
+| eBay | Live with production keys (category BIN + auctions verified) |
+| CeX | Live via the public search index; retail/cash/voucher stored |
 | Facebook | Unavailable; requires authenticated session |
-| Tests | 72 passed, 0 failed |
+| Tests | 90 passed, 0 failed |
 | Frontend build | Passing |
 
 The current deal is a £200 PlayStation 5 console supported by live asking
@@ -540,7 +725,7 @@ cd frontend
 npm run build
 ```
 
-Last verified: **72 passed, 0 failed**; frontend `tsc -b && vite build` passes.
+Last verified: **90 passed, 0 failed**; frontend `tsc -b && vite build` passes.
 
 ## Exact next tasks (in order)
 

@@ -24,6 +24,7 @@ from .evidence import (
     template_csv,
     validate_comp_update,
 )
+from .flips import FlipBook
 from .identification import CONDITION_FACTORS
 from .scanner import Scanner
 from .utils import age_hours, hours_ago, iso, parse_iso, normalise_text, utcnow
@@ -98,6 +99,10 @@ def _listing_row(row: dict[str, Any]) -> dict[str, Any]:
         "is_faulty": bool(row.get("is_faulty")),
         "is_wanted": bool(row.get("is_wanted")),
         "is_auction": bool(row.get("is_auction")),
+        "auction_end_at": row.get("auction_end_at"),
+        "current_bid": row.get("current_bid"),
+        "bid_count": row.get("bid_count"),
+        "min_next_bid": row.get("min_next_bid"),
         "is_bundle": bool(row.get("is_bundle")),
         "duplicate_of": row.get("duplicate_of"),
         "duplicate_score": row.get("duplicate_score"),
@@ -120,8 +125,16 @@ def _deal_row(row: dict[str, Any]) -> dict[str, Any]:
         "resale_low": row.get("resale_low"),
         "resale_high": row.get("resale_high"),
         "confidence": row.get("confidence") or 0,
+        "evidence_level": row.get("evidence_level"),
         "sample_size": row.get("sample_size") or 0,
         "valuation_method": row.get("valuation_method"),
+        "valuation_refreshed_at": row.get("valuation_refreshed_at"),
+        "resale_strategy": row.get("resale_strategy"),
+        "resale_quick": row.get("resale_quick"),
+        "resale_balanced": row.get("resale_balanced"),
+        "resale_max": row.get("resale_max"),
+        "max_bid": row.get("max_bid"),
+        "estimated_days": row.get("estimated_days"),
         "purchase_total": round(purchase_total, 2),
         "net_profit": round(float(row["net_profit"]), 2) if row.get("net_profit") is not None else None,
         "net_profit_conservative": (
@@ -389,7 +402,9 @@ async def list_deals(
                d.valuation_method, d.purchase_total, d.net_profit, d.net_profit_conservative,
                d.net_profit_optimistic, d.roi, d.score, d.is_deal,
                d.needs_review, d.review_reason, d.risk_score, d.risk_level,
-               d.risk_reasons, d.reasons, d.computed_at,
+               d.risk_reasons, d.reasons, d.computed_at, d.evidence_level,
+               d.resale_strategy, d.resale_quick, d.resale_balanced, d.resale_max,
+               d.max_bid, d.estimated_days, d.valuation_refreshed_at,
                r.decision AS review_decision, r.decided_at AS review_decided_at
         {joins}
         WHERE {where_sql}
@@ -1053,6 +1068,16 @@ class SettingsUpdate(BaseModel):
     other_costs: float | None = Field(default=None, ge=0, le=500)
     vinted_shipping: float | None = Field(default=None, ge=0, le=200)
     asking_to_sold_factor: float | None = Field(default=None, ge=0.4, le=1.2)
+    resale_strategy: str | None = None
+    min_roi_high_value: float | None = Field(default=None, ge=0, le=5)
+    high_value_threshold: float | None = Field(default=None, ge=0, le=100000)
+    history_reuse_days: int | None = Field(default=None, ge=1, le=60)
+    cex_refresh_limit: int | None = Field(default=None, ge=0, le=60)
+    auction_scan_seconds: int | None = Field(default=None, ge=120, le=3600)
+    auction_urgent_seconds: int | None = Field(default=None, ge=120, le=3600)
+    auction_window_minutes: int | None = Field(default=None, ge=5, le=240)
+    auction_alerts_enabled: bool | None = None
+    notification_cooldown_minutes: int | None = Field(default=None, ge=10, le=1440)
     notifications_enabled: bool | None = None
     discord_webhook_url: str | None = None
     scan_interval_vinted: int | None = Field(default=None, ge=120, le=3600)
@@ -1092,6 +1117,19 @@ async def get_settings(request: Request) -> dict[str, Any]:
             "other_costs": num("other_costs", 0.0),
             "vinted_shipping": num("vinted_shipping", 3.49),
             "asking_to_sold_factor": num("asking_to_sold_factor", 0.85),
+            "resale_strategy": str(values.get("resale_strategy", "balanced")),
+            "min_roi_high_value": num("min_roi_high_value", 0.18),
+            "high_value_threshold": num("high_value_threshold", 250),
+        },
+        "pricing": {
+            "history_reuse_days": int(num("history_reuse_days", 7)),
+            "cex_refresh_limit": int(num("cex_refresh_limit", 6)),
+        },
+        "auctions": {
+            "scan_seconds": int(num("auction_scan_seconds", 600)),
+            "urgent_seconds": int(num("auction_urgent_seconds", 300)),
+            "window_minutes": int(num("auction_window_minutes", 30)),
+            "alerts_enabled": boolean("auction_alerts_enabled", True),
         },
         "scanning": {
             "scan_interval_vinted": int(num("scan_interval_vinted", 240)),
@@ -1105,6 +1143,7 @@ async def get_settings(request: Request) -> dict[str, Any]:
         "notifications": {
             "enabled": boolean("notifications_enabled", False),
             "webhook_configured": bool(values.get("discord_webhook_url")),
+            "cooldown_minutes": int(num("notification_cooldown_minutes", 180)),
         },
         "environment": {
             "ebay_configured": settings.ebay_configured,
@@ -1133,17 +1172,42 @@ async def update_settings(request: Request, body: SettingsUpdate) -> dict[str, A
         "scan_interval_gumtree": "scan_interval_gumtree",
         "scan_interval_ebay": "scan_interval_ebay",
         "queries_per_cycle": "queries_per_cycle",
+        "min_roi_high_value": "min_roi_high_value",
+        "high_value_threshold": "high_value_threshold",
+        "history_reuse_days": "history_reuse_days",
+        "cex_refresh_limit": "cex_refresh_limit",
+        "auction_scan_seconds": "auction_scan_seconds",
+        "auction_urgent_seconds": "auction_urgent_seconds",
+        "auction_window_minutes": "auction_window_minutes",
+        "notification_cooldown_minutes": "notification_cooldown_minutes",
+    }
+    integer_keys = {
+        "scan_interval_vinted", "scan_interval_gumtree", "scan_interval_ebay",
+        "queries_per_cycle", "history_reuse_days", "cex_refresh_limit",
+        "auction_scan_seconds", "auction_urgent_seconds", "auction_window_minutes",
+        "notification_cooldown_minutes",
     }
     for field, key in mapping.items():
         value = getattr(body, field)
         if value is not None:
-            updates[key] = str(int(value) if key.startswith("scan_interval") or key == "queries_per_cycle" else value)
+            updates[key] = str(int(value) if key in integer_keys else value)
+    if body.resale_strategy is not None:
+        strategy = body.resale_strategy.strip().lower()
+        if strategy not in {"quick", "balanced", "max"}:
+            raise HTTPException(
+                status_code=422,
+                detail="Resale strategy must be quick, balanced or max",
+            )
+        updates["resale_strategy"] = strategy
     if body.resale_channel is not None:
         channel = body.resale_channel.strip().lower()
         if channel not in {"ebay", "vinted", "facebook"}:
             raise HTTPException(status_code=422, detail="Resale channel must be ebay, vinted or facebook")
         updates["resale_channel"] = channel
-    for field in ("notifications_enabled", "enabled_vinted", "enabled_gumtree", "enabled_ebay"):
+    for field in (
+        "notifications_enabled", "enabled_vinted", "enabled_gumtree", "enabled_ebay",
+        "auction_alerts_enabled",
+    ):
         value = getattr(body, field)
         if value is not None:
             updates[field] = "true" if value else "false"
@@ -1159,7 +1223,9 @@ async def update_settings(request: Request, body: SettingsUpdate) -> dict[str, A
         db.set_settings(updates)
         if any(key in updates for key in ("min_profit", "min_roi", "min_confidence", "ebay_fvf",
                                           "resale_channel", "resale_shipping", "packaging_cost",
-                                          "other_costs", "asking_to_sold_factor")):
+                                          "other_costs", "asking_to_sold_factor",
+                                          "resale_strategy", "min_roi_high_value",
+                                          "high_value_threshold", "history_reuse_days")):
             await request.app.state.scanner._run_refresh(force=True)
     return await get_settings(request)
 
@@ -1243,6 +1309,142 @@ async def notifications(request: Request, limit: int = Query(20, ge=1, le=100)) 
         (limit,),
     )
     return {"notifications": rows}
+
+
+class FlipStart(BaseModel):
+    listing_id: int | None = None
+    title: str | None = None
+    product_key: str | None = None
+    kind: str | None = None
+    marketplace: str | None = None
+    condition: str | None = None
+    purchase_price: float | None = None
+    purchase_shipping: float | None = None
+    preparation_cost: float | None = None
+    ask_price: float | None = None
+    predicted_resale: float | None = None
+    predicted_profit: float | None = None
+    channel: str | None = None
+
+
+class FlipUpdate(BaseModel):
+    purchase_price: float | None = None
+    purchase_shipping: float | None = None
+    preparation_cost: float | None = None
+    other_costs: float | None = None
+    ask_price: float | None = None
+    final_price: float | None = None
+    fees: float | None = None
+    postage: float | None = None
+    channel: str | None = None
+    status: str | None = None
+    condition_norm: str | None = None
+    sold_at: str | None = None
+    feedback: int | None = None
+    feedback_note: str | None = None
+
+
+class FlipPrice(BaseModel):
+    price: float
+
+
+@router.get("/flips")
+async def list_flips(
+    request: Request,
+    status: str = "all",
+    limit: int = Query(100, ge=1, le=500),
+) -> dict[str, Any]:
+    book = FlipBook(_db(request))
+    return {
+        "flips": book.list(status, limit),
+        "summary": book.summary(),
+        "generated_at": iso(),
+    }
+
+
+@router.get("/flips/summary")
+async def flips_summary(request: Request) -> dict[str, Any]:
+    return FlipBook(_db(request)).summary()
+
+
+@router.post("/flips")
+async def start_flip(request: Request, body: FlipStart) -> dict[str, Any]:
+    book = FlipBook(_db(request))
+    try:
+        if body.listing_id is not None:
+            flip = book.start_from_listing(
+                body.listing_id,
+                purchase_price=body.purchase_price,
+                purchase_shipping=body.purchase_shipping,
+                preparation_cost=body.preparation_cost,
+                ask_price=body.ask_price,
+                channel=body.channel,
+            )
+        else:
+            flip = book.start_manual(body.model_dump())
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    return {"flip": flip, "summary": book.summary()}
+
+
+@router.get("/flips/{flip_id}")
+async def get_flip(request: Request, flip_id: int) -> dict[str, Any]:
+    flip = FlipBook(_db(request)).get(flip_id)
+    if not flip:
+        raise HTTPException(status_code=404, detail="Flip not found")
+    return flip
+
+
+@router.patch("/flips/{flip_id}")
+async def update_flip(request: Request, flip_id: int, body: FlipUpdate) -> dict[str, Any]:
+    book = FlipBook(_db(request))
+    if body.status is not None and body.status not in {"held", "listed", "sold", "unsold"}:
+        raise HTTPException(status_code=422, detail="Unknown flip status")
+    if body.feedback is not None and body.feedback not in {-1, 0, 1}:
+        raise HTTPException(status_code=422, detail="Feedback must be -1, 0 or 1")
+    try:
+        flip = book.update(flip_id, body.model_dump(exclude_unset=True))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Flip not found")
+    return {"flip": flip, "summary": book.summary()}
+
+
+@router.post("/flips/{flip_id}/price")
+async def flip_price(request: Request, flip_id: int, body: FlipPrice) -> dict[str, Any]:
+    try:
+        flip = FlipBook(_db(request)).change_price(flip_id, body.price)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Flip not found")
+    return {"flip": flip}
+
+
+@router.get("/products/{product_key:path}")
+async def product_price(request: Request, product_key: str) -> dict[str, Any]:
+    """Permanent price memory and independent CeX reference for one product."""
+    db = _db(request)
+    from .pricing import PricingDatabase
+
+    key = product_key.strip().lower()
+    detail = PricingDatabase(db).detail(key)
+    quote = db.query_one(
+        "SELECT * FROM external_quotes WHERE product_key=? AND source='cex'",
+        (key,),
+    )
+    cex_history = db.query(
+        """
+        SELECT matched_name, grade, sell_price, cash_price, voucher_price,
+               condition, observed_at
+        FROM cex_price_history WHERE product_key=?
+        ORDER BY observed_at DESC LIMIT 20
+        """,
+        (key,),
+    )
+    return {
+        "product_key": key,
+        "pricing": detail,
+        "cex": dict(quote) if quote else None,
+        "cex_history": cex_history,
+    }
 
 
 def _unused(*_: Any) -> None:
