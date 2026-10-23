@@ -359,6 +359,15 @@ async def test_get_items_rechecks_at_most_twenty_known_auctions(tmp_path):
         db.close()
 
 
+def test_auction_filter_uses_the_live_purchase_budget():
+    collector = EbayCollector(db=None)
+    collector.scan_price_min = 10
+    collector.scan_price_max = 100
+    auction_filter = collector._auction_filter()
+    assert "buyingOptions:{AUCTION}" in auction_filter
+    assert "price:[10..100]" in auction_filter
+
+
 @pytest.mark.asyncio
 async def test_category_auction_scan_pages_only_inside_the_window():
     page_one = [_auction(i, 5) for i in range(200)]

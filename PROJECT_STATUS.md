@@ -34,11 +34,21 @@ database or change historical observations.
 
 ### Enforcement and efficiency
 
-The scanner now requires a confirmed configuration. Before a scan it resolves
-enabled leaves to marketplace category IDs, sends server-side price filters
-where the source supports them, rejects disabled leaves and over-budget total
-costs before storage/enrichment, and deduplicates the resulting request set.
-A disabled category therefore cannot trigger comparable research or valuation.
+The scanner now requires a confirmed configuration. Before a category scan it
+resolves enabled leaves to marketplace category IDs, sends server-side price
+filters where the source supports them, rejects disabled leaves and over-budget
+total costs before storage/enrichment, and deduplicates the resulting request
+set. A disabled category therefore cannot trigger comparable research or
+valuation.
+
+Ending-soon auction discovery now uses the same configuration instead of a
+separate all-branch rotation. It refuses to start without a saved configuration,
+stops when eBay is disabled, rotates only the enabled eBay branches, applies the
+same GBP auction price window, filters shortlisted auctions by enabled leaf and
+saved total-cost budget before notification, and filters over-budget bids again
+during ingest. The existing auction monitor, ending-window rule and recheck of
+known shortlisted auctions are preserved; changing a toggle takes effect on the
+next auction pass without a restart.
 
 Measured request coverage on the current configuration (28 leaves selected):
 
@@ -66,21 +76,27 @@ marketplace request and the page stays in the red "not configured" state.
 
 ### Verification
 
-- `python -m pytest -q`: **184 passed** (including `tests/test_scan_config.py`
+- `python -m pytest -q`: **187 passed** (including `tests/test_scan_config.py`
   for persistence, parent/child toggles, budget arithmetic, presets, request
-  reduction and confirmation gating).
+  reduction, confirmation gating and auction category/budget enforcement).
 - `cd frontend && npm run build`: TypeScript and Vite build pass.
 - Live API and browser checks: `GET /api/scan-config`, save, preset selection,
-  category filters, dashboard red/green states, and scanner health.
+  category filters, dashboard red/green states, and scanner health. After the
+  auction change the live ending-soon Browse requests used only configured eBay
+  branches (for example `1244`, `16145`, `44980`, `182093`) and carried
+  `price:[1..100]`; no request used a category outside the saved 25-branch eBay
+  set. The user's `100gbp starter` custom preset and its 28 leaves were left
+  intact.
 - A cold start with a confirmed configuration re-identifies and revalues the
   existing database before uvicorn starts serving; on this 549 MB database that
   takes about **9 minutes**. This is existing maintenance behaviour, not a
   scanner request and not data loss. Subsequent restarts use the same path.
 
-Remaining limitation: existing eBay ending-soon auction monitoring is still a
-separate rotation and is not yet narrowed by the leaf selection. It remains
-preserved and budget-filtered at ingest; do not describe auction coverage as
-fully config-filtered.
+Remaining limitation: when an eBay category auction request fails, the existing
+keyword fallback is still used so monitoring is not left blind. That fallback
+cannot express category IDs, so it may overcollect briefly; disabled product
+classes are still rejected before storage and valuation, and the fallback is
+reported in scan diagnostics.
 
 ## Session 2026-10-23 — Variant integrity and the Steam Deck LCD failure
 

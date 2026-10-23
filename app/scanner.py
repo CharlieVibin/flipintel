@@ -1533,15 +1533,17 @@ class Scanner:
             return 0
         rows = self.db.query(
             """
-            SELECT id, external_id, auction_end_at, price, current_bid
+            SELECT id, external_id, marketplace, title, category, product_key,
+                   product_name, auction_end_at, price, current_bid
             FROM listings
             WHERE status='active' AND is_auction=1 AND auction_end_at IS NOT NULL
               AND auction_end_at >= ? AND auction_end_at <= ?
             ORDER BY auction_end_at ASC
-            LIMIT 20
+            LIMIT 40
             """,
             (iso(), iso(utcnow() + timedelta(minutes=35))),
         )
+        rows = [row for row in rows if self._stored_row_allowed(row)][:20]
         if not rows:
             return 0
         try:
@@ -1587,9 +1589,10 @@ class Scanner:
         return updated
 
     def _shortlisted_auctions(self) -> list[dict[str, Any]]:
-        return self.db.query(
+        rows = self.db.query(
             """
-            SELECT l.id, l.title, l.price, l.shipping, l.current_bid, l.bid_count,
+            SELECT l.id, l.marketplace, l.category, l.product_key, l.product_name,
+                   l.title, l.price, l.shipping, l.current_bid, l.bid_count,
                    l.min_next_bid, l.auction_end_at, d.expected_resale, d.net_profit,
                    d.max_bid, d.confidence, d.evidence_level, d.rank_score, d.rank_tier,
                    d.roi
@@ -1600,10 +1603,24 @@ class Scanner:
               AND d.evidence_level IN ('limited', 'moderate', 'strong')
               AND d.max_bid IS NOT NULL AND l.price <= d.max_bid
             ORDER BY d.rank_score DESC, l.auction_end_at ASC
-            LIMIT 60
+            LIMIT 120
             """,
             (iso(), iso(utcnow() + timedelta(days=2))),
         )
+        allowed: list[dict[str, Any]] = []
+        for row in rows:
+            if not self._stored_row_allowed(row):
+                continue
+            affordable, _total, _basis = self.scan_config.affordable(
+                str(row.get("marketplace") or "ebay"),
+                float(row.get("price") or 0),
+                float(row.get("shipping") or 0),
+            )
+            if affordable:
+                allowed.append(row)
+            if len(allowed) >= 60:
+                break
+        return allowed
 
     async def scan_auctions(self) -> SearchOutcome | None:
         """Scan ending-soon auctions and revalue anything newly collected.
@@ -1614,9 +1631,31 @@ class Scanner:
         Rotating whole hardware categories sees every auction in the branch and
         still enforces the end-time window locally. The same request budget now
         covers the market instead of a phrase list. Nothing is bid on.
+
+        Auction discovery is part of the scanner, so it obeys the same saved
+        category, marketplace and purchase-budget configuration as fixed-price
+        discovery. Disabled eBay or an empty selection stops the loop before any
+        request; over-budget bids are filtered by the Browse query and again by
+        the scanner's exact total-cost check during ingest.
         """
         collector = self.collectors.get("ebay")
         if collector is None or not hasattr(collector, "search_auctions"):
+            return None
+        self.scan_config = load_scan_config(self.db)
+        if not self.scan_config.confirmed:
+            self._set_status(
+                "ebay", "paused",
+                last_error="Scan configuration has not been saved", next_scan=None,
+            )
+            return SearchOutcome(
+                marketplace="ebay", status="paused",
+                error="Scan configuration has not been saved",
+            )
+        if not self.scan_config.marketplace_enabled("ebay"):
+            self._set_status(
+                "ebay", "paused", last_error="Source disabled in scan setup",
+                next_scan=None,
+            )
             return None
         if not self.db.setting_bool("auction_alerts_enabled", True):
             return None
@@ -1626,11 +1665,23 @@ class Scanner:
         await self._recheck_auctions()
         window = self.db.setting_int("auction_window_minutes", 30)
         budget = max(1, min(6, self.db.setting_int("auction_requests_per_pass", 4)))
+        allowed_ids = set(mapped_category_ids("ebay", self.scan_config.categories))
         catalogue = [
-            category for category in categories_for("ebay") if category.priority >= 2
+            category for category in categories_for("ebay")
+            if category.priority >= 2 and category.category_id in allowed_ids
         ]
         if not catalogue:
-            catalogue = list(categories_for("ebay"))
+            self._set_status(
+                "ebay", "paused",
+                last_error="No enabled categories for this source", next_scan=None,
+            )
+            return SearchOutcome(
+                marketplace="ebay", status="paused",
+                error="No enabled categories for this source",
+            )
+        collector.scan_price_min, collector.scan_price_max = (
+            self.scan_config.server_price_bounds("ebay")
+        )
         started = utcnow()
         queries: list[str] = []
         outcome: SearchOutcome
@@ -1689,7 +1740,11 @@ class Scanner:
         ).lastrowid
         return await self._finalize(
             collector, outcome, started=started, run_id=run_id,
-            extra_detail={"kind": "ending_soon", "window_minutes": window},
+            extra_detail={
+                "kind": "ending_soon", "window_minutes": window,
+                "configured_categories": sorted(allowed_ids),
+                "price_max": self.scan_config.max_price,
+            },
         )
 
     async def _auction_loop(self) -> None:

@@ -97,6 +97,28 @@ class EbayCollector(BaseCollector):
         "price:[1..25000]",
     ])
 
+    def _auction_filter(self) -> str:
+        """Auction filter with the same live purchase-budget window.
+
+        The current bid is the purchase price at discovery time. Postage is
+        still checked by the scanner's exact total-cost rule because eBay does
+        not fold it into the bid. The class constant remains the unbudgeted
+        fallback for callers that do not set ``scan_price_max``.
+        """
+        high = float(getattr(self, "scan_price_max", 0) or 0)
+        if high <= 0:
+            return self.AUCTION_FILTER
+        low = max(1.0, float(getattr(self, "scan_price_min", 0) or 0))
+        high = max(low, min(25000.0, high))
+        return ",".join([
+            "buyingOptions:{AUCTION}",
+            "itemLocationCountry:GB",
+            "deliveryCountry:GB",
+            "priceCurrency:GBP",
+            f"price:[{int(low) if low.is_integer() else low}.."
+            f"{int(high) if high.is_integer() else high}]",
+        ])
+
     def __init__(self, db, client=None) -> None:
         super().__init__(db, client)
         self._token: str | None = None
@@ -229,7 +251,7 @@ class EbayCollector(BaseCollector):
                         "q": query,
                         "limit": 200,
                         "sort": "endingSoonest",
-                        "filter": self.AUCTION_FILTER,
+                        "filter": self._auction_filter(),
                     },
                     f"auction:{query}",
                 )
@@ -319,7 +341,7 @@ class EbayCollector(BaseCollector):
                             "limit": page_size,
                             "offset": offset,
                             "sort": "endingSoonest",
-                            "filter": self.AUCTION_FILTER,
+                            "filter": self._auction_filter(),
                         },
                         f"auction-category:{label}",
                     )

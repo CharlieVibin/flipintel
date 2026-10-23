@@ -29,6 +29,7 @@ from app.scan_taxonomy import (
     group_state,
     mapped_category_ids,
 )
+from app.collectors.base import SearchOutcome
 from app.scanner import ScanConfigurationRequired, Scanner
 from app.utils import iso
 
@@ -65,6 +66,45 @@ class FakeCollector:
 
     async def search(self, queries, max_pages=1):
         raise AssertionError("category mode should not fall back to keywords")
+
+    async def close(self):
+        return None
+
+
+class FakeAuctionCollector:
+    marketplace = "ebay"
+    label = "Fake eBay"
+    supports_categories = True
+    category_discovery_verified = True
+    available = (True, None)
+    backoff_seconds = 0
+    min_interval = 0.0
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.scan_price_min = 0.0
+        self.scan_price_max = 0.0
+
+    async def search_auctions(self, *args, **kwargs):
+        raise AssertionError("configured category mode must stay category-first")
+
+    async def search_auction_categories(
+        self, categories, *, ending_within_minutes=30, max_requests=3, page_size=200
+    ):
+        self.calls.append(
+            {
+                "categories": categories,
+                "ending_within_minutes": ending_within_minutes,
+                "max_requests": max_requests,
+            }
+        )
+        return SearchOutcome(
+            marketplace="ebay",
+            status="ok",
+            queries_ok=len(categories),
+            pages=len(categories),
+            detail={"strategy": "category", "categories": [c[0] for c in categories]},
+        )
 
     async def close(self):
         return None
@@ -336,6 +376,60 @@ def test_classifier_handles_known_product_classes():
         ident = identify_listing(title, "", "vinted")
         leaf = scan_leaf_for(ident, title, "3661" if "phone" in expected else None, "vinted")
         assert leaf == expected, (title, leaf, expected)
+
+
+def test_auction_scan_obeys_saved_categories_budget_and_marketplace(tmp_path):
+    db = Database(tmp_path / "auctions.db")
+    try:
+        collector = FakeAuctionCollector()
+        scanner = Scanner(db, collectors={"ebay": collector})
+
+        async def finalize(_collector, outcome, **kwargs):
+            collector.calls[-1]["finalize"] = kwargs
+            return outcome
+
+        scanner._finalize = finalize
+        save_scan_config(
+            db,
+            categories=["pc-components/graphics-cards"],
+            min_price=10,
+            max_price=100,
+            marketplaces={"vinted": True, "gumtree": True, "ebay": True},
+            active_preset="custom",
+        )
+        outcome = asyncio.run(scanner.scan_auctions())
+        assert outcome and outcome.status == "ok"
+        assert len(collector.calls) == 1
+        assert collector.calls[0]["categories"] == [("27386", "Graphics/Video Cards")]
+        assert collector.scan_price_min == 10
+        assert collector.scan_price_max == 100
+        assert collector.calls[0]["finalize"]["extra_detail"]["configured_categories"] == ["27386"]
+
+        save_scan_config(
+            db,
+            categories=["pc-components/graphics-cards"],
+            min_price=10,
+            max_price=100,
+            marketplaces={"vinted": True, "gumtree": True, "ebay": False},
+            active_preset="custom",
+        )
+        assert asyncio.run(scanner.scan_auctions()) is None
+        assert len(collector.calls) == 1
+    finally:
+        db.close()
+
+
+def test_auction_scan_requires_saved_configuration(tmp_path):
+    db = Database(tmp_path / "auction-gate.db")
+    try:
+        collector = FakeAuctionCollector()
+        scanner = Scanner(db, collectors={"ebay": collector})
+        outcome = asyncio.run(scanner.scan_auctions())
+        assert outcome and outcome.status == "paused"
+        assert "not been saved" in (outcome.error or "")
+        assert collector.calls == []
+    finally:
+        db.close()
 
 
 def test_start_is_gated_until_configuration_is_saved(tmp_path):
