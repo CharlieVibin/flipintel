@@ -11,9 +11,11 @@ from datetime import timedelta
 from typing import Any
 from urllib.parse import urlparse
 
+from .categories import CATALOGUES, Category, categories_for, category_by_id, category_url
 from .config import CATEGORY_LABELS, DISCOVERY_QUERIES, MARKETPLACE_LABELS, settings
 from .collectors import (
     BaseCollector,
+    CollectorError,
     EbayCollector,
     FacebookCollector,
     GumtreeCollector,
@@ -202,10 +204,27 @@ class Scanner:
             except Exception as exc:
                 log.exception("Scan loop error for %s", marketplace)
                 self._set_status(marketplace, "error", last_error=f"{type(exc).__name__}: {exc}")
-            interval = max(60, self.db.setting_int(f"scan_interval_{marketplace}", 300))
+            interval = self._cycle_interval(marketplace)
             jitter = random.uniform(2, max(3, interval * 0.08))
             self._set_status(marketplace, None, next_scan=iso(utcnow() + timedelta(seconds=interval + jitter)))
             await self._sleep(interval + jitter)
+
+    def _discovery_mode(self, marketplace: str) -> str:
+        mode = str(self.db.get_settings().get("discovery_mode", "category")).strip().lower()
+        return mode if mode in {"category", "keyword", "hybrid"} else "category"
+
+    def _uses_categories(self, marketplace: str) -> bool:
+        collector = self.collectors.get(marketplace)
+        return bool(
+            collector
+            and getattr(collector, "supports_categories", False)
+            and self._discovery_mode(marketplace) in {"category", "hybrid"}
+        )
+
+    def _cycle_interval(self, marketplace: str) -> int:
+        if self._uses_categories(marketplace):
+            return max(60, self.db.setting_int("category_cycle_seconds", 60))
+        return max(60, self.db.setting_int(f"scan_interval_{marketplace}", 300))
 
     async def _maintenance_loop(self) -> None:
         while not self._stop.is_set():
@@ -265,7 +284,7 @@ class Scanner:
         )
         return {str(row["category"]): int(row["n"]) for row in rows}
 
-    def _queries_for_cycle(self, marketplace: str) -> list[str]:
+    def _queries_for_cycle(self, marketplace: str, count: int | None = None) -> list[str]:
         """Pick a spread of queries, favouring thin categories.
 
         Every category keeps its own rotation cursor. That means a category that
@@ -273,7 +292,10 @@ class Scanner:
         starving the other categories, and no fixed list of product searches is
         the only thing the scanner ever sees.
         """
-        count = max(1, min(16, self.db.setting_int("queries_per_cycle", 12)))
+        count = max(
+            1,
+            min(16, count if count is not None else self.db.setting_int("queries_per_cycle", 12)),
+        )
         counts = self._category_counts()
         cursor = self.db.setting_int(f"cursor_{marketplace}", 0)
         categories = list(DISCOVERY_QUERIES.keys())
@@ -357,12 +379,369 @@ class Scanner:
             "covered_categories": sum(1 for item in categories if item["coverage"] == "covered"),
             "thin_categories": sum(1 for item in categories if item["coverage"] == "thin"),
             "empty_categories": sum(1 for item in categories if item["coverage"] == "empty"),
-            "query_categories": len(DISCOVERY_QUERIES),
-            "queries_per_cycle": max(1, min(16, self.db.setting_int("queries_per_cycle", 12))),
+            "query_categories": sum(len(items) for items in CATALOGUES.values()),
+            "queries_per_cycle": max(0, min(6, self.db.setting_int("keyword_supplement_queries", 2))),
             "generated_at": iso(),
         }
 
     async def _scan(self, collector: BaseCollector, manual: bool = False) -> SearchOutcome:
+        if self._uses_categories(collector.marketplace):
+            return await self._scan_categories(collector, manual=manual)
+        return await self._scan_keywords(collector, manual=manual)
+
+    # --- category discovery -------------------------------------------------
+    def _seed_categories(self, marketplace: str) -> None:
+        now = utcnow()
+        catalogue = categories_for(marketplace)
+        if catalogue:
+            placeholders = ",".join("?" * len(catalogue))
+            self.db.execute(
+                f"DELETE FROM category_scans WHERE marketplace=? "
+                f"AND category_id NOT IN ({placeholders})",
+                (marketplace, *(category.category_id for category in catalogue)),
+            )
+        for index, category in enumerate(catalogue):
+            existing = self.db.query_one(
+                "SELECT 1 FROM category_scans WHERE marketplace=? AND category_id=?",
+                (marketplace, category.category_id),
+            )
+            if existing:
+                # Coverage is live scan state, not catalogue metadata. Reseeding
+                # must not turn a partial/capped branch back into "full".
+                self.db.execute(
+                    "UPDATE category_scans SET label=?, path=? "
+                    "WHERE marketplace=? AND category_id=?",
+                    (category.label, category.path, marketplace, category.category_id),
+                )
+                continue
+            self.db.execute(
+                "INSERT INTO category_scans(marketplace, category_id, label, path, coverage, "
+                "next_due_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    marketplace, category.category_id, category.label, category.path,
+                    # Nothing is fully covered before it has been scanned. A
+                    # completed bounded pass upgrades this to full/partial below.
+                    "partial", iso(now + timedelta(seconds=index * 15)), iso(now),
+                ),
+            )
+
+    def _due_category_rows(
+        self, marketplace: str, manual: bool, limit: int
+    ) -> list[dict[str, Any]]:
+        self._seed_categories(marketplace)
+        rows = self.db.query(
+            "SELECT * FROM category_scans WHERE marketplace=?", (marketplace,)
+        )
+        now = utcnow()
+
+        def due(row: dict[str, Any]) -> bool:
+            if manual:
+                return row.get("state") != "scanning"
+            target = parse_iso(row.get("next_due_at"))
+            return target is None or target <= now
+
+        candidates = [row for row in rows if due(row)]
+
+        def rank(row: dict[str, Any]) -> tuple[Any, ...]:
+            category = category_by_id(marketplace, row["category_id"])
+            return (
+                0 if not row.get("backfill_done") else 1,
+                -int(category.priority if category else 0),
+                str(row.get("next_due_at") or ""),
+                -float(row.get("new_rate") or 0),
+            )
+
+        candidates.sort(key=rank)
+        # Keep initial backfills separate: at most two per cycle, then the
+        # incremental categories that are genuinely due.
+        backfills = [row for row in candidates if not row.get("backfill_done")]
+        incremental = [row for row in candidates if row.get("backfill_done")]
+        if backfills and not manual:
+            # Initial backfills run as their own phase, one category at a time,
+            # so a category reaches its configured depth instead of every
+            # category advancing one page per cycle. Incrementals resume
+            # between backfills and immediately after the last one.
+            return backfills[:1]
+        return (backfills[:2] + incremental)[:limit]
+
+    @staticmethod
+    def _category_interval(new_count: int) -> int:
+        if new_count >= 30:
+            return 180
+        if new_count >= 10:
+            return 240
+        if new_count >= 3:
+            return 360
+        if new_count >= 1:
+            return 600
+        return 1200
+
+    def _known_ids(self, marketplace: str, items: list[RawListing]) -> set[str]:
+        ids = [item.external_id for item in items if item.external_id]
+        if not ids:
+            return set()
+        placeholders = ",".join("?" * len(ids))
+        rows = self.db.query(
+            f"SELECT external_id FROM listings WHERE marketplace=? AND external_id IN ({placeholders})",
+            (marketplace, *ids),
+        )
+        return {str(row["external_id"]) for row in rows}
+
+    async def _scan_categories(
+        self, collector: BaseCollector, manual: bool = False
+    ) -> SearchOutcome:
+        marketplace = collector.marketplace
+        enabled = self.db.setting_bool(f"enabled_{marketplace}", marketplace != "facebook")
+        if not enabled:
+            self._set_status(marketplace, "paused", last_error=None)
+            return SearchOutcome(marketplace=marketplace, status="paused", error="Source paused in settings")
+
+        available, reason = collector.available
+        if not available:
+            lowered = (reason or "").lower()
+            state = "not_configured" if any(
+                word in lowered for word in ("developer", "api key", "credential", "configured")
+            ) else "unavailable"
+            self._set_status(marketplace, state, last_attempt_at=iso(), last_error=reason, next_scan=None)
+            return SearchOutcome(marketplace=marketplace, status=state, error=reason)
+
+        budget_default = 4 if marketplace == "ebay" else 12
+        budget_key = (
+            "ebay_category_requests_per_cycle" if marketplace == "ebay"
+            else "category_requests_per_cycle"
+        )
+        budget = max(1, min(30, self.db.setting_int(budget_key, budget_default)))
+        rows = self._due_category_rows(marketplace, manual, budget)
+        if not rows:
+            return SearchOutcome(
+                marketplace=marketplace,
+                status="ok",
+                detail={"categories": [], "reason": "no categories due"},
+            )
+
+        started = utcnow()
+        run_id = self.db.execute(
+            "INSERT INTO scan_runs(marketplace, started_at, status, queries) VALUES (?, ?, 'running', ?)",
+            (marketplace, iso(started), json_dumps([row["category_id"] for row in rows])),
+        ).lastrowid
+        self._set_status(marketplace, "scanning", last_attempt_at=iso(started), last_error=None)
+
+        backfill_cap = max(1, min(50, self.db.setting_int("category_backfill_pages", 10)))
+        incremental_pages = max(1, min(5, self.db.setting_int("category_incremental_pages", 2)))
+        overlap_stop = min(1.0, max(0.2, self.db.setting_float("category_overlap_stop", 0.75)))
+        collect_started = utcnow()
+        items: list[RawListing] = []
+        details: list[dict[str, Any]] = []
+        failures = 0
+        total_found = total_new = total_drops = 0
+        session_ids: set[str] = set()
+
+        for index, row in enumerate(rows):
+            if budget <= 0:
+                break
+            category = category_by_id(marketplace, row["category_id"])
+            if not category:
+                continue
+            backfill = not bool(row.get("backfill_done"))
+            remaining_categories = max(1, len(rows) - index)
+            fair_share = max(1, budget // remaining_categories)
+            page_number = max(1, int(row.get("next_page") or 1)) if backfill else 1
+            if backfill:
+                remaining_depth = max(1, backfill_cap - (page_number - 1))
+                pages_allowed = min(
+                    budget, fair_share if manual else remaining_depth
+                )
+            else:
+                pages_allowed = min(fair_share, budget, incremental_pages)
+            cat = {
+                "category_id": category.category_id,
+                "label": category.label,
+                "coverage": row.get("coverage") or category.coverage,
+                "mode": "backfill" if backfill else "incremental",
+                "pages": 0,
+                "items": 0,
+                "new": 0,
+                "known": 0,
+                "requests": 0,
+                "overlap": None,
+                "stop": None,
+                "error": None,
+            }
+            cat_started = utcnow()
+            last_page = None
+            for _ in range(pages_allowed):
+                if budget <= 0:
+                    break
+                budget -= 1
+                cat["requests"] += 1
+                try:
+                    page = await collector.category_page(category, page_number)
+                except Exception as exc:
+                    message = (
+                        exc.message if isinstance(exc, CollectorError)
+                        else f"{type(exc).__name__}: {exc}"
+                    )
+                    cat["error"] = message[:500]
+                    failures += 1
+                    break
+                last_page = page
+                page_ids = {item.external_id for item in page.items if item.external_id}
+                # Count repeats inside this same pass as well as rows already in
+                # the database, so the duplicate rate is not flattered when two
+                # overlapping categories return the same listing.
+                known = self._known_ids(marketplace, page.items) | (page_ids & session_ids)
+                session_ids |= page_ids
+                cat["known"] += len(known)
+                cat["items"] += len(page.items)
+                items.extend(page.items)
+                cat["pages"] += 1
+                if page.items:
+                    cat["overlap"] = round(len(known) / len(page.items), 3)
+                page_found, page_new, page_drops = self._ingest(page.items, marketplace)
+                total_found += page_found
+                total_new += page_new
+                total_drops += page_drops
+                cat["new"] += page_new
+                if not page.items:
+                    cat["stop"] = "empty"
+                    break
+                if not page.has_more:
+                    cat["stop"] = "end"
+                    break
+                if not backfill:
+                    at_stop = (cat["overlap"] or 0) >= overlap_stop
+                    if page_number == 1 and at_stop and page_new == 0:
+                        cat["stop"] = "overlap"
+                        break
+                    if page_number >= 2 and at_stop:
+                        cat["stop"] = "overlap"
+                        break
+                page_number += 1
+
+            if cat["stop"] is None and not cat["error"]:
+                cat["stop"] = "page_limit"
+            cat_duration = int((utcnow() - cat_started).total_seconds() * 1000)
+            backfill_done = bool(row.get("backfill_done"))
+            ended = bool(last_page is not None and not last_page.has_more)
+            next_page = 1
+            coverage = row.get("coverage") or category.coverage
+            if not backfill_done:
+                if ended:
+                    backfill_done = True
+                    # An end on the very last page we are allowed to request can
+                    # be a marketplace pagination cap rather than the true end
+                    # of the branch (Vinted stops at page 10). Only call it full
+                    # when pagination demonstrably finished inside the window.
+                    complete = (
+                        category.coverage == "full"
+                        and (page_number - 1) < backfill_cap
+                    )
+                    coverage = "full" if complete else "partial"
+                elif cat["pages"] and (page_number - 1) >= backfill_cap:
+                    # Bounded backfill: we reached the configured depth and
+                    # more pages exist, so coverage is honestly partial.
+                    backfill_done = True
+                    coverage = "partial"
+                else:
+                    next_page = max(1, page_number)
+                    coverage = "partial"
+            interval = 30 if not backfill_done else self._category_interval(cat["new"])
+            seen = cat["items"] or 0
+            new_rate = (cat["new"] / seen) if seen else 0.0
+            duplicate_rate = (cat["known"] / seen) if seen else 0.0
+            state = "error" if cat["error"] else "ok"
+            next_due = utcnow() + timedelta(seconds=3600 if cat["error"] else interval)
+            self.db.execute(
+                """
+                UPDATE category_scans SET
+                    state=?, coverage=?, mode=?, backfill_done=?, next_page=?,
+                    pages_scanned=pages_scanned+?, last_scan_at=?, last_success_at=?,
+                    last_error=?, last_items=?, last_new=?, last_duplicates=?,
+                    last_requests=?, last_duration_ms=?, new_rate=?, duplicate_rate=?,
+                    interval_seconds=?, next_due_at=?, updated_at=?
+                WHERE marketplace=? AND category_id=?
+                """,
+                (
+                    state, coverage, "backfill" if not backfill_done else "incremental",
+                    int(backfill_done), next_page, cat["pages"], iso(),
+                    iso() if cat["pages"] and not cat["error"] else row.get("last_success_at"),
+                    cat["error"], cat["items"], cat["new"], cat["known"], cat["requests"],
+                    cat_duration, round(new_rate, 4), round(duplicate_rate, 4), interval,
+                    iso(next_due), iso(), marketplace, category.category_id,
+                ),
+            )
+            cat["duration_ms"] = cat_duration
+            cat["next_interval"] = interval
+            cat["backfill_done"] = backfill_done
+            cat["coverage"] = coverage
+            details.append(cat)
+
+        # Secondary targeted keyword pass for miscategorised listings and
+        # comparables. It is deliberately small; category discovery does the
+        # breadth work.
+        supplement = max(0, min(6, self.db.setting_int("keyword_supplement_queries", 2)))
+        supplement_detail: dict[str, Any] | None = None
+        if supplement and budget > 0:
+            queries = self._queries_for_cycle(marketplace, count=min(supplement, budget))
+            s_new = 0
+            try:
+                extra = await collector.search(queries, max_pages=1)
+                if extra.items:
+                    s_found, s_new, s_drops = self._ingest(extra.items, marketplace)
+                    total_found += s_found
+                    total_new += s_new
+                    total_drops += s_drops
+                if extra.status not in {"ok", "degraded"}:
+                    failures += 1
+                supplement_detail = {
+                    "queries": queries,
+                    "status": extra.status,
+                    "items": len(extra.items),
+                    "new": s_new,
+                    "error": extra.error,
+                }
+            except Exception as exc:
+                failures += 1
+                supplement_detail = {
+                    "queries": queries,
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}"[:300],
+                }
+
+        elapsed = int((utcnow() - collect_started).total_seconds() * 1000)
+        if items or total_found:
+            status = "degraded" if failures else "ok"
+        else:
+            status = "failed" if failures else "ok"
+        first_error = next((d["error"] for d in details if d.get("error")), None)
+        if supplement_detail and supplement_detail.get("error"):
+            first_error = first_error or supplement_detail["error"]
+        outcome = SearchOutcome(
+            marketplace=marketplace,
+            status=status,
+            items=items,
+            queries_ok=sum(1 for d in details if not d.get("error")),
+            queries_failed=failures,
+            pages=sum(d["pages"] for d in details),
+            latency_ms=elapsed,
+            error=first_error,
+            detail={
+                "categories": details,
+                "budget": budget,
+                "discovery_mode": self._discovery_mode(marketplace),
+                "keyword_supplement": supplement_detail,
+            },
+        )
+        return await self._finalize(
+            collector,
+            outcome,
+            started=started,
+            run_id=run_id,
+            stage_ms={"collect": elapsed},
+            stats=(total_found, total_new, total_drops),
+        )
+
+    async def _scan_keywords(self, collector: BaseCollector, manual: bool = False) -> SearchOutcome:
         marketplace = collector.marketplace
         enabled = self.db.setting_bool(f"enabled_{marketplace}", marketplace != "facebook")
         if not enabled:
@@ -402,12 +781,41 @@ class Scanner:
                 error=f"{type(exc).__name__}: {exc}",
                 queries_failed=len(queries),
             )
+        return await self._finalize(
+            collector, outcome, started=started, run_id=run_id, stage_ms=stage_ms
+        )
+
+    async def _finalize(
+        self,
+        collector: BaseCollector,
+        outcome: SearchOutcome,
+        *,
+        started,
+        run_id: int,
+        stage_ms: dict[str, int] | None = None,
+        extra_detail: dict[str, Any] | None = None,
+        stats: tuple[int, int, int] | None = None,
+    ) -> SearchOutcome:
+        """Ingest, value and record one completed collection pass.
+
+        ``stats`` is supplied when the caller already ingested page by page
+        (category discovery needs per-category counts).
+        """
+        marketplace = collector.marketplace
+        stage_ms = dict(stage_ms or {})
         collected_at = utcnow()
-        stage_ms["collect"] = int((collected_at - started).total_seconds() * 1000)
+        stage_ms.setdefault("collect", int((collected_at - started).total_seconds() * 1000))
 
         found = new = drops = 0
         duplicates = 0
-        if outcome.items:
+        if stats is not None:
+            found, new, drops = stats
+            if found or outcome.items:
+                self._data_version += 1
+                duplicate_started = utcnow()
+                duplicates = self._mark_duplicates()
+                stage_ms["duplicates"] = int((utcnow() - duplicate_started).total_seconds() * 1000)
+        elif outcome.items:
             ingest_started = utcnow()
             found, new, drops = self._ingest(outcome.items, marketplace)
             self._data_version += 1
@@ -461,6 +869,7 @@ class Scanner:
 
         detail = {
             **(outcome.detail or {}),
+            **(extra_detail or {}),
             "stage_ms": stage_ms,
             "collector_ms": stage_ms.get("collect", 0),
             "core_ms": core_ms,
@@ -533,7 +942,9 @@ class Scanner:
                     break
         return marked
 
-    def _ingest(self, items: list[RawListing], marketplace: str) -> tuple[int, int, int]:
+    def _ingest(
+        self, items: list[RawListing], marketplace: str, category_id: str | None = None
+    ) -> tuple[int, int, int]:
         now = iso()
         seen: set[str] = set()
         found = new = drops = 0
@@ -593,7 +1004,9 @@ class Scanner:
                     condition = "very_good"
                 elif "good" in raw_condition:
                     condition = "good"
+            listing_id: int | None = None
             if existing:
+                listing_id = int(existing["id"])
                 old_price = float(existing["price"])
                 price_dropped = item.price < old_price - 0.01
                 self.db.execute(
@@ -653,9 +1066,23 @@ class Scanner:
                         raw_json, flags_json, attrs_json, now, now,
                     ),
                 )
+                listing_id = int(cursor.lastrowid)
                 self.db.execute(
                     "INSERT INTO price_history(listing_id, price, observed_at) VALUES (?, ?, ?)",
-                    (cursor.lastrowid, item.price, now),
+                    (listing_id, item.price, now),
+                )
+            resolved_category = item.category_id or category_id
+            if listing_id and resolved_category:
+                self.db.execute(
+                    """
+                    INSERT INTO listing_categories(
+                        listing_id, marketplace, category_id, first_seen_at, last_seen_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(listing_id, category_id) DO UPDATE SET
+                        marketplace=excluded.marketplace,
+                        last_seen_at=excluded.last_seen_at
+                    """,
+                    (listing_id, marketplace, resolved_category, now, now),
                 )
         return found, new, drops
 
@@ -785,6 +1212,92 @@ class Scanner:
         params.append(marketplace)
         self.db.execute(f"UPDATE marketplace_status SET {', '.join(fields)} WHERE marketplace=?", params)
 
+    def category_discovery_snapshot(self) -> dict[str, Any]:
+        """Category coverage, scan cadence and the last page-level yield."""
+        for marketplace in self.collectors:
+            if getattr(self.collectors[marketplace], "supports_categories", False):
+                self._seed_categories(marketplace)
+        rows = self.db.query(
+            "SELECT * FROM category_scans ORDER BY marketplace, label"
+        )
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            marketplace = str(row["marketplace"])
+            collector = self.collectors.get(marketplace)
+            supported = bool(collector and getattr(collector, "supports_categories", False))
+            verified = bool(collector and getattr(collector, "category_discovery_verified", False))
+            grouped.setdefault(marketplace, []).append(
+                {
+                    "category_id": row["category_id"],
+                    "label": row["label"],
+                    "coverage": row.get("coverage") or "full",
+                    "state": row.get("state") or "idle",
+                    "mode": row.get("mode") or "incremental",
+                    "supported": supported,
+                    "verified": verified,
+                    "backfill_done": bool(row.get("backfill_done")),
+                    "pages_scanned": int(row.get("pages_scanned") or 0),
+                    "last_scan_at": row.get("last_scan_at"),
+                    "last_success_at": row.get("last_success_at"),
+                    "last_error": row.get("last_error"),
+                    "items": int(row.get("last_items") or 0),
+                    "new": int(row.get("last_new") or 0),
+                    "duplicates": int(row.get("last_duplicates") or 0),
+                    "duplicate_rate": float(row.get("duplicate_rate") or 0),
+                    "new_rate": float(row.get("new_rate") or 0),
+                    "requests": int(row.get("last_requests") or 0),
+                    "interval_seconds": int(row.get("interval_seconds") or 300),
+                    "next_due_at": row.get("next_due_at"),
+                    "scan_url": category_url(marketplace, row["category_id"]),
+                }
+            )
+
+        marketplaces: list[dict[str, Any]] = []
+        for marketplace, categories in grouped.items():
+            collector = self.collectors.get(marketplace)
+            supported = bool(collector and getattr(collector, "supports_categories", False))
+            verified = bool(collector and getattr(collector, "category_discovery_verified", False))
+            full = [c for c in categories if c["coverage"] == "full"]
+            partial = [c for c in categories if c["coverage"] != "full"]
+            scanned = [c for c in categories if c["last_success_at"]]
+            due = [
+                c for c in categories
+                if c["next_due_at"] and (parse_iso(c["next_due_at"]) or utcnow()) <= utcnow()
+            ]
+            marketplaces.append(
+                {
+                    "marketplace": marketplace,
+                    "label": MARKETPLACE_LABELS.get(marketplace, marketplace.title()),
+                    "supported": supported,
+                    "verified": verified,
+                    "mode": self._discovery_mode(marketplace),
+                    "enabled": self.db.setting_bool(f"enabled_{marketplace}", marketplace != "facebook"),
+                    "categories": categories,
+                    "total_categories": len(categories),
+                    "full_categories": len(full),
+                    "partial_categories": len(partial),
+                    "scanned_categories": len(scanned),
+                    "due_categories": len(due),
+                    "requests_last_cycle": sum(c["requests"] for c in categories),
+                    "new_last_cycle": sum(c["new"] for c in categories),
+                    "coverage_note": (
+                        "Keyword-free category browsing was verified against the live marketplace."
+                        if supported and verified else
+                        (
+                            "Category browsing is implemented but has not been exercised live; "
+                            "add working API keys and run a scan to verify it."
+                            if supported else
+                            "Category browsing is not available for this source."
+                        )
+                    ),
+                }
+            )
+        return {
+            "marketplaces": marketplaces,
+            "generated_at": iso(),
+            "discovery_mode": str(self.db.get_settings().get("discovery_mode", "category")),
+        }
+
     def health_snapshot(self) -> dict[str, Any]:
         rows = self.db.query("SELECT * FROM marketplace_status")
         statuses = {row["marketplace"]: row for row in rows}
@@ -810,7 +1323,7 @@ class Scanner:
                     "listings_seen": row.get("listings_seen", 0),
                     "last_duration_ms": row.get("last_duration_ms"),
                     "backoff_seconds": getattr(collector, "backoff_seconds", 0),
-                    "interval_seconds": self.db.setting_int(f"scan_interval_{marketplace}", 300),
+                    "interval_seconds": self._cycle_interval(marketplace),
                     "api_usage": usage_snapshot(self.db, marketplace),
                 }
             )
@@ -819,6 +1332,7 @@ class Scanner:
             "sources": sources,
             "cex": self.cex.health(),
             "coverage": self.coverage_snapshot(),
+            "discovery": self.category_discovery_snapshot(),
             "last_refresh_at": self._last_refresh_at,
             "last_refresh": self._last_refresh_result,
         }

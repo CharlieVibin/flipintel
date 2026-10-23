@@ -261,6 +261,7 @@ export interface HealthResponse {
     sources: SourceStatus[];
     cex: { enabled: boolean; status: string; error: string | null };
     coverage?: Coverage;
+    discovery?: Discovery;
     last_refresh_at: string | null;
     last_refresh: { evaluated: number; deals: number; review?: number; observed?: number } | null;
   };
@@ -307,6 +308,54 @@ export interface Overview {
   thresholds: Thresholds;
 }
 
+export interface DiscoveryCategory {
+  category_id: string;
+  label: string;
+  coverage: "full" | "partial";
+  state: string;
+  mode: "backfill" | "incremental";
+  supported: boolean;
+  verified: boolean;
+  backfill_done: boolean;
+  pages_scanned: number;
+  last_scan_at: string | null;
+  last_success_at: string | null;
+  last_error: string | null;
+  items: number;
+  new: number;
+  duplicates: number;
+  duplicate_rate: number;
+  new_rate: number;
+  requests: number;
+  interval_seconds: number;
+  next_due_at: string | null;
+  scan_url: string | null;
+}
+
+export interface DiscoveryMarketplace {
+  marketplace: Marketplace;
+  label: string;
+  supported: boolean;
+  verified: boolean;
+  mode: string;
+  enabled: boolean;
+  categories: DiscoveryCategory[];
+  total_categories: number;
+  full_categories: number;
+  partial_categories: number;
+  scanned_categories: number;
+  due_categories: number;
+  requests_last_cycle: number;
+  new_last_cycle: number;
+  coverage_note: string;
+}
+
+export interface Discovery {
+  marketplaces: DiscoveryMarketplace[];
+  generated_at: string;
+  discovery_mode: string;
+}
+
 export interface ScanRun {
   id: number;
   marketplace: string;
@@ -323,6 +372,24 @@ export interface ScanRun {
   detail: {
     errors?: string[];
     query_timings?: { query: string; status: string; items: number; pages: number; ms: number; error?: string }[];
+    categories?: {
+      category_id: string;
+      label: string;
+      coverage: string;
+      mode: string;
+      pages: number;
+      items: number;
+      new: number;
+      known: number;
+      requests: number;
+      overlap: number | null;
+      stop: string | null;
+      error: string | null;
+      duration_ms?: number;
+      next_interval?: number;
+      backfill_done?: boolean;
+    }[];
+    keyword_supplement?: { queries: string[]; status: string; items: number; new: number; error: string | null } | null;
     stage_ms?: Record<string, number>;
     collector_ms?: number;
     core_ms?: number;

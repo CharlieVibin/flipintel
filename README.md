@@ -12,6 +12,13 @@ clear a profit, ROI and confidence floor.
 
 ## What works
 
+- **Category-first discovery.** The scanner browses 34 electronics category
+  targets directly — 10 Vinted branches, 6 Gumtree branches and 18 eBay
+  branches — with no search phrase required. Categories are scanned newest-first
+  and tracked independently, with resumable backfills, adaptive 3–20 minute
+  intervals, overlap stopping and a safety page. The 89-keyword phrase list is
+  still used for two secondary searches per cycle to catch miscategorised items
+  and valuation comparables, but it no longer limits what gets discovered.
 - **Live collection** from Vinted UK and Gumtree UK with per-host rate limits,
   robots.txt checks, retries, circuit breakers and honest failure states.
 - **Optional eBay UK** collection through the free official Browse API. Add
@@ -29,6 +36,13 @@ clear a profit, ROI and confidence floor.
   trims outliers, caps confidence honestly and supports complete-PC component
   fallback. Asking-only confidence is capped at 52% (56% with a CeX anchor), and
   a single user-entered sale never becomes independent confirmation.
+- **Incremental revaluation.** Each listing has a fingerprint of the fields that
+  affect its valuation, and each product key has a signature of its comparable
+  pool and sold evidence. A scan re-evaluates only new or changed listings and
+  the keys whose market actually moved, which takes seconds instead of
+  recomputing ~21k listings. A full reconciliation still runs every six hours
+  and after any valuation-logic change, so aged evidence and recency decay are
+  not ignored.
 - **Evidence lab with bulk sold-price import**. Download a CSV template, upload
   completed sales with validation and a preview, and review imported, updated,
   skipped and rejected rows with reasons. Re-importing the same sale updates it
@@ -102,9 +116,9 @@ then restart FlipIntel. Until keys are present, the dashboard shows
 
 | Source | Status | Notes |
 | --- | --- | --- |
-| Vinted UK | Working | Public catalogue HTML; 96 cards per query. |
-| Gumtree UK | Working | Authoritative JSON-LD listings (title, price, description, condition, image, canonical URL), with a strict card fallback. |
-| eBay UK | Requires free API keys | Official Browse API only. |
+| Vinted UK | Working | Category browse verified on all 10 branches; 96 cards per page, newest first, marketplace caps pagination at page 10. |
+| Gumtree UK | Working | Category browse verified on all 6 branches; 30 cards per page, newest first. Authoritative JSON-LD on search pages and per-card anchors on category pages. |
+| eBay UK | Requires free API keys | Official Browse API only. Category search sends `category_ids` without a keyword, 200 items/page, 4 requests/cycle; not exercised live without keys. |
 | Facebook Marketplace | Not available | Requires a signed-in session and prohibits automated collection; no listings are fabricated. |
 | CeX UK | Often blocked | Used only as an optional price anchor. Cloudflare returned HTTP 403 in testing; valuations continue from live comparables. |
 
@@ -157,7 +171,8 @@ app/
   valuation.py       comparable engine, ranges, fees, scoring and deal gate
   calibration.py     category calibration, holdout validation and status
   evidence.py        CSV evidence validation, import/export and coverage
-  scanner.py         scheduling, ingestion, dedupe, enrichment, health
+  categories.py      verified keyword-free category catalogue per marketplace
+  scanner.py         scheduling, backfills, ingestion, dedupe, health
   pricing_cex.py     optional CeX anchor
   notifications.py   Discord/browser notification dispatch
   api.py             JSON API
@@ -180,7 +195,9 @@ name is FlipIntel.
 .venv\Scripts\python.exe -m pytest -q
 ```
 
-The suite currently has **55 passing tests**. It covers CSV preview/import/
+The suite currently has **69 passing tests**. It covers category catalogue and
+parser regressions, resumable backfill depth, overlap stopping, coverage
+diagnostics, eBay keyword-free category requests, CSV preview/import/
 export, row and byte limits, optional fields, duplicate suppression, invalid
 records, idempotent updates, formula-safe export, evidence API permissions and
 corrections, calibration with sufficient and insufficient evidence, holdout
@@ -217,6 +234,15 @@ Interactive docs: <http://127.0.0.1:8765/docs>
 
 ## Known limitations
 
+- **Vinted exposes only 10 pages per category branch.** Large branches are
+  continuously covered at the newest edge, but are not exhaustively crawled;
+  the Scanner page marks capped branches `partial` and small completed branches
+  `full`. **eBay category browsing is implemented from the documented Browse API
+  contract but has not been exercised live here** because no developer keys are
+  configured; the dashboard labels it `unverified`. No eBay HTML is scraped.
+- Category pages deliberately favour recall, so they include accessories, media
+  and occasional off-category items. Identification, risk and deal gates still
+  filter those; category discovery does not bypass them.
 - No free, reliable automated UK sold-price feed is available. The engine now
   supports bulk and one-off sold evidence and only calibrates when the database
   contains enough matched sales, but the current local database has no saved

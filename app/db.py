@@ -247,6 +247,58 @@ CREATE TABLE IF NOT EXISTS review_decisions (
 );
 CREATE INDEX IF NOT EXISTS idx_review_decisions ON review_decisions(decision, decided_at DESC);
 
+CREATE TABLE IF NOT EXISTS category_scans (
+    marketplace TEXT NOT NULL,
+    category_id TEXT NOT NULL,
+    label TEXT NOT NULL,
+    path TEXT NOT NULL DEFAULT '',
+    coverage TEXT NOT NULL DEFAULT 'full',
+    state TEXT NOT NULL DEFAULT 'idle',
+    mode TEXT NOT NULL DEFAULT 'incremental',
+    backfill_done INTEGER NOT NULL DEFAULT 0,
+    next_page INTEGER NOT NULL DEFAULT 1,
+    pages_scanned INTEGER NOT NULL DEFAULT 0,
+    last_scan_at TEXT,
+    last_success_at TEXT,
+    last_error TEXT,
+    last_items INTEGER NOT NULL DEFAULT 0,
+    last_new INTEGER NOT NULL DEFAULT 0,
+    last_duplicates INTEGER NOT NULL DEFAULT 0,
+    last_requests INTEGER NOT NULL DEFAULT 0,
+    last_duration_ms INTEGER,
+    new_rate REAL NOT NULL DEFAULT 0,
+    duplicate_rate REAL NOT NULL DEFAULT 0,
+    interval_seconds INTEGER NOT NULL DEFAULT 300,
+    next_due_at TEXT,
+    updated_at TEXT,
+    PRIMARY KEY (marketplace, category_id)
+);
+CREATE INDEX IF NOT EXISTS idx_category_scans_due ON category_scans(marketplace, next_due_at);
+
+CREATE TABLE IF NOT EXISTS listing_categories (
+    listing_id INTEGER NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+    marketplace TEXT NOT NULL,
+    category_id TEXT NOT NULL,
+    first_seen_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    PRIMARY KEY (listing_id, category_id)
+);
+CREATE INDEX IF NOT EXISTS idx_listing_categories ON listing_categories(marketplace, category_id);
+
+CREATE TABLE IF NOT EXISTS valuation_keys (
+    product_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (product_key, kind)
+);
+
+CREATE TABLE IF NOT EXISTS valuation_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS comp_cache (
     product_key TEXT NOT NULL,
     marketplace TEXT NOT NULL,
@@ -406,6 +458,13 @@ class Database:
         if raw is None:
             return default
         return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+    def setting_float(self, key: str, default: float = 0.0) -> float:
+        raw = self.get_settings().get(key)
+        try:
+            return float(raw) if raw is not None else default
+        except (TypeError, ValueError):
+            return default
 
     def close(self) -> None:
         with self._lock:

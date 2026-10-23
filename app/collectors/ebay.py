@@ -22,7 +22,7 @@ from ..config import settings
 from ..credentials import credential_store
 from ..usage import record_api_usage
 from ..utils import iso, parse_money
-from .base import BaseCollector, CollectorError, RawListing, SearchOutcome, run_queries
+from .base import BaseCollector, CategoryPage, CollectorError, RawListing, SearchOutcome, run_queries
 
 MARKETPLACE_ID = "EBAY_GB"
 
@@ -65,6 +65,17 @@ class EbayCollector(BaseCollector):
     base_url = "https://www.ebay.co.uk"
     min_interval = 1.0
     supports_shipping = True
+    supports_categories = True
+    # Browse category search is implemented from eBay's documented contract,
+    # but this workspace has no eBay keys, so it is not marked verified.
+    category_discovery_verified = False
+    BROWSE_FILTER = ",".join([
+        "buyingOptions:{FIXED_PRICE}",
+        "itemLocationCountry:GB",
+        "deliveryCountry:GB",
+        "priceCurrency:GBP",
+        "price:[5..25000]",
+    ])
 
     def __init__(self, db, client=None) -> None:
         super().__init__(db, client)
@@ -200,10 +211,86 @@ class EbayCollector(BaseCollector):
             "note": "Connection test only; results were not inserted into the deal feed.",
         }
 
-    async def search_query(self, query: str, max_pages: int = 1) -> tuple[list[RawListing], int, int | None]:
+    async def _browse_request(
+        self, params: dict[str, Any], query_label: str
+    ) -> tuple[list[RawListing], int, int]:
         if time.monotonic() < self._quota_pause_until:
             raise CollectorError(self._quota_reason or "eBay quota pause", "rate_limited")
         token = await self._access_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-EBAY-C-MARKETPLACE-ID": MARKETPLACE_ID,
+            "Accept": "application/json",
+        }
+        started = time.monotonic()
+        try:
+            await self._throttle()
+            response = await self.client.get(
+                f"{self.api_base}/buy/browse/v1/item_summary/search",
+                params=params,
+                headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            record_api_usage(
+                self.db, self.marketplace,
+                error=f"Browse network error: {type(exc).__name__}",
+            )
+            raise CollectorError(f"eBay API network error: {type(exc).__name__}", "network")
+        self._last_request_at = iso()
+        remaining = _int_header(response, "X-RateLimit-Remaining", "RateLimit-Remaining")
+        quota_limit = _int_header(response, "X-RateLimit-Limit", "RateLimit-Limit")
+        reset_at = _reset_header(response)
+        record_api_usage(
+            self.db, self.marketplace,
+            status=response.status_code,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            error=None if response.status_code < 400 else f"HTTP {response.status_code}",
+            quota_remaining=remaining,
+            quota_limit=quota_limit,
+            quota_reset_at=reset_at,
+        )
+        if remaining is not None and remaining <= 5:
+            self._quota_pause_until = time.monotonic() + (15 * 60 if remaining <= 0 else 5 * 60)
+            self._quota_reason = (
+                "eBay API quota is exhausted; the source will retry automatically."
+                if remaining <= 0
+                else f"eBay API quota is low ({remaining} calls remaining); pausing briefly."
+            )
+        if response.status_code == 401:
+            self._token = None
+            raise CollectorError("eBay API rejected the access token", "auth", 401)
+        if response.status_code == 429:
+            retry_after = _reset_header(response)
+            self._quota_pause_until = time.monotonic() + 5 * 60
+            self._quota_reason = (
+                f"eBay API rate limit reached (HTTP 429). Retrying after {retry_after or 'a short pause'}."
+            )
+            raise CollectorError("eBay API rate limit reached (HTTP 429)", "rate_limited", 429)
+        if response.status_code >= 400:
+            detail = ""
+            try:
+                detail = response.json().get("errors", [{}])[0].get("message", "")
+            except Exception:
+                pass
+            raise CollectorError(
+                f"eBay API error (HTTP {response.status_code})"
+                f"{': ' + detail if detail else ''}",
+                "http",
+                response.status_code,
+            )
+        try:
+            data = response.json()
+        except ValueError:
+            raise CollectorError("eBay API returned a non-JSON response", "parse", response.status_code)
+        summaries = data.get("itemSummaries") or []
+        items = [
+            parsed for parsed in (
+                self._parse_item(raw, query_label) for raw in summaries
+            ) if parsed
+        ]
+        return items, len(summaries), response.status_code
+
+    async def search_query(self, query: str, max_pages: int = 1) -> tuple[list[RawListing], int, int | None]:
         items: list[RawListing] = []
         pages = 0
         last_status: int | None = None
@@ -212,94 +299,51 @@ class EbayCollector(BaseCollector):
             offset = page * limit
             if offset >= 200:
                 break
-            params = {
-                "q": query,
+            page_items, count, last_status = await self._browse_request(
+                {
+                    "q": query,
+                    "limit": limit,
+                    "offset": offset,
+                    "sort": "newlyListed",
+                    "filter": self.BROWSE_FILTER,
+                },
+                query,
+            )
+            items.extend(page_items)
+            pages += 1
+            if count < limit:
+                break
+        return items, pages, last_status
+
+    async def category_page(self, category, page: int = 1) -> CategoryPage:
+        """Keyword-free eBay Browse search for one non-top-level category.
+
+        eBay requires a keyword for top-level categories, so the catalogue uses
+        documented leaf/branch IDs. Browse allows one category ID per request.
+        """
+        limit = 200
+        offset = max(0, page - 1) * limit
+        if offset >= 10_000:
+            return CategoryPage(page=page, has_more=False)
+        items, count, status = await self._browse_request(
+            {
+                "category_ids": str(category.category_id),
                 "limit": limit,
                 "offset": offset,
                 "sort": "newlyListed",
-                "filter": ",".join([
-                    "buyingOptions:{FIXED_PRICE}",
-                    "itemLocationCountry:GB",
-                    "deliveryCountry:GB",
-                    "priceCurrency:GBP",
-                    "price:[5..25000]",
-                ]),
-            }
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "X-EBAY-C-MARKETPLACE-ID": MARKETPLACE_ID,
-                "Accept": "application/json",
-            }
-            started = time.monotonic()
-            try:
-                await self._throttle()
-                response = await self.client.get(
-                    f"{self.api_base}/buy/browse/v1/item_summary/search",
-                    params=params,
-                    headers=headers,
-                )
-            except httpx.HTTPError as exc:
-                record_api_usage(
-                    self.db, self.marketplace,
-                    error=f"Browse network error: {type(exc).__name__}",
-                )
-                raise CollectorError(f"eBay API network error: {type(exc).__name__}", "network")
-            last_status = response.status_code
-            self._last_request_at = iso()
-            remaining = _int_header(response, "X-RateLimit-Remaining", "RateLimit-Remaining")
-            quota_limit = _int_header(response, "X-RateLimit-Limit", "RateLimit-Limit")
-            reset_at = _reset_header(response)
-            record_api_usage(
-                self.db, self.marketplace,
-                status=response.status_code,
-                latency_ms=int((time.monotonic() - started) * 1000),
-                error=None if response.status_code < 400 else f"HTTP {response.status_code}",
-                quota_remaining=remaining,
-                quota_limit=quota_limit,
-                quota_reset_at=reset_at,
-            )
-            if remaining is not None and remaining <= 5:
-                self._quota_pause_until = time.monotonic() + (15 * 60 if remaining <= 0 else 5 * 60)
-                self._quota_reason = (
-                    "eBay API quota is exhausted; the source will retry automatically."
-                    if remaining <= 0
-                    else f"eBay API quota is low ({remaining} calls remaining); pausing briefly."
-                )
-            if response.status_code == 401:
-                self._token = None
-                raise CollectorError("eBay API rejected the access token", "auth", 401)
-            if response.status_code == 429:
-                retry_after = _reset_header(response)
-                self._quota_pause_until = time.monotonic() + 5 * 60
-                self._quota_reason = (
-                    f"eBay API rate limit reached (HTTP 429). Retrying after {retry_after or 'a short pause'}."
-                )
-                raise CollectorError("eBay API rate limit reached (HTTP 429)", "rate_limited", 429)
-            if response.status_code >= 400:
-                detail = ""
-                try:
-                    detail = response.json().get("errors", [{}])[0].get("message", "")
-                except Exception:
-                    pass
-                raise CollectorError(
-                    f"eBay API error (HTTP {response.status_code})"
-                    f"{': ' + detail if detail else ''}",
-                    "http",
-                    response.status_code,
-                )
-            try:
-                data = response.json()
-            except ValueError:
-                raise CollectorError("eBay API returned a non-JSON response", "parse", response.status_code)
-            summaries = data.get("itemSummaries") or []
-            for raw in summaries:
-                parsed = self._parse_item(raw, query)
-                if parsed:
-                    items.append(parsed)
-            pages += 1
-            if len(summaries) < limit:
-                break
-        return items, pages, last_status
+                "filter": self.BROWSE_FILTER,
+            },
+            f"category:{category.category_id}",
+        )
+        for item in items:
+            item.category_id = str(category.category_id)
+            item.raw = {**item.raw, "category_id": str(category.category_id)}
+        return CategoryPage(
+            items=items,
+            page=page,
+            has_more=count >= limit,
+            http_status=status,
+        )
 
     def _parse_item(self, raw: dict[str, Any], query: str) -> RawListing | None:
         title = (raw.get("title") or "").strip()

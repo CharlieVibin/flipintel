@@ -76,6 +76,7 @@ export function ScannersPage({ health, refreshTick, onToast, onRefresh }: Props)
 
   const sources = health?.scanner.sources ?? [];
   const coverage = health?.scanner.coverage;
+  const discovery = health?.scanner.discovery;
   const scansToday = scans.filter((scan) => scan.started_at.slice(0, 10) === new Date().toISOString().slice(0, 10)).length;
 
   return (
@@ -180,7 +181,7 @@ export function ScannersPage({ health, refreshTick, onToast, onRefresh }: Props)
               </p>
             </div>
             <span className="chip border-ink-600 bg-ink-800 text-mist-400">
-              {coverage.covered_categories}/{coverage.categories.length} covered · {coverage.queries_per_cycle} queries/cycle
+              {coverage.covered_categories}/{coverage.categories.length} covered · {coverage.queries_per_cycle} supplement searches/cycle
             </span>
           </div>
           <div className="grid gap-px bg-ink-700/60 sm:grid-cols-2 lg:grid-cols-4">
@@ -209,10 +210,187 @@ export function ScannersPage({ health, refreshTick, onToast, onRefresh }: Props)
             <span>{coverage.active_total.toLocaleString()} active listings across measured categories</span>
             <span>{coverage.thin_categories} thin</span>
             <span>{coverage.empty_categories} empty</span>
-            <span>{coverage.query_categories} discovery categories configured</span>
+            <span>{coverage.query_categories} category browse targets configured</span>
           </div>
         </div>
       )}
+
+      {discovery && (
+        <div className="panel mt-5 overflow-hidden">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-ink-700 px-5 py-4">
+            <div>
+              <h2 className="text-sm font-semibold text-mist-100">Category discovery</h2>
+              <p className="mt-0.5 max-w-2xl text-[11px] text-mist-500">
+                Keyword-free browse endpoints. Full means the whole marketplace branch is scanned; partial means only
+                part of the branch is covered or deep backfill is capped. Intervals adapt to the number of new listings
+                each category returns.
+              </p>
+            </div>
+            <span className="chip border-ink-600 bg-ink-800 text-mist-400">
+              {discovery.discovery_mode} mode ·{" "}
+              {discovery.marketplaces.reduce((sum, item) => sum + item.full_categories, 0)} full ·{" "}
+              {discovery.marketplaces.reduce((sum, item) => sum + item.partial_categories, 0)} partial
+            </span>
+          </div>
+          <div className="divide-y divide-ink-700/60">
+            {discovery.marketplaces.map((market) => (
+              <div key={market.marketplace} className="px-5 py-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[12px] font-semibold text-mist-100">{market.label}</span>
+                    <span className={cn(
+                      "chip text-[9px]",
+                      market.supported && market.mode !== "keyword"
+                        ? "border-lime-400/25 bg-lime-400/10 text-lime-300"
+                        : "border-ink-600 bg-ink-800 text-mist-500",
+                    )}>
+                      {market.supported
+                        ? `${market.mode} discovery${market.verified ? "" : " · unverified"}`
+                        : "unsupported"}
+                    </span>
+                    {!market.enabled && (
+                      <span className="chip border-ink-600 bg-ink-800 text-[9px] text-mist-500">paused</span>
+                    )}
+                  </div>
+                  <div className="numeric flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-mist-500">
+                    <span>{market.full_categories} full / {market.partial_categories} partial</span>
+                    <span>{market.scanned_categories}/{market.total_categories} scanned</span>
+                    <span>{market.due_categories} due</span>
+                    <span>{market.requests_last_cycle} req · +{market.new_last_cycle} new / cycle</span>
+                  </div>
+                </div>
+                {market.supported ? (
+                  <div className="mt-3 overflow-x-auto">
+                    <table className="w-full min-w-[760px] text-left text-[11px]">
+                      <thead className="border-b border-ink-700/70 text-[9px] uppercase tracking-wider text-mist-500">
+                        <tr>
+                          <th className="py-2 pr-3 font-medium">Category</th>
+                          <th className="px-2 py-2 font-medium">Coverage</th>
+                          <th className="px-2 py-2 font-medium">State</th>
+                          <th className="px-2 py-2 font-medium">Last success</th>
+                          <th className="px-2 py-2 text-right font-medium">Interval</th>
+                          <th className="px-2 py-2 text-right font-medium">Pages</th>
+                          <th className="px-2 py-2 text-right font-medium">New</th>
+                          <th className="px-2 py-2 text-right font-medium">Dup.</th>
+                          <th className="px-2 py-2 font-medium">Next</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-ink-700/40">
+                        {market.categories.map((category) => (
+                          <tr key={category.category_id}>
+                            <td className="max-w-[280px] truncate py-2 pr-3 text-mist-200" title={category.label}>
+                              {category.scan_url ? (
+                                <a href={category.scan_url} target="_blank" rel="noopener noreferrer" className="hover:text-sky-300 hover:underline">
+                                  {category.label}
+                                </a>
+                              ) : category.label}
+                            </td>
+                            <td className="px-2 py-2">
+                              <span className={cn(
+                                "chip text-[9px]",
+                                category.coverage === "full"
+                                  ? "border-lime-400/20 bg-lime-400/[0.06] text-lime-300"
+                                  : "border-ember/20 bg-ember/[0.06] text-ember",
+                              )}>
+                                {category.coverage}
+                              </span>
+                            </td>
+                            <td className="px-2 py-2">
+                              <span className={cn(
+                                "text-[10px]",
+                                category.state === "ok" ? "text-lime-300/90" : category.state === "error" ? "text-rose" : "text-mist-500",
+                              )}>
+                                {category.state}
+                              </span>
+                            </td>
+                            <td className="px-2 py-2 text-mist-400">
+                              {category.last_success_at ? timeAgo(category.last_success_at) : "Never"}
+                            </td>
+                            <td className="numeric px-2 py-2 text-right text-mist-400">
+                              {Math.round(category.interval_seconds / 60)}m
+                            </td>
+                            <td className="numeric px-2 py-2 text-right text-mist-400">{category.pages_scanned}</td>
+                            <td className="numeric px-2 py-2 text-right text-lime-300/90">{category.new}</td>
+                            <td className="numeric px-2 py-2 text-right text-mist-400">
+                              {Math.round(category.duplicate_rate * 100)}%
+                            </td>
+                            <td className="px-2 py-2 text-mist-500">
+                              {category.next_due_at ? nextScanLabel(category.next_due_at) : "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="mt-2 text-[10px] leading-relaxed text-mist-500">{market.coverage_note}</p>
+                )}
+                {market.categories.some((category) => category.last_error) && (
+                  <p className="mt-2 text-[10px] leading-relaxed text-ember">
+                    {market.categories.filter((category) => category.last_error).length} category error(s) — see the
+                    source cards above for the latest message.
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {scans[0]?.detail?.categories?.length ? (
+        <div className="panel mt-5 overflow-hidden">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-ink-700 px-5 py-4">
+            <div>
+              <h2 className="text-sm font-semibold text-mist-100">Latest category pass</h2>
+              <p className="mt-0.5 text-[11px] text-mist-500">
+                {marketplaceMeta(scans[0].marketplace).label} · budget consumed page by page · overlap stop at the
+                configured duplicate threshold.
+              </p>
+            </div>
+            <span className="chip border-ink-600 bg-ink-800 text-mist-400">
+              {scans[0].detail.categories.length} categories · {formatDuration(scans[0].duration_ms)}
+            </span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[720px] text-left text-[11px]">
+              <thead className="border-b border-ink-700/70 text-[9px] uppercase tracking-wider text-mist-500">
+                <tr>
+                  <th className="px-5 py-2 font-medium">Category</th>
+                  <th className="px-2 py-2 font-medium">Mode</th>
+                  <th className="px-2 py-2 text-right font-medium">Pages</th>
+                  <th className="px-2 py-2 text-right font-medium">Rows</th>
+                  <th className="px-2 py-2 text-right font-medium">New</th>
+                  <th className="px-2 py-2 text-right font-medium">Known</th>
+                  <th className="px-2 py-2 text-right font-medium">Overlap</th>
+                  <th className="px-5 py-2 font-medium">Stopped because</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-ink-700/40">
+                {scans[0].detail.categories.map((category) => (
+                  <tr key={category.category_id}>
+                    <td className="px-5 py-2 text-mist-200">{category.label}</td>
+                    <td className="px-2 py-2 text-mist-500">{category.mode}</td>
+                    <td className="numeric px-2 py-2 text-right text-mist-300">{category.pages}</td>
+                    <td className="numeric px-2 py-2 text-right text-mist-300">{category.items}</td>
+                    <td className="numeric px-2 py-2 text-right text-lime-300/90">{category.new}</td>
+                    <td className="numeric px-2 py-2 text-right text-mist-400">{category.known}</td>
+                    <td className="numeric px-2 py-2 text-right text-mist-400">
+                      {category.overlap == null ? "—" : `${Math.round(category.overlap * 100)}%`}
+                    </td>
+                    <td className="px-5 py-2 text-mist-500">
+                      {category.error ? (
+                        <span className="text-rose" title={category.error}>{category.error}</span>
+                      ) : (
+                        category.stop ?? "—"
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ) : null}
 
       {scans[0]?.detail?.query_timings?.length ? (
         <div className="panel mt-5 overflow-hidden">

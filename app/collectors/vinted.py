@@ -13,7 +13,7 @@ from urllib.parse import quote_plus
 from bs4 import BeautifulSoup
 
 from ..utils import normalise_text, parse_money
-from .base import BaseCollector, CollectorError, RawListing, SearchOutcome, run_queries
+from .base import BaseCollector, CategoryPage, CollectorError, RawListing, SearchOutcome, run_queries
 
 _ITEM_ID_RE = re.compile(r"^product-item-id-(\d+)$")
 
@@ -24,6 +24,8 @@ class VintedCollector(BaseCollector):
     base_url = "https://www.vinted.co.uk"
     min_interval = 1.4
     supports_shipping = True
+    supports_categories = True
+    category_discovery_verified = True
 
     def __init__(self, db, client=None) -> None:
         super().__init__(db, client)
@@ -55,6 +57,32 @@ class VintedCollector(BaseCollector):
                     http_status=exc.status,
                 )
         return await run_queries(self, queries, max_pages)
+
+    async def category_page(self, category, page: int = 1) -> CategoryPage:
+        """Keyword-free catalogue page, newest first."""
+        response = await self._request(
+            f"{self.base_url}{category.path}",
+            params={
+                "page": max(1, page),
+                "order": "newest_first",
+                "currency": "GBP",
+            },
+        )
+        items = self.parse_search(response.text, f"category:{category.category_id}")
+        if not items and not self._is_empty_page(response.text):
+            raise CollectorError(
+                f"Vinted category {category.category_id} loaded but product cards could not be parsed",
+                "parse",
+            )
+        for item in items:
+            item.category_id = category.category_id
+            item.raw = {**item.raw, "category_id": category.category_id}
+        return CategoryPage(
+            items=items,
+            page=max(1, page),
+            has_more=len(items) >= 40,
+            http_status=response.status_code,
+        )
 
     async def search_query(self, query: str, max_pages: int = 1) -> tuple[list[RawListing], int, int | None]:
         items: list[RawListing] = []

@@ -22,7 +22,7 @@ from urllib.parse import quote_plus
 from bs4 import BeautifulSoup
 
 from ..utils import normalise_text, parse_money, token_set
-from .base import BaseCollector, CollectorError, RawListing, SearchOutcome, run_queries
+from .base import BaseCollector, CategoryPage, CollectorError, RawListing, SearchOutcome, run_queries
 
 _SLUG_ID_RE = re.compile(r"/(\d{6,})(?:[/?#]|$)")
 
@@ -40,6 +40,8 @@ class GumtreeCollector(BaseCollector):
     base_url = "https://www.gumtree.com"
     min_interval = 1.8
     supports_shipping = False
+    supports_categories = True
+    category_discovery_verified = True
 
     async def search(self, queries: list[str], max_pages: int = 1) -> SearchOutcome:
         return await run_queries(self, queries, max_pages)
@@ -51,6 +53,99 @@ class GumtreeCollector(BaseCollector):
         if not items and not self._is_empty_page(response.text):
             raise CollectorError("Gumtree page loaded but listing data could not be parsed", "parse")
         return items, 1, response.status_code
+
+    async def category_page(self, category, page: int = 1) -> CategoryPage:
+        """Keyword-free category browse, newest first.
+
+        Gumtree accepts ``?sort=newest`` on the category landing page and exposes
+        further pages under ``/uk/pageN``.
+        """
+        page = max(1, page)
+        url = f"{self.base_url}{category.path}"
+        if page > 1:
+            url += f"/uk/page{page}"
+        response = await self._request(url, params={"sort": "newest"})
+        items = self.parse_category(response.text, category.category_id)
+        if not items and not self._is_empty_page(response.text):
+            raise CollectorError(
+                f"Gumtree category {category.category_id} loaded but listings could not be parsed",
+                "parse",
+            )
+        return CategoryPage(
+            items=items,
+            page=page,
+            has_more=len(items) >= 20,
+            http_status=response.status_code,
+        )
+
+    def parse_category(self, html: str, category_id: str = "") -> list[RawListing]:
+        """Parse category cards from their own anchors.
+
+        Unlike a search page there is no SearchResultsPage JSON-LD here, so each
+        card is paired with the link inside that same card. This avoids the
+        positional promoted-card bug entirely.
+        """
+        soup = BeautifulSoup(html, "lxml")
+        results: list[RawListing] = []
+        seen: set[str] = set()
+        # On category pages the anchor is a sibling overlay inside
+        # rh-standard-card-listing, not a descendant of the article, so scope
+        # each lookup to that container.
+        containers = soup.select('div[data-testid="rh-standard-card-listing"]')
+        if containers:
+            cards = [
+                (container, container.select_one('article[data-testid="rh-standard-card"]') or container)
+                for container in containers
+            ]
+        else:
+            cards = [
+                (card, card) for card in soup.select('article[data-testid="rh-standard-card"]')
+            ]
+        for index, (container, card) in enumerate(cards):
+            link = container.select_one('a[href*="/p/"]') or card.select_one('a[href*="/p/"]')
+            if not link:
+                continue
+            href = str(link.get("href") or "")
+            match = _SLUG_ID_RE.search(href)
+            if not match or match.group(1) in seen:
+                continue
+            title_el = card.select_one('[data-testid="rh-standard-card-title"]')
+            price_el = card.select_one('[data-testid="rh-standard-card-price-amount"]')
+            title = normalise_text(title_el.get_text(" ", strip=True)) if title_el else ""
+            price = parse_money(price_el.get_text(" ", strip=True)) if price_el else None
+            if not title or price is None or price < 1:
+                continue
+            description_el = card.select_one('[data-testid="rh-standard-card-description"]')
+            location = card.select_one('[data-testid="rh-standard-card-info"]')
+            img_el = card.select_one("figure img")
+            seen.add(match.group(1))
+            results.append(
+                RawListing(
+                    marketplace=self.marketplace,
+                    external_id=match.group(1),
+                    url=f"{self.base_url}{href.split('?')[0]}",
+                    title=title,
+                    price=price,
+                    shipping=0.0,
+                    image_url=img_el.get("src") if img_el else None,
+                    description=(
+                        normalise_text(description_el.get_text(" ", strip=True))
+                        if description_el else ""
+                    )[:4000],
+                    condition_raw="",
+                    location=normalise_text(location.get_text(" ", strip=True)) if location else "",
+                    seller="",
+                    posted_at=None,
+                    search_query=f"category:{category_id}",
+                    category_id=category_id,
+                    raw={
+                        "source": "category_card",
+                        "category_id": category_id,
+                        "position": index + 1,
+                    },
+                )
+            )
+        return results
 
     @staticmethod
     def _is_empty_page(html: str) -> bool:

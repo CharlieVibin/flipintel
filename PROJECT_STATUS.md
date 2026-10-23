@@ -5,6 +5,119 @@
 **Runtime:** Python 3.10, FastAPI, SQLite, React 18 + Vite + Tailwind
 **Live dashboard:** http://127.0.0.1:8765 (while the local server is running)
 
+## Session 2026-10-23 — category-first incremental discovery
+
+Keyword searches are now the secondary discovery path. The primary path is a
+verified category catalogue with resumable backfills and newest-first
+incremental scans.
+
+### What changed
+
+- [x] **New category catalogue** in `app/categories.py`: 34 browse targets
+      (10 Vinted, 6 Gumtree, 18 eBay). Category IDs come from Vinted's public
+      catalogue sitemap and live Gumtree navigation; eBay entries use documented
+      branch/leaf IDs. Gumtree's `cds-dvds-games-books` branch was dropped because
+      it is media, not hardware.
+- [x] **Keyword-free collectors.** Vinted uses `/catalog/<id>-<slug>` with
+      `order=newest_first` (96 cards/page). Gumtree uses `/for-sale/<slug>` with
+      `sort=newest` (30 cards/page). eBay Browse sends `category_ids` with no `q`,
+      `sort=newlyListed`, limit 200 and one category per request.
+- [x] **Live verification of every Vinted and Gumtree category target.** All 10
+      Vinted branches returned 96 cards and all 6 Gumtree branches returned
+      29–30 cards on page 1 (HTTP 200). Vinted stops serving pages after page 10;
+      that cap is treated as partial coverage, not as the end of the branch.
+- [x] **Incremental state per marketplace/category** (`category_scans`,
+      `listing_categories`): mode, backfill cursor, depth, interval, due time,
+      last items/new/duplicates/requests/duration/error and coverage.
+- [x] **Separate backfill phase.** One unfinished category runs per cycle to the
+      configured depth (10 pages), then normal incrementals resume. Backfills are
+      resumable and a capped pass is marked `partial`; a branch that genuinely
+      ends inside the depth window is marked `full`.
+- [x] **Newest-first incremental scans** use one page across due categories and
+      stop after a safety page when the overlap threshold (75%) is reached.
+      Page 1 stops immediately only when it contains no new listings at all, so
+      delayed/reordered results cannot hide a second fresh page.
+- [x] **Dedupe inside a pass and across categories.** Known IDs from SQLite plus
+      IDs already seen in the same pass feed the overlap rate; the database's
+      marketplace/external-id constraint prevents duplicate rows.
+- [x] **Adaptive intervals** of 3–20 minutes based on new-listing yield, with
+      priority categories first. Inactive categories back off to 20 minutes;
+      high-yield categories stay at 3 minutes. A 12-request cycle budget and a
+      cycle scheduler prevent stampedes.
+- [x] **eBay quota guard.** eBay is capped at 4 Browse requests per cycle
+      (Vinted/Gumtree: 12). Existing quota headers, 429 handling and low-quota
+      pausing still apply.
+- [x] **Keyword searches retained as a secondary mechanism.** Two rotating
+      phrase searches per cycle cover miscategorised listings and gather
+      valuation comparables. They no longer decide what the scanner sees.
+- [x] **Diagnostics** in Scanner health: per-marketplace verification badge,
+      full/partial coverage counts, due categories, per-category mode, pages,
+      interval, new, duplicate rate, last success, next due, last error and a
+      direct browse link. The latest pass shows overlap, stop reason and rows.
+
+### Measured coverage gain
+
+- The catalogue gained **11,657 category-discovered listings**; 11,654 of them
+  remain active. Total active listings rose to **32,849**.
+- **80.5%** of those category-discovered titles contain none of the 89
+  configured keyword phrases verbatim (for example projectors, smart TVs and
+  older GPUs). Keyword search may still surface some of them through relevance,
+  but the phrase list is demonstrably not a complete discovery mechanism.
+- All selected Vinted/Gumtree branches produced stock on the first live request.
+  No empty or unsupported branch was added to the catalogue.
+
+### Benchmark: keyword vs category on matched live snapshots
+
+Method: copy the live database, issue exactly 6 newest-first requests, ingest
+the results into the copy, and compare. Keyword runs use six broad phrases;
+category runs use page 1 of six branches. Repeat rate includes rows already in
+the database plus repeats inside the same result set.
+
+| Source | Method | Requests | Rows | New | New/request | Req/new | Repeat rate | Time | Categories |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Vinted | keyword | 6 | 576 | 129 | 21.5 | 0.047 | 77.6% | 9.9 s | 0 |
+| Vinted | category | 6 | 576 | 130 | 21.7 | 0.046 | 77.4% | 8.4 s | 6 |
+| Gumtree | keyword | 6 | 184 | 51 | 8.5 | 0.118 | 72.3% | 10.2 s | 0 |
+| Gumtree | category | 6 | 179 | 28 | 4.7 | 0.214 | 84.4% | 10.2 s | 6 |
+
+Initial live backfill throughput was much higher because it reached pages the
+keyword scanner had never covered:
+
+| Source | Requests | Rows | New | New/request | Duration |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Vinted (2 branches × 4 pages) | 8 | 768 | 726 | 90.8 | 13.4 s |
+| Gumtree (2 branches × 4 pages) | 8 | 240 | 142 | 17.8 | 21.4 s |
+
+Interpretation: in a mature, category-scanned database the two methods have
+similar page-1 yield on Vinted; Gumtree's broad keyword searches still beat six
+category page-1s for raw new rows. The category win is breadth and title
+independence, not an automatic multiplier on every request. Keyword searches
+remain useful as a secondary comparator/miscategorisation path, which is why
+both are kept. The 11.6k category finds and 80.5% phrase-miss rate are the
+measured coverage improvement.
+
+### Verification and limitations
+
+- Regression suite: **69 passed, 0 failed**; frontend `tsc -b && vite build`
+  passes. New tests cover category URL/card parsing, bounded backfill depth,
+  one-category backfill scheduling, page-1 overlap stop, partial coverage,
+  eBay `category_ids` without `q`, and category diagnostics.
+- **eBay category discovery is implemented but not verified live** because this
+  workspace has no eBay developer keys. The dashboard labels it `unverified`
+  rather than pretending it works. No eBay Browse calls were made; quota
+  consumption is therefore zero in this pass.
+- **Vinted exposes at most 10 pages per branch**, so large branches are
+  continuously covered at the newest edge but are not exhaustively crawled. The
+  UI marks these `partial` unless a branch genuinely ended inside the window.
+- **Gumtree** has no page cap observed in this pass; backfills stop at the
+  configured 10-page depth and are marked partial when more pages exist.
+- Category pages contain accessories, media and occasional off-category items
+  (for example phone cases in the phones branch). Identity/risk rules and the
+  deal gate still filter them; category discovery deliberately favours recall.
+- **No API quota was consumed** by Vinted/Gumtree (HTML, not API) and eBay was
+  unconfigured. The eBay per-cycle cap is 4 requests to stay inside a free
+daily quota once keys are added.
+
 ## Session 2026-10-23 — reliability pass
 
 This pass fixed several real data-integrity and false-positive causes observed
@@ -64,6 +177,20 @@ delete listings or reset the database.
       deals. Approval, correction and undo trigger revaluation immediately.
 - [x] **Gumtree descriptions and conditions are now stored.** This improves
       contents/fault/accessory detection compared with title-only parsing.
+- [x] **Valuation is now incremental.** Each listing carries a fingerprint of
+      the fields evaluation reads, and each product key carries a signature of
+      its comparable pool (listing counts and price sums by condition, market
+      observations, sold evidence, CeX quotes and the GPU dependency used by
+      low-comp complete PCs). A refresh re-evaluates only new/changed listings
+      and keys whose evidence moved. Stale deal rows are cleared after the pass,
+      not before, so the feed never empties. A full pass still runs on first
+      start, after any evaluation-logic change (`VALUATION_REVISION`) and every
+      six hours, which also absorbs time-decay and aged-out evidence.
+- [x] **Risk scoring uses the full comparable distribution.** It previously
+      measured price position against the twelve-row display slice, so a verdict
+      could flip depending on which marketplace was refreshed last. It now uses
+      the complete condition-adjusted pool carried by the estimate, falling back
+      to the display rows only when no pool values exist.
 
 ### Regression coverage added
 
@@ -79,6 +206,11 @@ delete listings or reset the database.
 - Deep-discount review at percentile zero, and review approval promotion without
   a confidence increase.
 - Asking-pool low-outlier trimming.
+- Incremental refresh: a no-op pass evaluates nothing, a price change only
+  re-evaluates its own product key, new sold evidence re-evaluates the affected
+  key, and the six-hour reconciliation forces a full pass.
+- Risk scoring against the full comparable distribution rather than the
+  twelve-row display slice.
 
 ## Previously completed and still working
 
@@ -94,10 +226,10 @@ delete listings or reset the database.
 - [x] API usage accounting: daily request/error counters, last request/success,
       provider quota headers when present, quota state `unknown` when absent,
       low/exhausted pausing and clear authentication/rate-limit messages.
-- [x] Category-rotating discovery across GPUs, CPUs, RAM, SSDs/HDDs, complete
-      PCs, laptops, consoles/handhelds/retro, motherboards, monitors, phones,
-      tablets and networking. Vinted paginates up to 96 cards/query; Gumtree and
-      eBay return their structured first page per query.
+- [x] Category-first discovery with a secondary rotating phrase search across
+      GPUs, CPUs, RAM, SSDs/HDDs, complete PCs, laptops, consoles/handhelds/retro,
+      motherboards, monitors, phones, tablets and networking. Vinted category
+      pages return up to 96 cards; Gumtree 30; eBay Browse up to 200 per request.
 - [x] Stage-level scan telemetry and per-query timings, parsed rows, new versus
       duplicate counts, errors, last success/duration and next scan.
 - [x] Generation/configuration-aware identification for GPUs (VRAM), CPUs,
@@ -119,24 +251,24 @@ delete listings or reset the database.
 
 | Metric | Value |
 | --- | --- |
-| Active listings in local DB | 20,535 |
-| Qualifying deals | 3 |
-| Manual review queue (pending) | 1,469 |
-| Probable cross-market duplicates | 29 |
-| Tracked product keys | 1,529 |
+| Active listings in local DB | 32,849 |
+| Qualifying deals | 1 |
+| Manual review queue (pending) | 1,855 |
+| Probable cross-market duplicates | 39 |
+| Tracked product keys | 1,631 |
+| Category-discovered listings | 11,657 |
 | Completed-sale evidence rows | 0 |
 | Sources healthy | Vinted, Gumtree |
 | eBay | `not_configured` — free developer keys not set |
 | CeX | HTTP 403 from this network; surfaced honestly |
 | Facebook | Unavailable; requires authenticated session |
-| Tests | 55 passed, 0 failed |
+| Tests | 69 passed, 0 failed |
 | Frontend build | Passing |
 
-The three current deals are all PS5 listings supported by live asking prices.
-Every one is capped at 52% confidence and labelled "Asking only". The two £200
-listings are around 30% below the modelled resale; the £180 console-only listing
-has received the 12% contents discount. The remaining deep discounts are in the
-review queue rather than being presented as top-ranked profit.
+The two current deals are £200 PlayStation 5 consoles supported by live asking
+prices, around 30% below the modelled resale. Both are capped at 52% confidence
+and labelled "Asking only". The remaining deep discounts are in the review queue
+rather than being presented as top-ranked profit.
 
 ## Valuation evidence status
 
@@ -169,14 +301,19 @@ review. Manual CSV remains optional and is not required for scanning or valuatio
 
 | Source | Items | Total | Collect | Ingest | Valuation | Duplicates |
 | --- | --- | --- | --- | --- | --- | --- |
-| Vinted | 1,094 | 39.4 s | 19.0 s | 0.9 s | 17.4 s | 0.005 s |
-| Gumtree | 291 | 52.6 s | 21.9 s | 1.2 s | 28.8 s | 0.005 s |
+| Vinted | 1,144 | 22.6 s | 18.9 s | 0.5 s | 2.6 s | 0.005 s |
+| Gumtree | 304 | 25.4 s | 22.2 s | 0.2 s | 1.6 s | 0.005 s |
 
 Collection is paced at roughly 1.4–1.8 seconds per query across 12 queries; that
 is deliberate rate-limit protection, not an application bottleneck. Valuation is
-a full recomputation of ~20k active listings and serialises across the two
-sources; a second scan can wait for the first refresh. This is the main remaining
-performance cost and is a candidate for incremental refresh.
+now incremental: only changed listings and product keys whose comparable pool,
+sold evidence or CeX anchor moved are recomputed (1.6–2.6 s in these cycles).
+The six-hour full reconciliation takes about 25 s for ~21k listings and runs in
+the same serialised refresh slot. Measured on a copy of the live database:
+first/full pass **25.3 s** for 20,811 deal rows, a no-op pass **0.7 s**, and a
+single price change **0.7 s** (four listings in one key). After a live scan the
+incrementally maintained 20,968 deal rows matched a fresh full recomputation
+exactly (0 differences).
 
 ## Known limitations
 
@@ -197,8 +334,11 @@ performance cost and is a candidate for incremental refresh.
 6. **Vinted descriptions are not exposed** in catalogue cards, so condition and
    contents detection there relies on titles and card condition. Gumtree now
    supplies descriptions.
-7. **Valuation refresh is a full pass**, so concurrent source scans can make the
-   later scan wait 15–30 seconds. It is correct but not yet incremental.
+7. **Valuation refresh is incremental with a six-hour full reconciliation.**
+   A scan re-evaluates only changed listings and affected product keys, so the
+   usual cost is 1–3 seconds. The full pass (~25 s) still runs on first start,
+   after evaluation-logic changes and every six hours to absorb recency decay;
+   the first pass after an upgrade is therefore slower.
 8. **Duplicate detection is conservative** and only flags different-marketplace
    rows with matching product keys, similar titles and prices within 2.5%.
 9. **Rule-based identification can still miss unusual titles.** New review cases
@@ -213,27 +353,24 @@ cd frontend
 npm run build
 ```
 
-Last verified: **55 passed, 0 failed**; frontend `tsc -b && vite build` passes.
+Last verified: **69 passed, 0 failed**; frontend `tsc -b && vite build` passes.
 
 ## Exact next tasks (in order)
 
-1. **Incremental valuation.** Recompute only new/changed listings and the product
-   keys whose comparable pools changed, with a periodic full reconciliation. This
-   removes the 15–30 second serial refresh from each source scan.
-2. **Import or collect genuine sold evidence** for the current deal categories
+1. **Import or collect genuine sold evidence** for the current deal categories
    (PS5, ROG Ally, RTX 5070 Ti, MacBook Air M2) so calibration can be assessed on
    real data. Bulk CSV remains optional; eBay Marketplace Insights cannot be used
    without approved access.
-3. **Exercise eBay Browse API end to end** with real UK developer keys: token →
+2. **Exercise eBay Browse API end to end** with real UK developer keys: token →
    search → parser → scan history → deal feed. Verify GBP/UK filters, shipping,
    images, usage counters and duplicate prevention.
-4. **Reduce review-queue noise.** Group variant-unclear phones by model so the
+3. **Reduce review-queue noise.** Group variant-unclear phones by model so the
    user can see whether a missing storage figure affects many listings, and add
    bulk review actions if the queue stays large.
-5. **Add more live-fixture regressions** from future review cases: multi-item
+4. **Add more live-fixture regressions** from future review cases: multi-item
    console bundles, "console only" wording variants, compact Intel CPU names and
    ambiguous MacBook years.
-6. **Consider a PostgreSQL adapter** only if multi-user hosting becomes a
+5. **Consider a PostgreSQL adapter** only if multi-user hosting becomes a
    requirement; keep SQLite for the local product.
 
 ## Git / handoff

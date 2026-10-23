@@ -45,6 +45,7 @@ class RawListing:
     is_auction: bool = False
     posted_at: str | None = None
     search_query: str = ""
+    category_id: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -64,6 +65,15 @@ class SearchOutcome:
     @property
     def ok(self) -> bool:
         return self.status in {"ok", "degraded"}
+
+
+@dataclass
+class CategoryPage:
+    items: list[RawListing] = field(default_factory=list)
+    page: int = 1
+    has_more: bool = False
+    http_status: int | None = None
+    total: int | None = None
 
 
 class RobotsGate:
@@ -113,6 +123,10 @@ class BaseCollector:
     base_url = ""
     min_interval = 1.2
     supports_shipping = False
+    supports_categories = False
+    # True only where keyword-free category browsing has been exercised
+    # against the live marketplace in this project.
+    category_discovery_verified = False
 
     def __init__(self, db, client: httpx.AsyncClient | None = None) -> None:
         self.db = db
@@ -229,6 +243,12 @@ class BaseCollector:
 
     async def search(self, queries: list[str], max_pages: int = 1) -> SearchOutcome:
         raise NotImplementedError
+
+    async def category_page(self, category: Any, page: int = 1) -> CategoryPage:
+        """Fetch one keyword-free browse page for a marketplace category."""
+        raise NotImplementedError(
+            f"{self.marketplace} does not support category browsing"
+        )
 
     def _parse_price(self, text: str | None) -> float | None:
         from ..utils import parse_money
