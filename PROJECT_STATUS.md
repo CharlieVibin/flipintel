@@ -955,9 +955,11 @@ Last verified: **141 passed, 0 failed**; frontend `tsc -b && vite build` passes.
 
 Remote: <https://github.com/CharlieVibin/flipintel> (public, default branch
 `main`). The local `main` branch is the working FlipIntel implementation and was
-pushed as the repository's first commit on 2026-10-23 (`22d2ea2`), so no remote
-history was overwritten. `main` tracks `origin/main`; local and remote trees
-match.
+pushed as the repository's first commit on 2026-10-23 (`22d2ea2`). The Phase 5
+work was pushed as `3d9e41b` (used-market evidence and the 240-listing
+benchmark) and `bca0fa1` (form-factor rejection, mini-PC identity and
+evidence-gated auction alerts). `main` tracks `origin/main`; local and remote
+trees match.
 
 Earlier notes referenced `bboyrican20/flipintel`; that was the wrong remote and
 is no longer configured. No force-push is needed or recommended.
