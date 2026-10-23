@@ -604,6 +604,12 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
                       {breakdown?.sold_count ? `${breakdown.sold_count} sold` : "Asking prices only"}
                     </span>
                   </div>
+                  {(breakdown?.comps ?? []).some((comp) => comp.evidence === "cex") && (
+                    <p className="mb-2 text-[10px] leading-relaxed text-mist-500">
+                      CeX is a shop retail and trade-in reference, not a completed private sale. Its retail price is
+                      converted to private-resale level before it contributes to the estimate.
+                    </p>
+                  )}
                   <div className="space-y-1.5">
                     {(breakdown?.comps ?? []).slice(0, 8).map((comp, index) => (
                       <a
@@ -617,7 +623,7 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
                           <p className="truncate text-[12px] text-mist-200">{comp.title}</p>
                           <p className="mt-0.5 text-[10px] text-mist-500">
                             {comp.marketplace} · {conditionLabel(comp.condition)} ·{" "}
-                            {comp.is_sold ? "completed sale" : "live ask"} · {timeAgo(comp.observed_at)}
+                            {comp.evidence === "cex" ? "CeX retail reference" : comp.is_sold ? "completed sale" : "live ask"} · {timeAgo(comp.observed_at)}
                           </p>
                         </div>
                         <div className="shrink-0 text-right">
@@ -789,7 +795,8 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
                   <div className="panel-soft p-3.5">
                     <p className="eyebrow mb-1.5">Model match</p>
                     <p className="text-sm text-mist-200">
-                      {Math.round(deal.identification_confidence * 100)}% identification confidence
+                      {deal.identity_level ?? "insufficient"} identification · score{" "}
+                      {Math.round(deal.identification_confidence * 100)}/100
                     </p>
                     <p className="mt-1 text-[11px] text-mist-500">{deal.product_key ?? "Model not resolved"}</p>
                     {deal.attrs && Object.keys(deal.attrs).length > 0 && (

@@ -14,7 +14,13 @@
     "2477": {"expected_valued": false, "reason": "CPU plus motherboard combo is a component bundle"},
     "26493": {"expected_valued": true, "reason": "Lenovo ThinkPad R61 is a complete laptop model"},
     "66596": {"expected_valued": false, "reason": "Laptop motherboard is a replacement part"},
-    "17938": {"expected_valued": false, "reason": "PC and monitor is a multi-item lot"},
-    "65901": {"expected_valued": false, "reason": "Mixed RAM bundle of five modules"}
+    "17938": {"expected_valued": false, "reason": "PC and monitor is a multi-item lot"},    "65901": {
+      "expected_valued": false,
+      "reason": "Mixed RAM bundle of five modules"
+    },
+    "17736": {
+      "expected_valued": true,
+      "reason": "Complete gaming PC; the oracle misread 'Stream/ game' as an accessory"
+    }
   }
 }

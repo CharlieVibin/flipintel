@@ -1378,6 +1378,8 @@ class Scanner:
             FROM listings l JOIN deals d ON d.listing_id = l.id
             WHERE l.status='active' AND l.is_auction=1 AND l.auction_end_at IS NOT NULL
               AND l.auction_end_at >= ? AND l.auction_end_at <= ?
+              AND d.is_deal = 1 AND d.needs_review = 0
+              AND d.evidence_level IN ('limited', 'moderate', 'strong')
               AND d.max_bid IS NOT NULL AND l.price <= d.max_bid
             ORDER BY d.rank_score DESC, l.auction_end_at ASC
             LIMIT 60

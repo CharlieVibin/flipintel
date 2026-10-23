@@ -1023,6 +1023,28 @@ def _cpu(text: str) -> tuple[str, str, dict[str, Any]] | None:
         key = f"cpu:intel:core-i{tier}-{number}" + (f"-{suffix}" if suffix else "")
         name = f"Intel Core i{tier}-{number}" + (suffix.upper() if suffix else "")
         return key, name, {"brand": "Intel", "tier": tier, "model": number, "suffix": suffix or None}
+    # Budget desktop and mini-PC chips. Without these, "Stone NT310-H Pentium
+    # 3550M 8GB RAM 128GB SSD" was filed as the 128GB SSD it contains and
+    # valued at £221 against storage comparables.
+    match = re.search(
+        r"\b(pentium|celeron)\s+(?:gold\s+|silver\s+)?([a-z]?\d{3,5}[a-z]{0,2})\b",
+        text,
+    )
+    if match:
+        family, number = match.group(1).lower(), match.group(2).lower()
+        return (
+            f"cpu:intel:{family}-{number}",
+            f"Intel {family.title()} {number.upper()}",
+            {"brand": "Intel", "tier": family, "model": number},
+        )
+    match = re.search(r"\bathlon\s+(?:silver\s+|gold\s+)?(\d{3,4}[a-z]{0,2})\b", text)
+    if match:
+        number = match.group(1).lower()
+        return (
+            f"cpu:amd:athlon-{number}",
+            f"AMD Athlon {number.upper()}",
+            {"brand": "AMD", "tier": "athlon", "model": number},
+        )
     return None
 
 
@@ -2310,11 +2332,13 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         r"aio\s+cooler)\b",
         title_clean, re.I,
     ))
-    # "4x 8GB DDR4" is four modules, not one. The capacity in the key is the
-    # module size, so the lot must not be valued as a single stick.
+    # "64GB (2x32) DDR5" is two modules, and the parsed key omits that layout,
+    # so it cannot be valued as one 64GB stick. When the layout *is* in the key
+    # ("2x16GB" parses to ram:...:2x16), the kit is an exact product of its own
+    # and is not a bundle.
     if re.search(
-        r"\b(?:[2-9]\d*\s*x\s*\d{1,3}(?:\s*gb)?|kit\s+of\s+[2-9]|"
-        r"[2-9]\s*(?:sticks?|modules?))\b",
+        r"\b(?:[2-9]\d*\s*x\s*\d{1,3})(?!\s*gb)\b|kit\s+of\s+[2-9]|"
+        r"[2-9]\s*(?:sticks?|modules?)\b",
         title_clean,
         re.I,
     ) and re.search(r"\b(?:ram|memory|ddr[345]|dimm|sodimm)\b", title_clean, re.I):

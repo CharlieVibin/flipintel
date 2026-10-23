@@ -5,6 +5,118 @@
 **Runtime:** Python 3.10, FastAPI, SQLite, React 18 + Vite + Tailwind
 **Live dashboard:** http://127.0.0.1:8765 (while the local server is running)
 
+## Session 2026-10-23 — Resale evidence, auction profitability and a 240-listing benchmark
+
+This phase tested whether the resale numbers are real instead of assuming a
+formula change made them better. The database, collectors and history were kept.
+All estimates below were re-measured after a full 73,150-listing reconciliation.
+
+### Asking-price valuation now strips retail, duplicates and one-market dominance
+
+- New-condition asks are kept out of the used-market basis. They are used only
+  as a retail ceiling, and only when at least three exist (92% of their median).
+  Sealed stock no longer makes a used item look more valuable.
+- Byte-identical offers are collapsed across accounts, each marketplace is
+  capped at 55% of total pool weight, and one seller is capped within its pool.
+  eBay's volume can no longer define the whole market.
+- Established eBay sellers (95%+ feedback with real history) carry weight 2 and
+  smaller sellers weight 1. CeX carries weight 2 as a separate reference and is
+  never counted as a sold comparable. CeX retail, cash and voucher values stay
+  separate in `external_quotes` / `cex_price_history`; retail is converted to
+  private-resale level from the product's own observed asks (clamped 0.40–0.95).
+- The three resale strategies are explicit: quick, balanced (default) and
+  maximum-profit ask. A tested/serviced premium is measured from this product's
+  own market (minimum 3 listings per side, capped 15%) and applied only to the
+  maximum ask; it is never an assumed percentage.
+- The supported range now comes from the same conditioned distribution as the
+  central estimate, so a low bound can no longer exceed the estimate.
+- Product-price memory snapshots the market estimate before listing-specific
+  contents discounts or learned flip adjustments. Those belong to one deal and
+  must not make the next listing of the same product cheaper.
+- A form-factor guard was added to comparable validation. Bare "desktop" and
+  "SFF" describe a component, not a complete computer; only a real system
+  family or configuration is rejected. This raised accepted comparables from
+  147,490 public rows to the same cap with 3,209 rejections instead of 9,046.
+  Remaining rejections: 2,087 faulty/parts/packaging, 1,098 capacity or variant
+  mismatch, 20 complete systems, 4 portable devices.
+- Identity fixes that were changing valuations: DDR modules sold as "desktop
+  memory" are components, 2x16GB kits are exact products while an unparsed
+  "64GB (2x32)" lot is a bundle, a Dell Pro Max 16 with 64GB RAM is a laptop,
+  and Pentium/Celeron/Athlon mini-PCs are machines rather than the SSD inside
+  them. The last case previously valued a whole Stone NT310-H at £221 as a
+  128GB SSD.
+
+### The four previously questionable estimates, re-audited
+
+| Product | Before | Now | Live reference | Verdict |
+| --- | ---: | ---: | --- | --- |
+| RTX 4060 8GB | £327.53 | £267.48 (range 255.00–272.96, moderate, 8 comps) | CeX retail £300, cash £207, voucher £237; private asks £190–380 | Realistic. Between CeX cash and retail, below most private asks. |
+| RTX 4070 12GB | £589.32 | £441.99 (range 411.03–570.46, limited, 7 comps) | CeX retail £590, cash £407, voucher £466; private asks £425–568 | Realistic. The old figure equalled CeX retail; a private used sale should not. |
+| Xbox Series S | £255.00 | £214.29 (range 193.13–248.38, moderate, 107 comps) | CeX retail £420, cash £239, voucher £289; asks £239–364 | Slightly conservative versus CeX cash but defensible for a private sale. |
+| PS5 Pro 2TB | £829.34 | £624.49 (range 546.43–676.10, moderate, 13 comps) | CeX retail £790, cash/voucher £624; asks £550–955 | Realistic. The old figure was above CeX retail, which was the warning sign. |
+
+Every one of these is still **asking-only**: there are zero completed sales in
+the database. The numbers are now defensible used-market estimates, not verified
+resale proceeds.
+
+### Auction selection now requires a profitable, evidenced deal
+
+- Discovery results are re-fetched by ID before scanning more (`get_items`, one
+  request, at most 20 items). Ended auctions become stale and cannot alert.
+- Auction alerts and the urgent recheck shortlist now require `is_deal=1`,
+  `needs_review=0` and evidence of at least Limited. A budget-too-low bid is no
+  longer treated as an opportunity merely because its current bid is far below
+  the stored estimate.
+- Live measurement with the same 3-request category budget: 23–25 auctions inside
+  30 minutes, 10 distinct products, 6 with fresh price memory. Only 1 was below
+  its profitable ceiling, and it had 2 comparables / Insufficient evidence — so
+  **0 alert-worthy auctions at that moment**, not 37. With 5 requests: 41
+  auctions, 19 products, 12 valued, 2 below ceiling, both Insufficient (1 and 2
+  comps) — again 0. More discovered auctions did not mean more profit.
+- The Discord label "Net profit at ceiling" was wrong (it showed profit at the
+  current bid); it now says current bid. Evidence is shown as Limited / Moderate
+  / Strong, never as a confidence percentage that could be read as a probability.
+
+### A 240-listing identity benchmark replaces the 27-example sample
+
+- `scripts/benchmark_listings.py` samples 240 real active listings with a fixed
+  seed across marketplace × kind × price band. An independent coarse rule oracle
+  labels only unambiguous cases; 127 of 240 stayed **unverified** and were
+  excluded from accuracy denominators. Manual overrides record every reviewed
+  oracle error, not model output as truth.
+- Results: kind accuracy 99/106 (93.4%); valued-decision precision 89/89 (100%);
+  recall 89/106 (84.0%); 0 false positives and 17 false negatives on verified
+  rows. The one remaining FP candidate was a complete gaming PC that the oracle
+  misread because its title said "Stream/ game".
+- Systematic weaknesses it exposed: spec-less laptop titles (Dell Inspiron 15,
+  ThinkPad R61, HP Stream 14) get no key; legacy DDR2/SO-DIMM part numbers and
+  Raspberry Pi RAM are unsupported; component bundles and unusual models are
+  conservatively left unvalued. These are recall gaps, not fake deals.
+
+### Permanent price memory
+
+- Snapshots now refresh when older than the reuse window even if no listing
+  field changed, preserving every historical row. Current database: 5,420
+  snapshots, 367 invalidated rows retained for audit, 1,579 product keys with
+  more than one historical snapshot and 24,590 market observations.
+- `tests/test_price_memory.py` proves an expired snapshot is re-timestamped
+  without losing history, and that a listing's missing-contents discount never
+  enters the shared product memory. `tests/test_valuation_integrity.py` covers
+  deduplication, seller/market caps, new-stock ceilings and range consistency.
+- The drawer now labels each comparable as asking, completed sale or CeX retail
+  reference. It already showed sources, dates, conditions, rejected comparables
+  with reasons, strategies and the last refresh; CeX is now distinguished
+  instead of being mislabelled as a live ask.
+
+### Measured state and verification
+
+- 73,182 listings stored (73,150 active); 71 promoted deals (23 Limited, 48
+  Moderate), 908 rows awaiting review; every promoted deal is asking-only, low
+  risk, non-bundle and non-faulty.
+- `pytest -q`: **141 passed**. `npm run build` (tsc + vite): clean.
+- Live eBay Browse API calls were used for the auction measurements and for the
+  GPU CeX references; no sold evidence was fabricated.
+
 ## Session 2026-10-23 — Identity integrity and honest evidence
 
 This session made the identity behind every valuation defensible. The deal
@@ -775,8 +887,8 @@ a fresh full recomputation exactly (0 differences).
 
 1. **No saved sold evidence yet.** The evidence and calibration systems are ready,
    but this database has zero completed sales. All current deals are asking-only
-   at Limited or Moderate evidence (59–86% evidence score). Import real sales to
-   change that.
+   at Limited or Moderate evidence; the drawer states that limitation. Import real
+   sales to change it.
 2. **Deep discounts intentionally go to review.** A listing below 65% of its
    comparable median, or with missing storage/RAM/chip details, is not called a
    top deal automatically. This is a deliberate precision-over-volume choice; the
@@ -818,7 +930,7 @@ cd frontend
 npm run build
 ```
 
-Last verified: **128 passed, 0 failed**; frontend `tsc -b && vite build` passes.
+Last verified: **141 passed, 0 failed**; frontend `tsc -b && vite build` passes.
 
 ## Exact next tasks (in order)
 
@@ -826,17 +938,16 @@ Last verified: **128 passed, 0 failed**; frontend `tsc -b && vite build` passes.
    (PS5, ROG Ally, RTX 5070 Ti, MacBook Air M2) so calibration can be assessed on
    real data. Bulk CSV remains optional; eBay Marketplace Insights cannot be used
    without approved access.
-2. **Exercise eBay Browse API end to end** with real UK developer keys: token →
-   search → parser → scan history → deal feed. Verify GBP/UK filters, shipping,
-   images, usage counters and duplicate prevention.
-3. **Extend grouped triage to other recurring review reasons.** If the queue
-   remains large after the variant groups are worked, measure the next dominant
-   reason (price anomaly, accessory or condition caveat) before adding any new
-   bulk path.
-4. **Add live-fixture regressions as review cases appear.** This session added
-   phone case/protector brands and `256G` shorthand; multi-item console bundles,
-   console-only wording, compact Intel CPU names and ambiguous MacBook years are
-   already covered by focused fixtures.
+2. **Track the new price-memory history.** 1,579 keys already have more than one
+   snapshot; use them to surface genuine trends and stale-market warnings without
+   treating an old price as current.
+3. **Extend auction coverage inside the same budget.** The category rotation now
+   reaches 10–19 products per pass; measure whether a smaller ending-soon window
+   or priority-weighted rotation improves the count of *usable* opportunities
+   rather than the raw auction count.
+4. **Add fixtures for the 240-benchmark recall gaps:** spec-less laptop titles
+   (Dell Inspiron 15, ThinkPad R61, HP Stream 14), legacy DDR2/SO-DIMM module
+   part numbers, and the newly supported Pentium/Celeron/Athlon mini-PCs.
 5. **Consider a PostgreSQL adapter** only if multi-user hosting becomes a
    requirement; keep SQLite for the local product.
 

@@ -104,6 +104,44 @@ def test_complete_system_is_rejected_from_a_loose_cpu_pool():
     assert reason and "complete system" in reason
 
 
+def test_mini_pc_is_not_priced_as_its_internal_ssd():
+    result = identify_listing(
+        "Stone NT310-H - intel Pentium 3550M 2.3GHZ- 8GB Ram - 128GB ssd"
+    )
+    assert result.kind == "pc"
+    assert result.product_key and result.product_key.startswith("pc:")
+
+
+def test_form_factor_words_do_not_make_a_component_a_complete_system():
+    # These are the shapes that emptied the storage and CPU pools: "desktop"
+    # and "SFF" describe the part, while only a system family or a complete
+    # configuration identifies a whole machine.
+    for title, kind, key in (
+        ("Desktop HDD 2000GB", "ssd", "ssd:sata:2000"),
+        ('Toshiba 2TB 3.5" Desktop Internal Hard Drive (HDD)', "ssd", "ssd:sata:2048"),
+        ("AMD Ryzen 7 7700 AM5 8-Core Desktop Processor", "cpu", "cpu:amd:ryzen-7-7700"),
+        ("Kingston 8GB DDR5 5600MHz Desktop RAM - KCP556US6-8", "ram", "ram:ddr5:8gb:5600:desktop"),
+        ("Asus GeForce GT 730 2GB GDDR5 sff multi-monitor", "gpu", "gpu:gt-730:2gb"),
+    ):
+        assert comparable_rejection(
+            {"title": title, "price": 50, "marketplace": "ebay"},
+            kind=kind,
+            product_key=key,
+        ) is None, title
+    assert "complete system" in (
+        comparable_rejection(
+            {
+                "title": "HP Pro desk 400 G6 SFF i5-9500 / 8gb / Windows 11",
+                "price": 250,
+                "marketplace": "ebay",
+            },
+            kind="cpu",
+            product_key="cpu:intel:core-i5-9500",
+        )
+        or ""
+    )
+
+
 def test_capacity_mismatch_is_rejected_but_unknown_capacity_is_allowed():
     mismatch = {
         "title": "Apple iPhone 15 Pro 256GB Unlocked",

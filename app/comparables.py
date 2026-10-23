@@ -17,7 +17,6 @@ from typing import Any
 
 from .identification import (
     COMPATIBILITY_TAIL_RE,
-    DEVICE_CHASSIS_RE,
     MEDIA_CARD_RE,
     subject_phrase,
     system_assembly_evidence,
@@ -32,6 +31,12 @@ _PARTS_RE = re.compile(
 _CAPACITY_GB_RE = re.compile(r"\b(\d{1,4})\s*gb\b", re.I)
 _CAPACITY_TB_RE = re.compile(r"\b(\d(?:\.\d)?)\s*tb\b", re.I)
 _COMPONENT_KINDS = {"cpu", "gpu", "ram", "ssd", "motherboard"}
+_COMPLETE_SYSTEM_RE = re.compile(
+    r"\b(?:desktop\s+(?:pc|computer)|gaming\s+pc|pc\s+tower|tower\s+pc|"
+    r"complete\s+(?:pc|system|computer)|workstation\s+pc|all[-\s]in[-\s]one|"
+    r"sff\s+(?:pc|desktop)|prodesk|pro\s+desk|optiplex|elitedesk|thinkcentre)\b",
+    re.I,
+)
 
 
 def key_capacity(product_key: str) -> int | None:
@@ -112,7 +117,11 @@ def comparable_rejection(
     if kind in _COMPONENT_KINDS:
         if system_assembly_evidence(subject):
             return "complete system, not a standalone component"
-        if DEVICE_CHASSIS_RE.search(subject):
+        # Bare "desktop" or "SFF" describes a component's form factor. It is
+        # not a machine: "Desktop HDD 2TB" and "Ryzen 7 7700 desktop processor"
+        # were both being discarded as complete computers, which starved the
+        # storage and CPU pools of valid evidence.
+        if _COMPLETE_SYSTEM_RE.search(subject):
             return "complete system, not a standalone component"
         if re.search(r"\b(?:laptop|notebook|tablet|phone)\b", subject, re.I):
             return "portable device, not a standalone component"

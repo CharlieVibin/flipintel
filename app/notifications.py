@@ -31,9 +31,14 @@ def _enabled(values: dict[str, Any]) -> bool:
     }
 
 
-def _evidence_label(level: str | None, confidence: float | None) -> str:
-    name = (level or "insufficient").title()
-    return f"{name} ({confidence * 100:.0f}%)" if confidence is not None else name
+def _evidence_label(level: str | None, confidence: float | None = None) -> str:
+    """A descriptive evidence rating, not a sale probability.
+
+    The stored confidence orders candidates internally but is not calibrated
+    against outcomes, so exposing it as a percentage invited readers to treat
+    it as one. The evidence level says what the data actually supports.
+    """
+    return (level or "insufficient").title()
 
 
 class Notifier:
@@ -199,6 +204,8 @@ class Notifier:
             WHERE l.status='active' AND l.is_auction=1 AND x.listing_id IS NULL
               AND l.auction_end_at IS NOT NULL AND l.auction_end_at >= ?
               AND l.auction_end_at <= ?
+              AND d.is_deal = 1 AND d.needs_review = 0
+              AND d.evidence_level IN ('limited', 'moderate', 'strong')
               AND d.max_bid IS NOT NULL AND l.price <= d.max_bid
             ORDER BY l.auction_end_at ASC
             LIMIT 40
@@ -245,7 +252,7 @@ class Notifier:
                         "inline": True,
                     },
                     {"name": "Expected resale", "value": f"£{row['expected_resale']:,.2f}", "inline": True},
-                    {"name": "Net profit at ceiling", "value": f"£{row['net_profit']:,.0f}", "inline": True},
+                    {"name": "Net profit at current bid", "value": f"£{row['net_profit']:,.0f}", "inline": True},
                     {
                         "name": "Evidence",
                         "value": _evidence_label(row["evidence_level"], row["confidence"]),

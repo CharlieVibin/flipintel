@@ -415,7 +415,8 @@ def test_auction_alerts_deduplicate_and_respect_cooldown():
         engine = ValuationEngine(db)
         engine.refresh()
         db.execute(
-            "UPDATE deals SET is_deal=1, needs_review=0, max_bid=400 "
+            "UPDATE deals SET is_deal=1, needs_review=0, max_bid=400, "
+            "evidence_level='moderate' "
             "WHERE listing_id=(SELECT id FROM listings WHERE external_id='a1')"
         )
         db.set_settings(
@@ -438,6 +439,13 @@ def test_auction_alerts_deduplicate_and_respect_cooldown():
             assert asyncio.run(notifier.notify_auctions(limit=4)) == 0
             assert len(sent) == 1
             assert "ending soon" in sent[0].lower()
+            # Poor evidence or a non-promoted row must never trigger an alert,
+            # even when its stored ceiling happens to sit above the bid.
+            db.execute("UPDATE deals SET evidence_level='insufficient'")
+            assert asyncio.run(notifier.notify_auctions(limit=4)) == 0
+            db.execute("UPDATE deals SET evidence_level='moderate', is_deal=0")
+            assert asyncio.run(notifier.notify_auctions(limit=4)) == 0
+            db.execute("UPDATE deals SET is_deal=1")
             # A material bid increase is allowed through despite the cooldown.
             db.execute("UPDATE listings SET current_bid=160, price=160 WHERE external_id='a1'")
             assert asyncio.run(notifier.notify_auctions(limit=4)) == 1
