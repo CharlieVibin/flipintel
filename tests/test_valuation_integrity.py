@@ -67,6 +67,23 @@ def test_new_estimate_is_bounded_by_its_range():
         )
 
 
+def test_new_candidate_cannot_exceed_cex_retail_or_its_own_range():
+    entries: list[tuple[str, float, str, str]] = [
+        ("ebay", 880 + index * 10, "good", f"PS5 Pro 2TB used {index}")
+        for index in range(8)
+    ] + [
+        ("vinted", 950 + index * 15, "new", f"PS5 Pro 2TB sealed {index}")
+        for index in range(4)
+    ] + [("cex", 790, "good", "PlayStation 5 Pro Console, 2TB, White, Boxed")]
+    estimate = _estimate_from_rows(
+        _rows(entries), ValuationConfig(), 0.95, "new", [], "console"
+    )
+    assert estimate.resale_good == 790, estimate.resale_good
+    assert estimate.high is not None and estimate.high <= 790
+    assert estimate.strategies["max"]["expected"] <= 790
+    assert any("CeX retail" in note for note in estimate.notes)
+
+
 def test_one_marketplace_cannot_set_the_asking_market():
     entries: list[tuple[str, float, str, str]] = [
         ("ebay", 600, "used", "PlayStation 5 Pro console") for _ in range(12)

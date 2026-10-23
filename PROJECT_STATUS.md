@@ -9,7 +9,7 @@
 
 This phase tested whether the resale numbers are real instead of assuming a
 formula change made them better. The database, collectors and history were kept.
-All estimates below were re-measured after a full 73,150-listing reconciliation.
+All estimates below were re-measured after a full 74,395-listing reconciliation.
 
 ### Asking-price valuation now strips retail, duplicates and one-market dominance
 
@@ -30,14 +30,19 @@ All estimates below were re-measured after a full 73,150-listing reconciliation.
   maximum ask; it is never an assumed percentage.
 - The supported range now comes from the same conditioned distribution as the
   central estimate, so a low bound can no longer exceed the estimate.
+- A new/sealed candidate is capped at the CeX retail price. Without that ceiling
+  a sealed PS5 Pro was estimated at £832.66 while CeX sold the same boxed
+  console for £790; the estimate, range and all three strategies now stop at
+  the shop retail reference. A private sealed item cannot be assumed to fetch
+  more than a shop charges.
 - Product-price memory snapshots the market estimate before listing-specific
   contents discounts or learned flip adjustments. Those belong to one deal and
   must not make the next listing of the same product cheaper.
 - A form-factor guard was added to comparable validation. Bare "desktop" and
   "SFF" describe a component, not a complete computer; only a real system
   family or configuration is rejected. This raised accepted comparables from
-  147,490 public rows to the same cap with 3,209 rejections instead of 9,046.
-  Remaining rejections: 2,087 faulty/parts/packaging, 1,098 capacity or variant
+  147,490 public rows to the same cap with 3,357 rejections instead of 9,046.
+  Remaining rejections: 2,141 faulty/parts/packaging, 1,192 capacity or variant
   mismatch, 20 complete systems, 4 portable devices.
 - Identity fixes that were changing valuations: DDR modules sold as "desktop
   memory" are components, 2x16GB kits are exact products while an unparsed
@@ -52,7 +57,7 @@ All estimates below were re-measured after a full 73,150-listing reconciliation.
 | --- | ---: | ---: | --- | --- |
 | RTX 4060 8GB | £327.53 | £267.48 (range 255.00–272.96, moderate, 8 comps) | CeX retail £300, cash £207, voucher £237; private asks £190–380 | Realistic. Between CeX cash and retail, below most private asks. |
 | RTX 4070 12GB | £589.32 | £441.99 (range 411.03–570.46, limited, 7 comps) | CeX retail £590, cash £407, voucher £466; private asks £425–568 | Realistic. The old figure equalled CeX retail; a private used sale should not. |
-| Xbox Series S | £255.00 | £214.29 (range 193.13–248.38, moderate, 107 comps) | CeX retail £420, cash £239, voucher £289; asks £239–364 | Slightly conservative versus CeX cash but defensible for a private sale. |
+| Xbox Series S | £255.00 | £208.25 (range 187.42–244.34, moderate, 115 comps) | CeX retail £420, cash £239, voucher £289; asks £239–364 | Slightly conservative versus CeX cash but defensible for a private sale. |
 | PS5 Pro 2TB | £829.34 | £624.49 (range 546.43–676.10, moderate, 13 comps) | CeX retail £790, cash/voucher £624; asks £550–955 | Realistic. The old figure was above CeX retail, which was the warning sign. |
 
 Every one of these is still **asking-only**: there are zero completed sales in
@@ -96,9 +101,9 @@ resale proceeds.
 ### Permanent price memory
 
 - Snapshots now refresh when older than the reuse window even if no listing
-  field changed, preserving every historical row. Current database: 5,420
-  snapshots, 367 invalidated rows retained for audit, 1,579 product keys with
-  more than one historical snapshot and 24,590 market observations.
+  field changed, preserving every historical row. Current database: 5,966
+  snapshots, 367 invalidated rows retained for audit, 1,597 product keys with
+  more than one historical snapshot and 25,186 market observations.
 - `tests/test_price_memory.py` proves an expired snapshot is re-timestamped
   without losing history, and that a listing's missing-contents discount never
   enters the shared product memory. `tests/test_valuation_integrity.py` covers
@@ -110,10 +115,10 @@ resale proceeds.
 
 ### Measured state and verification
 
-- 73,182 listings stored (73,150 active); 71 promoted deals (23 Limited, 48
-  Moderate), 908 rows awaiting review; every promoted deal is asking-only, low
-  risk, non-bundle and non-faulty.
-- `pytest -q`: **141 passed**. `npm run build` (tsc + vite): clean.
+- 74,489 listings stored (74,395 active); 74 promoted deals (23 Limited, 51
+  Moderate), 934 rows awaiting review; every promoted deal is asking-only, low
+  risk, non-bundle, non-faulty and not a wanted advert.
+- `pytest -q`: **142 passed**. `npm run build` (tsc + vite): clean.
 - Live eBay Browse API calls were used for the auction measurements and for the
   GPU CeX references; no sold evidence was fabricated.
 
@@ -930,7 +935,7 @@ cd frontend
 npm run build
 ```
 
-Last verified: **141 passed, 0 failed**; frontend `tsc -b && vite build` passes.
+Last verified: **142 passed, 0 failed**; frontend `tsc -b && vite build` passes.
 
 ## Exact next tasks (in order)
 

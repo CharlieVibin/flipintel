@@ -44,7 +44,7 @@ FULL_REFRESH_HOURS = 6
 
 # Bump when evaluation logic changes so the next refresh cannot reuse deals
 # computed by the previous rules.
-VALUATION_REVISION = 3
+VALUATION_REVISION = 4
 
 
 def _fingerprint(payload: Any) -> str:
@@ -789,6 +789,28 @@ def _estimate_from_rows(
                     "a used item cannot be assumed to fetch more than new stock."
                 )
                 resale = new_ceiling
+    # A sealed item is still a private sale. CeX is a shop price with a
+    # warranty, so a private new item cannot be assumed to fetch more than the
+    # shop charges. Without this, the new-condition premium was applied to the
+    # used basis and a PS5 Pro was valued at £833 against £790 CeX retail and
+    # £988 of inflated marketplace asks. No made-up discount is applied: the
+    # shop price is the ceiling.
+    if candidate_is_new and cex_pool:
+        cex_retail_values = [
+            float(c.get("cex_retail") or c.get("price") or 0)
+            for c in cex_pool
+            if float(c.get("cex_retail") or c.get("price") or 0) > 0
+        ]
+        if cex_retail_values:
+            retail_ceiling = round(median(cex_retail_values), 2)
+            if resale > retail_ceiling:
+                notes.append(
+                    f"The new-condition estimate was capped at the CeX retail price "
+                    f"(£{retail_ceiling:,.2f}); a private sealed item cannot be assumed "
+                    "to fetch more than a shop retail reference."
+                )
+                resale = retail_ceiling
+                new_ceiling = retail_ceiling
     spread = max(0.08, sigma)
 
     ident = clamp(ident_confidence, 0.0, 1.0)
@@ -938,6 +960,11 @@ def _estimate_from_rows(
         strategies["max"]["ask"] = round(
             float(strategies["max"]["ask"]) * (1.0 + prepared_uplift), 2
         )
+    if new_ceiling is not None:
+        # An asking strategy cannot promise more than the evidence ceiling.
+        for strategy in strategies.values():
+            strategy["expected"] = round(min(float(strategy["expected"]), new_ceiling), 2)
+            strategy["ask"] = round(min(float(strategy["ask"]), new_ceiling), 2)
 
     public_comps = []
     for comp in sorted(kept, key=lambda c: (not bool(c["is_sold"]), -float(c["weight"])))[:12]:
@@ -961,6 +988,16 @@ def _estimate_from_rows(
             }
         )
 
+    # The range must respect the same ceiling as the central value. A new
+    # PS5 Pro capped at £790 retail must not still show a £944 upper bound.
+    range_low = min(resale, (p25 or resale) * condition_factor * range_damping)
+    range_high = max(resale, (p75 or resale) * condition_factor * range_damping)
+    ci_high_value = max(resale, (p90 or p75) * condition_factor * range_damping)
+    if new_ceiling is not None:
+        range_high = min(range_high, new_ceiling)
+        ci_high_value = min(ci_high_value, new_ceiling)
+        range_low = min(range_low, range_high)
+
     return MarketEstimate(
         evidence_level=level,
         strategies=strategies,
@@ -970,8 +1007,8 @@ def _estimate_from_rows(
         # The central value and the range must describe the same distribution.
         # Storing the un-conditioned quantile next to an adjusted estimate
         # produced ranges whose low was higher than the central estimate.
-        low=round(min(resale, (p25 or resale) * condition_factor * range_damping), 2),
-        high=round(max(resale, (p75 or resale) * condition_factor * range_damping), 2),
+        low=round(range_low, 2),
+        high=round(range_high, 2),
         confidence=round(clamp(confidence, 0.0, 0.98), 3),
         sample_size=len(kept),
         method=method,
@@ -983,7 +1020,7 @@ def _estimate_from_rows(
         range_basis=range_basis,
         notes=notes,
         ci_low=round(min(resale, (p10 or p25) * condition_factor * range_damping), 2),
-        ci_high=round(max(resale, (p90 or p75) * condition_factor * range_damping), 2),
+        ci_high=round(ci_high_value, 2),
         trend_pct=round(trend_pct, 4) if trend_pct is not None else None,
         trend_note=trend_note,
         market_values=[round(value, 2) for value in values],
