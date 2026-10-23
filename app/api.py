@@ -40,6 +40,21 @@ SORT_SQL = {
     "price": "l.price ASC",
 }
 
+# Grouped review is intentionally limited to a single, well-defined class of
+# ambiguity. Opening a generic flag-based grouping API would let an arbitrary
+# value turn into a bulk-action target; the variant gap is the one that is
+# both common enough to drown the queue and safe to describe precisely.
+REVIEW_GROUPS = {
+    "variant_unclear": {
+        "label": "Variant not stated",
+        "description": (
+            "Storage, memory or chip variant is missing, so the comparable pool may mix "
+            "materially different configurations."
+        ),
+    }
+}
+REVIEW_BULK_LIMIT = 200
+
 
 def _db(request: Request) -> Database:
     return request.app.state.db
@@ -291,6 +306,8 @@ async def list_deals(
     archived: bool = False,
     review: bool = False,
     review_status: str = "pending",
+    product_key: str | None = None,
+    review_flag: str | None = None,
     page: int = Query(1, ge=1),
     limit: int = Query(48, ge=1, le=120),
 ) -> dict[str, Any]:
@@ -347,6 +364,15 @@ async def list_deals(
         where.append("(l.title LIKE ? OR l.product_name LIKE ?)")
         like = f"%{q.strip()}%"
         params.extend([like, like])
+    if product_key:
+        where.append("l.product_key = ?")
+        params.append(product_key.strip().lower())
+    if review_flag:
+        flag = review_flag.strip().lower()
+        if flag not in REVIEW_GROUPS:
+            raise HTTPException(status_code=422, detail="Unknown review flag")
+        where.append("l.flags LIKE ?")
+        params.append(f'%"{flag}"%')
     order = SORT_SQL.get(sort, SORT_SQL["score"])
     where_sql = " AND ".join(where)
     joins = (
@@ -384,6 +410,118 @@ async def list_deals(
             "min_roi": db.setting_float("min_roi", 0.12),
             "min_confidence": db.setting_float("min_confidence", 0.42),
         },
+    }
+
+
+@router.get("/reviews/groups")
+async def review_groups(
+    request: Request,
+    kind: str = "phone",
+    flag: str = "variant_unclear",
+    limit: int = Query(40, ge=1, le=100),
+) -> dict[str, Any]:
+    """Group pending reviews by product so a widespread gap is visible at once.
+
+    The dashboard previously showed 2,000 individual review cards, hiding the
+    fact that hundreds of them were the same phone model missing a storage
+    figure. Grouping changes the question from "is this listing odd?" to "does
+    this model family need a policy?" without weakening the review gate.
+    """
+    db = _db(request)
+    kind = kind.strip().lower()
+    flag = flag.strip().lower()
+    if kind not in VALID_KINDS:
+        raise HTTPException(status_code=422, detail="Unknown listing kind")
+    if flag not in REVIEW_GROUPS:
+        raise HTTPException(status_code=422, detail="Unknown review flag")
+    base = (
+        "FROM deals d JOIN listings l ON l.id = d.listing_id "
+        "LEFT JOIN review_decisions r ON r.listing_id = l.id "
+        "WHERE d.needs_review = 1 AND l.status = 'active' AND r.listing_id IS NULL "
+        "AND l.listing_kind = ? AND l.flags LIKE ?"
+    )
+    like = f'%"{flag}"%'
+    params: list[Any] = [kind, like]
+    total_listings = db.scalar(f"SELECT COUNT(*) {base}", params) or 0
+    total_groups = db.scalar(
+        f"SELECT COUNT(DISTINCT l.product_key) {base}", params
+    ) or 0
+    rows = db.query(
+        f"""
+        SELECT l.product_key,
+               COALESCE(MAX(l.product_name), l.product_key) AS product_name,
+               COUNT(*) AS count,
+               MIN(l.price) AS price_low,
+               MAX(l.price) AS price_high,
+               MIN(l.first_seen) AS oldest_first_seen,
+               MAX(l.first_seen) AS newest_first_seen,
+               GROUP_CONCAT(DISTINCT l.marketplace) AS marketplaces
+        {base}
+        GROUP BY l.product_key
+        ORDER BY count DESC, product_name ASC
+        LIMIT ?
+        """,
+        params + [limit],
+    )
+    groups = []
+    for row in rows:
+        key = str(row["product_key"])
+        listing_ids = [
+            int(item["id"])
+            for item in db.query(
+                f"SELECT l.id {base} AND l.product_key = ? "
+                "ORDER BY l.price ASC, l.id ASC LIMIT ?",
+                params + [key, REVIEW_BULK_LIMIT + 1],
+            )
+        ]
+        truncated = len(listing_ids) > REVIEW_BULK_LIMIT
+        listing_ids = listing_ids[:REVIEW_BULK_LIMIT]
+        examples = db.query(
+            f"""
+            SELECT l.id, l.title, l.price, l.marketplace, l.url, l.image_url, l.first_seen
+            {base} AND l.product_key = ?
+            ORDER BY l.first_seen DESC, l.id DESC LIMIT 3
+            """,
+            params + [key],
+        )
+        groups.append(
+            {
+                "product_key": key,
+                "product_name": row.get("product_name") or key,
+                "count": int(row["count"] or 0),
+                "price_low": round(float(row["price_low"] or 0), 2),
+                "price_high": round(float(row["price_high"] or 0), 2),
+                "oldest_first_seen": row.get("oldest_first_seen"),
+                "newest_first_seen": row.get("newest_first_seen"),
+                "marketplaces": sorted(
+                    item for item in str(row.get("marketplaces") or "").split(",") if item
+                ),
+                "listing_ids": listing_ids,
+                "listings_truncated": truncated,
+                "examples": [
+                    {
+                        "id": int(item["id"]),
+                        "title": item.get("title"),
+                        "price": round(float(item["price"] or 0), 2),
+                        "marketplace": item.get("marketplace"),
+                        "url": item.get("url"),
+                        "image_url": item.get("image_url"),
+                        "first_seen": item.get("first_seen"),
+                    }
+                    for item in examples
+                ],
+            }
+        )
+    return {
+        "kind": kind,
+        "flag": flag,
+        "label": REVIEW_GROUPS[flag]["label"],
+        "description": REVIEW_GROUPS[flag]["description"],
+        "groups": groups,
+        "total_groups": int(total_groups),
+        "total_listings": int(total_listings),
+        "bulk_limit": REVIEW_BULK_LIMIT,
+        "generated_at": iso(),
     }
 
 
@@ -470,6 +608,91 @@ class ReviewUpdate(BaseModel):
     product_key: str | None = Field(default=None, max_length=120)
     product_name: str | None = Field(default=None, max_length=200)
     kind: str | None = None
+
+
+class BulkReviewUpdate(BaseModel):
+    listing_ids: list[int] = Field(default_factory=list, max_length=REVIEW_BULK_LIMIT)
+    decision: str
+    note: str | None = Field(default=None, max_length=1000)
+
+
+@router.post("/reviews/bulk")
+async def bulk_review_deal(
+    request: Request, body: BulkReviewUpdate
+) -> dict[str, Any]:
+    """Apply one decision to explicit pending review rows.
+
+    The caller must name every listing (there is no filter-based bulk update), so
+    a changed queue cannot silently widen the action. Only pending rows that
+    still need review are updated; stale or already-decided IDs are skipped and
+    reported rather than overwritten. Corrections stay single-listing because
+    each corrected key needs its own evidence.
+    """
+    db = _db(request)
+    decision = body.decision.strip().lower()
+    if decision not in {"approved", "rejected"}:
+        raise HTTPException(
+            status_code=422, detail="Bulk decisions must be approved or rejected"
+        )
+    listing_ids = list(dict.fromkeys(int(value) for value in body.listing_ids))
+    if not listing_ids:
+        raise HTTPException(status_code=422, detail="Select at least one pending listing")
+    if len(listing_ids) > REVIEW_BULK_LIMIT:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Bulk review is limited to {REVIEW_BULK_LIMIT} listings at a time",
+        )
+    placeholders = ",".join("?" for _ in listing_ids)
+    eligible = [
+        int(row["id"])
+        for row in db.query(
+            f"""
+            SELECT l.id
+            FROM listings l
+            JOIN deals d ON d.listing_id = l.id
+            LEFT JOIN review_decisions r ON r.listing_id = l.id
+            WHERE l.id IN ({placeholders}) AND l.status = 'active'
+              AND d.needs_review = 1 AND r.listing_id IS NULL
+            ORDER BY l.id
+            """,
+            listing_ids,
+        )
+    ]
+    default_note = (
+        "Bulk approved after manual review; automatic risk signals remain visible."
+        if decision == "approved"
+        else "Bulk rejected as not a genuine opportunity after manual review."
+    )
+    note = normalise_text(body.note or default_note)[:1000] or None
+    now = iso()
+    if eligible:
+        db.executemany(
+            """
+            INSERT INTO review_decisions(listing_id, decision, note, product_key, kind, decided_at)
+            VALUES (?, ?, ?, NULL, NULL, ?)
+            ON CONFLICT(listing_id) DO UPDATE SET
+                decision=excluded.decision, note=excluded.note,
+                product_key=excluded.product_key, kind=excluded.kind,
+                decided_at=excluded.decided_at
+            """,
+            [(listing_id, decision, note, now) for listing_id in eligible],
+        )
+    if eligible and decision == "approved":
+        # A single refresh covers every approval. Rejections need no valuation
+        # work because rejected rows are already outside the deal feed.
+        await _scanner(request)._run_refresh(force=True)
+    remaining = db.scalar(
+        "SELECT COUNT(*) FROM deals d JOIN listings l ON l.id = d.listing_id "
+        "WHERE d.needs_review = 1 AND l.status = 'active' "
+        "AND NOT EXISTS (SELECT 1 FROM review_decisions r WHERE r.listing_id = l.id)"
+    ) or 0
+    return {
+        "decision": decision,
+        "updated": len(eligible),
+        "skipped": len(listing_ids) - len(eligible),
+        "listing_ids": eligible,
+        "remaining": int(remaining),
+    }
 
 
 @router.post("/deals/{listing_id}/review")

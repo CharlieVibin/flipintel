@@ -144,6 +144,26 @@ def test_laptop_and_tablet_variants_do_not_collapse():
     assert identify_listing("iPad gen 8 128GB").product_key == old_ipad.product_key
 
 
+def test_phone_shorthand_and_case_brand_traps():
+    shorthand = identify_listing("Apple iPhone 12 Pro - 256G - Pacific Blue")
+    assert shorthand.product_key == "phone:iphone-12-pro-256gb"
+    assert shorthand.attrs["storage_gb"] == 256
+    assert "variant_unclear" not in shorthand.flags
+
+    # Live review-queue titles from case and screen-protector sellers that name
+    # a handset only for compatibility. They must not enter the comparable pool.
+    for title in (
+        "BodyGuardz - iPhone 16 Pro Max, Green",
+        "Caudabe Paragon - iPhone 16 Pro Max, Glacier",
+        "Velvet Caviar - iPhone 16 Pro Max, Floral",
+        "Loopy for iPhone 14",
+        "iPhone 15 4pcs glass protectors",
+    ):
+        result = identify_listing(title)
+        assert result.product_key is None, title
+        assert "accessory_or_box" in result.flags, title
+
+
 def test_working_with_issues_is_faulty_not_a_bargain():
     result = identify_listing(
         'Apple MacBook Air 13" 2019 - 8GB RAM / 128GB SSD - Working With Issues #112'

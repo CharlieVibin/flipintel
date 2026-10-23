@@ -75,7 +75,7 @@ ACCESSORY_TITLE_RE = re.compile(
     r"headphones|earphones|screws?|screwdriver|stand|bracket|cable|adapter|dock|"
     r"battery|skin|cover|protector|decal|sticker|replacement|spares?|spare\s+parts|"
     r"faceplates?|shell|bezel|hinge|fan\s+only|cooler\s+only|empty\s+box|boxes|cases?|"
-    r"nudient|casely|badge|pin\s+badge|"
+    r"nudient|casely|badge|pin\s+badge|bodyguardz|caudabe|velvet\s+caviar|loopy|"
     r"thumb\s*grips?|joy[-\s]?con|game\s+cartridge|splitter|\bhdmi\b|docking\s+station|"
     r"joystick|thumbstick|analog\s+stick|heatsink|\bhub\b|\b6\s*in\s*1\b|"
     r"flash\s+drive|usb\s+stick|pen\s+drive|enclosure|caddy|housing|digitizer|"
@@ -88,7 +88,7 @@ ACCESSORY_TITLE_RE = re.compile(
     r"logic\s+board|charging\s+port|sim\s+tray|camera\s+module|privacy\s+(?:screen|filter)|"
     r"tempered\s+glass|alligator|crocodile|phone\s+case|silicone\s+case|leather\s+case|"
     r"replacement\s+shell|housing\s+only|frame\s+only|lead\s+for|charging\s+cable|"
-    r"accessor(?:y|ies)|stylus|\bpen\b|\bpencil\b|protect(?:or|er)|kids|\btoy\b|"
+    r"accessor(?:y|ies)|stylus|\bpen\b|\bpencil\b|protect(?:or|er)s?|kids|\btoy\b|"
     r"screen\s+only|portfolio|osmo|winnie\s+the\s+pooh|piglet|\bpooh\b|"
     r"controller\s+camera|motion\s+sensor|psvr|ps\s+vr|camera\s+v\d|"
     r"(?:wifi|wi-fi|wireless|network|power|usb|hdmi|controller|button)\s+board|"
@@ -752,6 +752,16 @@ def _phone_storage(text: str) -> int | None:
     storage = _storage(text)
     if storage:
         return storage
+    # "256G" is common phone shorthand. A bare boundary after the digits does
+    # not match it because G is a word character, so accept the suffix here
+    # rather than leaving a phone that states its capacity marked as unclear.
+    match = re.search(
+        r"\b(?:iphone|galaxy|pixel)\b[^|,;\n]{0,50}?\b(64|128|256|512|1024)\s*g\b",
+        text,
+        re.I,
+    )
+    if match:
+        return int(match.group(1))
     match = re.search(
         r"\b(?:iphone|galaxy|pixel)\b[^|,;\n]{0,50}?\b(64|128|256|512|1024)\b",
         text,

@@ -21,7 +21,8 @@ export function FilterBar({ filters, onChange, onReset, query, onQueryChange, to
   const active =
     Boolean(
       filters.category || filters.marketplace || filters.condition || filters.min_profit ||
-      filters.min_confidence || filters.max_age_hours || filters.review,
+      filters.min_confidence || filters.max_age_hours || filters.review || filters.product_key ||
+      filters.review_flag,
     ) || query.trim().length > 0;
   return (
     <div className="panel sticky top-3 z-20 p-3 backdrop-blur-xl">

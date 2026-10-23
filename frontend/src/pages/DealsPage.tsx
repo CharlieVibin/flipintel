@@ -18,6 +18,7 @@ import { api } from "../lib/api";
 import { useDeals } from "../hooks/useDeals";
 import { DealCard } from "../components/DealCard";
 import { FilterBar } from "../components/FilterBar";
+import { ReviewGroups } from "../components/ReviewGroups";
 import { EmptyRadar, SkeletonCard, StatusPill, cn } from "../components/ui";
 import { clockTime, money, pct, timeAgo } from "../lib/format";
 
@@ -226,7 +227,7 @@ export function DealsPage({
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-ember/20 bg-ember/[0.04] px-4 py-3 text-xs text-mist-300">
           <span className="flex items-center gap-2">
             <CircleAlert className="h-4 w-4 text-ember" />
-            {overview?.review_count} listing{overview?.review_count === 1 ? "" : "s"} suppressed because the price is implausibly cheap and needs a human check.
+            {overview?.review_count} listing{overview?.review_count === 1 ? "" : "s"} held back for a human check on price, contents or an unclear variant.
           </span>
           <button
             className="font-medium text-ember hover:underline"
@@ -237,9 +238,46 @@ export function DealsPage({
         </div>
       )}
 
+      {filters.review && (filters.review_status ?? "pending") === "pending" && (
+        <ReviewGroups
+          refreshTick={refreshTick}
+          activeKey={filters.product_key}
+          onSelect={(productKey) =>
+            setFilters((prev) => ({
+              ...prev,
+              review: true,
+              product_key: productKey,
+              review_flag: "variant_unclear",
+            }))
+          }
+          onClear={() =>
+            setFilters((prev) => {
+              const next = { ...prev };
+              delete next.product_key;
+              delete next.review_flag;
+              return next;
+            })
+          }
+          onReloadDeals={reload}
+          onRefreshSummary={onRefreshSummary}
+          onToast={onToast}
+        />
+      )}
+
       <FilterBar
         filters={effectiveFilters}
-        onChange={(patch) => setFilters((prev) => ({ ...prev, ...patch }))}
+        onChange={(patch) =>
+          setFilters((prev) => {
+            const next = { ...prev, ...patch };
+            // Leaving the review queue also leaves its model filter; otherwise
+            // the normal deal feed would silently stay narrowed to one phone.
+            if (patch.review === undefined) {
+              delete next.product_key;
+              delete next.review_flag;
+            }
+            return next;
+          })
+        }
         onReset={() => {
           setFilters({ sort: "score" });
           setQuery("");
@@ -273,7 +311,8 @@ export function DealsPage({
             overview={overview}
             filtered={Boolean(
               query || filters.category || filters.marketplace || filters.condition || filters.min_profit ||
-              filters.min_confidence || filters.max_age_hours || filters.review,
+              filters.min_confidence || filters.max_age_hours || filters.review || filters.product_key ||
+              filters.review_flag,
             )}
             onReset={() => {
               setFilters({ sort: "score" });

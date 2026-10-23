@@ -1,4 +1,5 @@
 import type {
+  BulkReviewResult,
   CalibrationReport,
   CompInput,
   CompsResponse,
@@ -12,6 +13,7 @@ import type {
   EvidenceResponse,
   HealthResponse,
   Overview,
+  ReviewGroupsResponse,
   ScanRun,
   Settings,
 } from "./types";
@@ -100,6 +102,12 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   undoReview: (id: number) => request<{ decision: null }>(`/deals/${id}/review`, { method: "DELETE" }),
+  reviewGroups: () => request<ReviewGroupsResponse>("/reviews/groups?kind=phone&flag=variant_unclear"),
+  bulkReview: (listingIds: number[], decision: "approved" | "rejected", note?: string) =>
+    request<BulkReviewResult>("/reviews/bulk", {
+      method: "POST",
+      body: JSON.stringify({ listing_ids: listingIds, decision, note }),
+    }),
   evidenceTemplateUrl: () => `${BASE}/evidence/template`,
   evidenceExportUrl: (filters: Record<string, unknown> = {}) =>
     `${BASE}/evidence/export${queryString(filters)}`,

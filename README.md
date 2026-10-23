@@ -62,6 +62,11 @@ clear a profit, ROI and confidence floor.
   range is unsupported.
 - **Cost accounting**: purchase price, delivery/buyer fee, configurable resale
   channel, selling fees, outbound delivery, packaging, other costs and ROI.
+- **Grouped review queue** for missing phone variants. Pending `variant_unclear`
+  phones are grouped by exact model, with counts, price spread, source mix and
+  examples. Opening a group filters the queue to those listings; explicit
+  approve/reject actions work on up to 200 selected IDs at a time. Bulk approval
+  resolves the review gate but adds no evidence and raises no confidence.
 - **Manual-review queue** for implausibly cheap items, including unusually
   cheap memory/storage. These are excluded from automatic recommendations and
   can be inspected through the dashboard's Review filter.
@@ -195,7 +200,8 @@ name is FlipIntel.
 .venv\Scripts\python.exe -m pytest -q
 ```
 
-The suite currently has **69 passing tests**. It covers category catalogue and
+The suite currently has **72 passing tests**. It covers grouped variant review
+and bounded bulk decisions, category catalogue and
 parser regressions, resumable backfill depth, overlap stopping, coverage
 diagnostics, eBay keyword-free category requests, CSV preview/import/
 export, row and byte limits, optional fields, duplicate suppression, invalid
@@ -214,6 +220,9 @@ compatibility, duplicate detection, settings and the HTTP API smoke path.
 ## API
 
 - `GET /api/health`, `/api/overview`, `/api/deals`, `/api/deals/{id}`
+- `GET /api/deals?review=1&product_key=...&review_flag=variant_unclear` — filter the queue to one grouped model
+- `GET /api/reviews/groups?kind=phone&flag=variant_unclear` — grouped pending variant reviews
+- `POST /api/reviews/bulk` — explicit approve/reject for up to 200 pending listing IDs
 - `POST /api/deals/{id}/save`, `/dismiss`, `/restore`
 - `GET /api/scans`, `/api/sources`, `/api/settings`
 - `GET /api/comps?product_key=...` — sold/asking evidence and summary
@@ -240,6 +249,10 @@ Interactive docs: <http://127.0.0.1:8765/docs>
   `full`. **eBay category browsing is implemented from the documented Browse API
   contract but has not been exercised live here** because no developer keys are
   configured; the dashboard labels it `unverified`. No eBay HTML is scraped.
+- **Grouped review covers the dominant variant gap, not every queue reason.**
+  Bulk actions are explicit-ID-only and capped at 200 rows; there is no
+  filter-based bulk update. Approving a variant group does not add evidence or
+  raise confidence, and the missing-variant risk note remains visible.
 - Category pages deliberately favour recall, so they include accessories, media
   and occasional off-category items. Identification, risk and deal gates still
   filter those; category discovery does not bypass them.

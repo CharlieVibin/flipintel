@@ -179,6 +179,50 @@ export interface DealsResponse {
   thresholds: Thresholds;
 }
 
+export interface ReviewGroupExample {
+  id: number;
+  title: string;
+  price: number;
+  marketplace: Marketplace;
+  url: string;
+  image_url: string | null;
+  first_seen: string;
+}
+
+export interface ReviewGroup {
+  product_key: string;
+  product_name: string;
+  count: number;
+  price_low: number;
+  price_high: number;
+  oldest_first_seen: string | null;
+  newest_first_seen: string | null;
+  marketplaces: Marketplace[];
+  listing_ids: number[];
+  listings_truncated: boolean;
+  examples: ReviewGroupExample[];
+}
+
+export interface ReviewGroupsResponse {
+  kind: string;
+  flag: "variant_unclear";
+  label: string;
+  description: string;
+  groups: ReviewGroup[];
+  total_groups: number;
+  total_listings: number;
+  bulk_limit: number;
+  generated_at: string;
+}
+
+export interface BulkReviewResult {
+  decision: "approved" | "rejected";
+  updated: number;
+  skipped: number;
+  listing_ids: number[];
+  remaining: number;
+}
+
 export interface Thresholds {
   min_profit: number;
   min_roi: number;
@@ -608,6 +652,8 @@ export interface DealFilters {
   archived?: boolean;
   review?: boolean;
   review_status?: "pending" | "approved" | "rejected" | "corrected" | "all";
+  product_key?: string;
+  review_flag?: "variant_unclear";
   min_confidence?: number;
   page?: number;
   limit?: number;

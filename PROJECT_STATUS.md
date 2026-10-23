@@ -5,6 +5,67 @@
 **Runtime:** Python 3.10, FastAPI, SQLite, React 18 + Vite + Tailwind
 **Live dashboard:** http://127.0.0.1:8765 (while the local server is running)
 
+## Session 2026-10-23 — grouped review queue
+
+The review queue reached roughly 2,000 rows, and roughly half of them were the
+same failure repeated by model: a phone listing that never stated its storage.
+One card per listing made that pattern invisible. Reviews can now be grouped,
+filtered and resolved in explicit batches without weakening the deal gate.
+
+### What changed
+
+- [x] **Grouped variant audit.** `GET /api/reviews/groups` groups pending
+      `variant_unclear` phones by `product_key` and returns the count, price
+      range, marketplaces, oldest/newest sighting, short examples and the
+      explicit listing IDs. Only pending rows with no existing decision are
+      included.
+- [x] **Drill-down without losing the review filter.** The deal API accepts
+      `product_key` and `review_flag`, so selecting a group shows exactly that
+      model's missing-storage rows rather than every pending review for the
+      model. Clearing the group restores the full queue.
+- [x] **Bulk decisions are explicit and bounded.** `POST /api/reviews/bulk`
+      accepts at most 200 listing IDs, only applies to rows that are still
+      active and pending, skips stale or already-decided IDs and reports the
+      counts. There is no filter-based bulk update, so a changed queue cannot
+      silently widen an action. Bulk corrections are deliberately unsupported;
+      each corrected product key needs its own evidence.
+- [x] **Bulk approval does not inflate confidence.** One valuation refresh runs
+      after a batch of approvals. The missing-variant risk note remains, so an
+      approved listing still has to clear the normal confidence and evidence
+      gates before it can be recommended.
+- [x] **Review-group panel in the deal feed.** The review queue now shows the
+      models with the most missing-storage listings, their price spread and
+      source mix, plus Review / Reject / Approve actions. The active group has a
+      compact header with counts, age, share of variant gaps and the same
+      actions. Destructive actions require an explicit confirmation.
+- [x] **Parser cleanup found during the review.** Common `256G` phone shorthand
+      now identifies as 256GB instead of `variant_unclear`. Case/protector
+      brands (`BodyGuardz`, `Caudabe`, `Velvet Caviar`, `Loopy`) and plural
+      `protectors` are treated as accessories, not handsets. Startup
+      re-identification applied the fix to existing rows.
+
+### Verification
+
+- **72 tests pass** (69 before this session's additions). New coverage:
+  grouping by model, exclusion of decided and known-storage rows, filter by
+  product key and variant flag, bulk idempotency, stale-ID skipping, rejection
+  and approval paths, the 200-row cap, and rejection of corrections in bulk.
+- Frontend `tsc -b && vite build` passes.
+- Live API on the running database returned **60 model groups / 968
+  missing-storage listings** at the last check, while the full pending review
+  queue was **2,067**. The grouped panel rendered those groups, and selecting
+  iPhone 11 filtered the feed to its 56 pending variant rows.
+- Re-identification at startup changed 33 existing rows; Vinted and Gumtree
+  remained healthy and the scanner continued running.
+
+### Current queue shape
+
+The dominant modelled families are recent iPhones (11 through 17 Pro Max),
+but the group view also exposes small groups and the examples make clear when
+an individual title is still an accessory or a box rather than a handset.
+Grouping is an audit aid, not an automatic approval: bulk approval is offered
+with the same warning that no evidence or confidence is added.
+
 ## Session 2026-10-23 — category-first incremental discovery
 
 Keyword searches are now the secondary discovery path. The primary path is a
@@ -251,22 +312,23 @@ delete listings or reset the database.
 
 | Metric | Value |
 | --- | --- |
-| Active listings in local DB | 32,849 |
+| Active listings in local DB | 39,125 |
 | Qualifying deals | 1 |
-| Manual review queue (pending) | 1,855 |
-| Probable cross-market duplicates | 39 |
-| Tracked product keys | 1,631 |
-| Category-discovered listings | 11,657 |
+| Manual review queue (pending) | 2,067 |
+| Missing-storage phone variants | 968 across 60 models |
+| Probable cross-market duplicates | 41 |
+| Tracked product keys | 1,664 |
+| Category-discovered listings | 17,574 |
 | Completed-sale evidence rows | 0 |
 | Sources healthy | Vinted, Gumtree |
 | eBay | `not_configured` — free developer keys not set |
 | CeX | HTTP 403 from this network; surfaced honestly |
 | Facebook | Unavailable; requires authenticated session |
-| Tests | 69 passed, 0 failed |
+| Tests | 72 passed, 0 failed |
 | Frontend build | Passing |
 
-The two current deals are £200 PlayStation 5 consoles supported by live asking
-prices, around 30% below the modelled resale. Both are capped at 52% confidence
+The current deal is a £200 PlayStation 5 console supported by live asking
+prices, around 29% below the modelled resale. It is capped at 52% confidence
 and labelled "Asking only". The remaining deep discounts are in the review queue
 rather than being presented as top-ranked profit.
 
@@ -346,6 +408,11 @@ a fresh full recomputation exactly (0 differences).
 9. **Rule-based identification can still miss unusual titles.** New review cases
    should become fixtures instead of one-off keyword patches.
 10. **Single-user SQLite architecture**, not designed for multi-writer hosting.
+11. **The review queue is still large outside missing-storage phones.** Grouping
+    covers the dominant variant gap; price anomalies, accessories and other
+    reasons still appear individually. Bulk actions are explicit and bounded to
+    200 rows per request, and approving a group does not add evidence or raise
+    confidence.
 
 ## Tests and build
 
@@ -355,7 +422,7 @@ cd frontend
 npm run build
 ```
 
-Last verified: **69 passed, 0 failed**; frontend `tsc -b && vite build` passes.
+Last verified: **72 passed, 0 failed**; frontend `tsc -b && vite build` passes.
 
 ## Exact next tasks (in order)
 
@@ -366,12 +433,14 @@ Last verified: **69 passed, 0 failed**; frontend `tsc -b && vite build` passes.
 2. **Exercise eBay Browse API end to end** with real UK developer keys: token →
    search → parser → scan history → deal feed. Verify GBP/UK filters, shipping,
    images, usage counters and duplicate prevention.
-3. **Reduce review-queue noise.** Group variant-unclear phones by model so the
-   user can see whether a missing storage figure affects many listings, and add
-   bulk review actions if the queue stays large.
-4. **Add more live-fixture regressions** from future review cases: multi-item
-   console bundles, "console only" wording variants, compact Intel CPU names and
-   ambiguous MacBook years.
+3. **Extend grouped triage to other recurring review reasons.** If the queue
+   remains large after the variant groups are worked, measure the next dominant
+   reason (price anomaly, accessory or condition caveat) before adding any new
+   bulk path.
+4. **Add live-fixture regressions as review cases appear.** This session added
+   phone case/protector brands and `256G` shorthand; multi-item console bundles,
+   console-only wording, compact Intel CPU names and ambiguous MacBook years are
+   already covered by focused fixtures.
 5. **Consider a PostgreSQL adapter** only if multi-user hosting becomes a
    requirement; keep SQLite for the local product.
 
