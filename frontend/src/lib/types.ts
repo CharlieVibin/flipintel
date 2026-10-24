@@ -312,6 +312,7 @@ export interface AuctionDiagnostics {
   settings: {
     alerts_enabled: boolean;
     window_minutes: number;
+    alert_window_minutes: number;
     scan_seconds: number;
     urgent_seconds: number;
   };
@@ -658,6 +659,7 @@ export interface Settings {
     scan_seconds: number;
     urgent_seconds: number;
     window_minutes: number;
+    alert_window_minutes: number;
     alerts_enabled: boolean;
   };
   scanning: {

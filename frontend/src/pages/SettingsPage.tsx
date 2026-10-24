@@ -40,6 +40,7 @@ type NumericKey =
   | "history_reuse_days"
   | "cex_refresh_limit"
   | "auction_window_minutes"
+  | "auction_alert_window_minutes"
   | "auction_scan_seconds"
   | "scan_interval_vinted"
   | "scan_interval_gumtree"
@@ -61,10 +62,11 @@ const EMPTY_NUMBERS: Record<NumericKey, string> = {
   history_reuse_days: "7",
   cex_refresh_limit: "6",
   auction_window_minutes: "30",
-  auction_scan_seconds: "600",
-  scan_interval_vinted: "240",
-  scan_interval_gumtree: "300",
-  scan_interval_ebay: "300",
+  auction_alert_window_minutes: "15",
+  auction_scan_seconds: "300",
+  scan_interval_vinted: "1800",
+  scan_interval_gumtree: "1800",
+  scan_interval_ebay: "1800",
   queries_per_cycle: "12",
 };
 
@@ -114,6 +116,7 @@ export function SettingsPage({ onToast, onRefreshSummary }: Props) {
           history_reuse_days: String(data.pricing.history_reuse_days),
           cex_refresh_limit: String(data.pricing.cex_refresh_limit),
           auction_window_minutes: String(data.auctions.window_minutes),
+          auction_alert_window_minutes: String(data.auctions.alert_window_minutes),
           auction_scan_seconds: String(data.auctions.scan_seconds),
           scan_interval_vinted: String(data.scanning.scan_interval_vinted),
           scan_interval_gumtree: String(data.scanning.scan_interval_gumtree),
@@ -162,10 +165,11 @@ export function SettingsPage({ onToast, onRefreshSummary }: Props) {
         history_reuse_days: Math.max(1, Math.round(num(numbers.history_reuse_days, 7))),
         cex_refresh_limit: Math.max(0, Math.round(num(numbers.cex_refresh_limit, 6))),
         auction_window_minutes: Math.max(5, Math.round(num(numbers.auction_window_minutes, 30))),
-        auction_scan_seconds: Math.max(120, Math.round(num(numbers.auction_scan_seconds, 600))),
-        scan_interval_vinted: Math.max(120, Math.round(num(numbers.scan_interval_vinted, 240))),
-        scan_interval_gumtree: Math.max(120, Math.round(num(numbers.scan_interval_gumtree, 300))),
-        scan_interval_ebay: Math.max(120, Math.round(num(numbers.scan_interval_ebay, 300))),
+        auction_alert_window_minutes: Math.max(5, Math.round(num(numbers.auction_alert_window_minutes, 15))),
+        auction_scan_seconds: Math.max(120, Math.round(num(numbers.auction_scan_seconds, 300))),
+        scan_interval_vinted: Math.max(120, Math.round(num(numbers.scan_interval_vinted, 1800))),
+        scan_interval_gumtree: Math.max(120, Math.round(num(numbers.scan_interval_gumtree, 1800))),
+        scan_interval_ebay: Math.max(120, Math.round(num(numbers.scan_interval_ebay, 1800))),
         queries_per_cycle: Math.min(12, Math.max(1, Math.round(num(numbers.queries_per_cycle, 4)))),
         enabled_vinted: enabled.vinted,
         enabled_gumtree: enabled.gumtree,
@@ -419,7 +423,14 @@ export function SettingsPage({ onToast, onRefreshSummary }: Props) {
             suffix="min"
             value={numbers.auction_window_minutes}
             onChange={(v) => updateNumber("auction_window_minutes", v)}
-            hint="Only auctions ending inside this window enter the watchlist and alerts."
+            hint="Auctions ending inside this window enter the watchlist and the Auctions desk."
+          />
+          <Field
+            label="Discord auction alert window"
+            suffix="min"
+            value={numbers.auction_alert_window_minutes}
+            onChange={(v) => updateNumber("auction_alert_window_minutes", v)}
+            hint="Only profitable auctions ending inside this window are pushed to Discord. Set 15 for roughly ten minutes plus scan margin."
           />
           <Field
             label="Auction scan interval"
@@ -430,7 +441,7 @@ export function SettingsPage({ onToast, onRefreshSummary }: Props) {
           />
         </Section>
 
-        <Section icon={Timer} title="Scanning cadence" description="Per-source schedules with jitter and a circuit breaker. Minimum 120 seconds.">
+        <Section icon={Timer} title="Scanning cadence" description="Fixed-price discovery runs a category pass every 30 minutes. Per-source intervals below apply when keyword discovery is used; minimum 120 seconds.">
           <Field label="Vinted interval" suffix="sec" value={numbers.scan_interval_vinted} onChange={(v) => updateNumber("scan_interval_vinted", v)} />
           <Field label="Gumtree interval" suffix="sec" value={numbers.scan_interval_gumtree} onChange={(v) => updateNumber("scan_interval_gumtree", v)} />
           <Field label="eBay interval" suffix="sec" value={numbers.scan_interval_ebay} onChange={(v) => updateNumber("scan_interval_ebay", v)} />

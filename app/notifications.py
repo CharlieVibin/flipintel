@@ -201,10 +201,19 @@ class Notifier:
         if not webhook:
             return 0
         values = self.db.get_settings()
+        # Discovery watches a wider horizon (auction_window_minutes) so the
+        # auction desk can show everything ending soon. Discord is noisier, so
+        # it only fires close to the close: about ten minutes, with a small
+        # margin for the five-minute scan cadence.
         try:
-            window = int(float(values.get("auction_window_minutes", 30)))
+            window = int(
+                float(
+                    values.get("auction_alert_window_minutes")
+                    or values.get("auction_window_minutes", 15)
+                )
+            )
         except (TypeError, ValueError):
-            window = 30
+            window = 15
         try:
             cooldown = int(float(values.get("notification_cooldown_minutes", 180)))
         except (TypeError, ValueError):
@@ -250,6 +259,10 @@ class Notifier:
             end = parse_iso(row.get("auction_end_at"))
             ends_in = int((end - utcnow()).total_seconds() / 60) if end else None
             if ends_in is not None and ends_in <= 0:
+                continue
+            # Enforce the close margin at send time as well as in the query, so
+            # a wider discovery window or a late pass cannot alert early.
+            if ends_in is not None and ends_in > window:
                 continue
             embed = {
                 "title": (row["title"] or "")[:250],

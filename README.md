@@ -94,9 +94,10 @@ clear a profit, ROI and confidence floor.
   search only saw titles matching its words; the same request budget now covers
   every auction ending in the branch, with current bid, bid count, postage, end
   time and a maximum profitable bid that honours fees, postage, minimum profit
-  and the ROI tier. Shortlisted auctions are rechecked every five minutes while
-  they are close to ending, and keyword search remains as a fallback.
-  Nothing is bid automatically and ended auctions leave the feed.
+  and the ROI tier. Auctions are discovered and refreshed every five minutes,
+  and shortlisted auctions are re-read in the same pass while they are close to
+  ending; keyword search remains as a fallback. Nothing is bid automatically
+  and ended auctions leave the feed.
 - **Dedicated Auctions workspace** separate from the Buy-It-Now deal feed. It
   shows every live discovered auction inside the saved preset, including ones
   that are not promoted: current bid, bid count, postage, total cost now, exact
@@ -144,8 +145,12 @@ clear a profit, ROI and confidence floor.
 - **Typed Discord alerts**: new Buy-It-Now deals, Best Offer opportunities,
   auctions ending soon and material bid changes. Alerts include the image,
   listing URL, total cost, expected resale, net profit, ROI, evidence level,
-  maximum offer/bid and ending time. Auction alerts are deduplicated with a
-  configurable cooldown and are never sent for ended auctions.
+  maximum offer/bid and ending time. Buy-It-Now alerts only fire for listings
+  discovered since the last notification, inside the saved preset and promoted
+  by the current profit/ROI/confidence thresholds. Auctions alert only inside
+  the close margin (15 minutes by default, roughly ten plus scan margin), and
+  never for ended auctions or ones above their supported ceiling. Alerts are
+  deduplicated with a configurable cooldown.
 - **Single-user local app**: SQLite, no paid APIs, no cloud dependency.
 
 ## Quick start (Windows)
@@ -242,7 +247,8 @@ ROI (18% above £250 of tied-up capital), 42% minimum evidence score, 13.22%
 eBay fee, £4.50 outbound delivery, £1 packaging, zero other costs and the eBay
 resale channel. Vinted and Facebook can be selected as the resale channel when
 that is where the item will be sold. The resale strategy, 7-day price reuse
-window, CeX lookups per scan and the auction window/interval are configurable
+window, CeX lookups per scan and the auction discovery window, Discord close
+margin and scan interval are configurable
 there too.
 
 ### Auction bid ceiling

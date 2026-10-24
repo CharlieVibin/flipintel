@@ -374,6 +374,60 @@ def test_flip_preserves_prediction_and_learns_only_after_three_outcomes():
         db.close()
 
 
+def test_auction_alerts_wait_for_the_close_margin():
+    """A good auction two dozen minutes out is silent; near the close it alerts."""
+    db = Database(":memory:")
+    try:
+        for i in range(4):
+            _listing(db, i, 250)
+        now = iso()
+        auction_id = db.execute(
+            """
+            INSERT INTO listings(marketplace, external_id, title, url, price, condition_norm,
+                product_key, product_name, listing_kind, identification_confidence, is_auction,
+                current_bid, bid_count, auction_end_at, first_seen, last_seen, status,
+                created_at, updated_at)
+            VALUES ('ebay','a9','Xbox Series X auction','http://e/a9', 120, 'good',
+                'console:xbox-series-x','Xbox Series X','console',0.9,1,120,4,?,?,?,'active',?,?)
+            """,
+            (iso(utcnow() + timedelta(minutes=25)), now, now, now, now),
+        ).lastrowid
+        ValuationEngine(db).refresh()
+        db.execute(
+            "UPDATE deals SET is_deal=1, needs_review=0, max_bid=400, "
+            "evidence_level='moderate' WHERE listing_id=?",
+            (auction_id,),
+        )
+        db.set_settings(
+            {
+                "notifications_enabled": "true",
+                "discord_webhook_url": "https://discord.com/api/webhooks/1/abc",
+                "auction_window_minutes": "30",
+                "auction_alert_window_minutes": "15",
+            }
+        )
+        notifier = Notifier(db)
+        sent: list[str] = []
+
+        async def fake_send(webhook, *, content, embed, listing_id=None, channel="discord", record_notification=True):
+            sent.append(content)
+            return True
+
+        notifier._send = fake_send  # type: ignore[assignment]
+        try:
+            assert asyncio.run(notifier.notify_auctions(limit=4)) == 0
+            db.execute(
+                "UPDATE listings SET auction_end_at=? WHERE id=?",
+                (iso(utcnow() + timedelta(minutes=12)), auction_id),
+            )
+            assert asyncio.run(notifier.notify_auctions(limit=4)) == 1
+            assert "ending soon" in sent[0].lower()
+        finally:
+            asyncio.run(notifier.close())
+    finally:
+        db.close()
+
+
 def test_flip_price_changes_and_unsold_items_are_tracked():
     db = Database(":memory:")
     try:
@@ -424,6 +478,9 @@ def test_auction_alerts_deduplicate_and_respect_cooldown():
                 "notifications_enabled": "true",
                 "discord_webhook_url": "https://discord.com/api/webhooks/1/abc",
                 "notification_cooldown_minutes": "180",
+                # This test is about deduplication, so keep the close margin
+                # wide enough for its 25-minute fixture.
+                "auction_alert_window_minutes": "30",
             }
         )
         notifier = Notifier(db)

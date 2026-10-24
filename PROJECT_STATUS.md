@@ -5,6 +5,31 @@
 **Runtime:** Python 3.10, FastAPI, SQLite, React 18 + Vite + Tailwind
 **Live dashboard:** http://127.0.0.1:8765 (while the local server is running)
 
+## Session 2026-10-24 — Schedule and alert tuning
+
+Requested cadence and alert changes, with no pricing-model work:
+
+- Fixed-price discovery now runs a discovery pass every **30 minutes**
+  (`category_cycle_seconds=1800`, `scan_interval_*=1800` for keyword mode).
+  Category-first discovery still rotates a request budget per pass, so each
+  selected leaf is revisited across later passes rather than all at once.
+- eBay auction discovery, rechecking and expiry now run every **5 minutes**
+  (`auction_scan_seconds=300`, `auction_urgent_seconds=300`).
+- Discord auction alerts now have their own close margin,
+  `auction_alert_window_minutes` (default **15 minutes**, editable in Settings).
+  The wider `auction_window_minutes` still controls what the Auctions desk
+  discovers and displays. The margin is enforced in the alert query and again at
+  send time, so a wide discovery pass or a late scan cannot alert early.
+- Auctions must still be `is_deal=1`, unreviewed, inside the saved preset, at or
+  below the supported maximum bid and backed by the existing evidence gate
+  (Limited or better, with a stored ceiling). Buy-It-Now alerts keep their
+  behaviour: only rows with no prior notification, inside the preset and flagged
+  as a deal are pushed, so re-scans do not repeat old offers.
+- Live database settings were updated (not reset) so the running app uses the
+  new cadence immediately; restart is only needed for the new alert-window code
+  and Settings field. `test_auction_alerts_wait_for_the_close_margin` covers the
+  window. Tests: 193 passed, frontend build passes.
+
 ## Session 2026-10-24 — Dedicated Auctions tab and preset filtering for stored listings
 
 This session made the saved scan preset apply to data that was already in the

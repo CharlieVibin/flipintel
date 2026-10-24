@@ -859,7 +859,8 @@ def _auction_diagnostics(db, config) -> dict[str, Any]:
         "settings": {
             "alerts_enabled": db.setting_bool("auction_alerts_enabled", True),
             "window_minutes": db.setting_int("auction_window_minutes", 30),
-            "scan_seconds": db.setting_int("auction_scan_seconds", 600),
+            "alert_window_minutes": db.setting_int("auction_alert_window_minutes", 15),
+            "scan_seconds": db.setting_int("auction_scan_seconds", 300),
             "urgent_seconds": db.setting_int("auction_urgent_seconds", 300),
         },
         "config_confirmed": config.confirmed,
@@ -1523,6 +1524,7 @@ class SettingsUpdate(BaseModel):
     auction_scan_seconds: int | None = Field(default=None, ge=120, le=3600)
     auction_urgent_seconds: int | None = Field(default=None, ge=120, le=3600)
     auction_window_minutes: int | None = Field(default=None, ge=5, le=240)
+    auction_alert_window_minutes: int | None = Field(default=None, ge=5, le=240)
     auction_alerts_enabled: bool | None = None
     notification_cooldown_minutes: int | None = Field(default=None, ge=10, le=1440)
     notifications_enabled: bool | None = None
@@ -1573,15 +1575,16 @@ async def get_settings(request: Request) -> dict[str, Any]:
             "cex_refresh_limit": int(num("cex_refresh_limit", 6)),
         },
         "auctions": {
-            "scan_seconds": int(num("auction_scan_seconds", 600)),
+            "scan_seconds": int(num("auction_scan_seconds", 300)),
             "urgent_seconds": int(num("auction_urgent_seconds", 300)),
             "window_minutes": int(num("auction_window_minutes", 30)),
+            "alert_window_minutes": int(num("auction_alert_window_minutes", 15)),
             "alerts_enabled": boolean("auction_alerts_enabled", True),
         },
         "scanning": {
-            "scan_interval_vinted": int(num("scan_interval_vinted", 240)),
-            "scan_interval_gumtree": int(num("scan_interval_gumtree", 300)),
-            "scan_interval_ebay": int(num("scan_interval_ebay", 300)),
+            "scan_interval_vinted": int(num("scan_interval_vinted", 1800)),
+            "scan_interval_gumtree": int(num("scan_interval_gumtree", 1800)),
+            "scan_interval_ebay": int(num("scan_interval_ebay", 1800)),
             "queries_per_cycle": int(num("queries_per_cycle", 12)),
             "enabled_vinted": boolean("enabled_vinted", True),
             "enabled_gumtree": boolean("enabled_gumtree", True),
@@ -1626,13 +1629,14 @@ async def update_settings(request: Request, body: SettingsUpdate) -> dict[str, A
         "auction_scan_seconds": "auction_scan_seconds",
         "auction_urgent_seconds": "auction_urgent_seconds",
         "auction_window_minutes": "auction_window_minutes",
+        "auction_alert_window_minutes": "auction_alert_window_minutes",
         "notification_cooldown_minutes": "notification_cooldown_minutes",
     }
     integer_keys = {
         "scan_interval_vinted", "scan_interval_gumtree", "scan_interval_ebay",
         "queries_per_cycle", "history_reuse_days", "cex_refresh_limit",
         "auction_scan_seconds", "auction_urgent_seconds", "auction_window_minutes",
-        "notification_cooldown_minutes",
+        "auction_alert_window_minutes", "notification_cooldown_minutes",
     }
     for field, key in mapping.items():
         value = getattr(body, field)
