@@ -15,7 +15,9 @@ from typing import Any
 import httpx
 
 from .db import Database
+from .scan_config import load_scan_config
 from .utils import hours_ago, iso, parse_iso, utcnow
+from .visibility import preset_filter
 
 log = logging.getLogger(__name__)
 
@@ -99,8 +101,13 @@ class Notifier:
         webhook = await self._webhook()
         if not webhook:
             return 0
+        # A category or budget that the user has since disabled must not keep
+        # alerting from stored history. The same saved-preset clauses used by
+        # the dashboard also gate outbound offers.
+        clauses, clause_params, _ = preset_filter(self.db, load_scan_config(self.db))
+        preset_sql = f" AND {' AND '.join(clauses)}" if clauses else ""
         rows = self.db.query(
-            """
+            f"""
             SELECT l.*, d.expected_resale, d.net_profit, d.roi, d.confidence, d.score,
                    d.reasons, d.evidence_level, d.max_bid, d.resale_strategy,
                    d.estimated_days, d.risk_level
@@ -110,10 +117,11 @@ class Notifier:
             LEFT JOIN notifications n ON n.listing_id = l.id AND n.channel = 'discord'
             WHERE d.is_deal = 1 AND l.status = 'active' AND x.listing_id IS NULL
               AND n.id IS NULL AND l.first_seen >= ? AND l.is_auction = 0
+              {preset_sql}
             ORDER BY d.score DESC
             LIMIT ?
             """,
-            (hours_ago(48), limit),
+            (hours_ago(48), *clause_params, limit),
         )
         sent = 0
         for row in rows:

@@ -4,6 +4,7 @@ import {
   Bookmark,
   CircleAlert,
   Database,
+  Gavel,
   LayoutGrid,
   ListChecks,
   RefreshCw,
@@ -17,6 +18,7 @@ import type { HealthResponse, Overview } from "./lib/types";
 import { clockTime, timeAgo } from "./lib/format";
 import { cn, Logo, Toast, type ToastData } from "./components/ui";
 import { DealDrawer } from "./components/DealDrawer";
+import { AuctionsPage } from "./pages/AuctionsPage";
 import { DealsPage } from "./pages/DealsPage";
 import { EvidencePage } from "./pages/EvidencePage";
 import { FlipsPage } from "./pages/FlipsPage";
@@ -25,11 +27,12 @@ import { ScanConfigPage } from "./pages/ScanConfigPage";
 import { ScannersPage } from "./pages/ScannersPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
-const TABS = ["deals", "saved", "flips", "evidence", "scanners", "scan-config", "settings"] as const;
+const TABS = ["deals", "auctions", "saved", "flips", "evidence", "scanners", "scan-config", "settings"] as const;
 type Tab = (typeof TABS)[number];
 
 const TAB_META: Record<Tab, { label: string; title: string; subtitle: string; icon: typeof LayoutGrid }> = {
   deals: { label: "Deal feed", title: "Deal desk", subtitle: "Ranked opportunities from live UK listings", icon: LayoutGrid },
+  auctions: { label: "Auctions", title: "Auction desk", subtitle: "Ending-soon eBay auctions, current bids and supported bid ceilings", icon: Gavel },
   saved: { label: "Shortlist", title: "Shortlist", subtitle: "Saved and dismissed opportunities", icon: Bookmark },
   flips: { label: "My flips", title: "My flips", subtitle: "Purchases, price cuts and realised results", icon: Wallet },
   evidence: { label: "Evidence", title: "Evidence lab", subtitle: "Completed sales, imports and valuation calibration", icon: Database },
@@ -260,6 +263,19 @@ export default function App() {
               onNavigate={navigate}
             />
           )}
+          {tab === "auctions" && (
+            <AuctionsPage
+              health={health}
+              refreshTick={refreshTick}
+              onSelectDeal={setSelectedDeal}
+              onToast={pushToast}
+              onRefreshSummary={() => {
+                void fetchSummary();
+                setRefreshTick((value) => value + 1);
+              }}
+              onNavigate={navigate}
+            />
+          )}
           {tab === "saved" && (
             <SavedPage
               refreshTick={refreshTick}
@@ -485,7 +501,7 @@ function MobileNav({ tab, onNavigate, dealCount }: { tab: Tab; onNavigate: (tab:
               key={key}
               onClick={() => onNavigate(key)}
               className={cn(
-                "relative flex min-w-[64px] flex-col items-center gap-1 rounded-lg px-2 py-1.5 text-[9px] font-medium transition",
+                "relative flex min-w-[50px] flex-1 flex-col items-center gap-1 rounded-lg px-1 py-1.5 text-[8.5px] font-medium transition",
                 active ? "text-lime-300" : "text-mist-500",
               )}
             >

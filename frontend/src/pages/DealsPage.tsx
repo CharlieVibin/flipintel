@@ -3,17 +3,19 @@ import {
   ArrowRight,
   ArrowUpRight,
   BellRing,
+  Check,
   CircleAlert,
   Clock3,
   Gauge,
   RefreshCw,
   Radar,
   ScanSearch,
+  SlidersHorizontal,
   Sparkles,
   TrendingUp,
   Wallet,
 } from "lucide-react";
-import type { Deal, DealFilters, HealthResponse, Overview } from "../lib/types";
+import type { Deal, DealFilters, HealthResponse, Overview, PresetSummary } from "../lib/types";
 import { api } from "../lib/api";
 import { useDeals } from "../hooks/useDeals";
 import { DealCard } from "../components/DealCard";
@@ -43,7 +45,7 @@ export function DealsPage({
   onScanNow,
   onNavigate,
 }: Props) {
-  const [filters, setFilters] = useState<DealFilters>({ sort: "score" });
+  const [filters, setFilters] = useState<DealFilters>({ sort: "score", active_preset: true });
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const seenRef = useRef<Set<number> | null>(null);
@@ -264,6 +266,13 @@ export function DealsPage({
         />
       )}
 
+      <PresetBar
+        preset={overview?.preset ?? null}
+        active={filters.active_preset !== false}
+        onToggle={(next) => setFilters((prev) => ({ ...prev, active_preset: next }))}
+        onNavigate={onNavigate}
+      />
+
       <FilterBar
         filters={effectiveFilters}
         onChange={(patch) =>
@@ -279,7 +288,7 @@ export function DealsPage({
           })
         }
         onReset={() => {
-          setFilters({ sort: "score" });
+          setFilters({ sort: "score", active_preset: true });
           setQuery("");
         }}
         query={query}
@@ -315,7 +324,7 @@ export function DealsPage({
               filters.review_flag,
             )}
             onReset={() => {
-              setFilters({ sort: "score" });
+              setFilters({ sort: "score", active_preset: true });
               setQuery("");
             }}
             onScanNow={onScanNow}
@@ -362,6 +371,83 @@ export function DealsPage({
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+function PresetBar({
+  preset,
+  active,
+  onToggle,
+  onNavigate,
+}: {
+  preset: PresetSummary | null;
+  active: boolean;
+  onToggle: (next: boolean) => void;
+  onNavigate: (tab: string) => void;
+}) {
+  if (!preset) return null;
+  const marketplaceNames: Record<string, string> = {
+    ebay: "eBay",
+    vinted: "Vinted",
+    gumtree: "Gumtree",
+  };
+  const marketplaces = Object.entries(preset.marketplaces)
+    .filter(([, enabled]) => enabled)
+    .map(([name]) => marketplaceNames[name] ?? name)
+    .join(" / ");
+  return (
+    <div
+      className={cn(
+        "panel mb-3 px-4 py-3",
+        !active && "border-ember/35 bg-ember/[0.035]",
+        !preset.confirmed && "border-rose/45 bg-rose/[0.04]",
+      )}
+    >
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <span className="chip border-ink-500 bg-ink-800/70 text-mist-200">
+          <SlidersHorizontal className="h-3 w-3" />
+          {preset.active_preset}
+        </span>
+        <span className="text-[11px] text-mist-400">
+          {preset.enabled_count.toLocaleString()} categor{preset.enabled_count === 1 ? "y" : "ies"}
+          {" · "}
+          {money(preset.min_price)}–{money(preset.max_price)}
+          {marketplaces ? ` · ${marketplaces}` : " · no sources"}
+        </span>
+        {active && preset.hidden > 0 && (
+          <span className="text-[11px] text-mist-500">
+            {preset.hidden.toLocaleString()} stored listing{preset.hidden === 1 ? "" : "s"} outside
+            this preset {preset.hidden === 1 ? "is" : "are"} hidden.
+          </span>
+        )}
+        <button
+          className={cn("filter-chip ml-auto shrink-0", active && "filter-chip-active")}
+          onClick={() => onToggle(!active)}
+          aria-pressed={active}
+          title="Apply the saved category, marketplace and budget rules to stored listings"
+        >
+          <Check className={cn("h-3 w-3", !active && "opacity-40")} />
+          Active preset only
+        </button>
+      </div>
+      {!active && (
+        <p className="mt-2 border-t border-ember/20 pt-2 text-[10.5px] leading-relaxed text-ember/90">
+          History mode: listings outside the active preset are visible for inspection only. They are not
+          re-scanned, re-valued or allowed to trigger alerts.{" "}
+          <button className="font-medium underline hover:text-ember" onClick={() => onNavigate("scan-config")}>
+            Edit preset
+          </button>
+        </p>
+      )}
+      {!preset.confirmed && (
+        <p className="mt-2 border-t border-rose/25 pt-2 text-[10.5px] leading-relaxed text-rose">
+          No scan configuration is saved. Stored history is shown, but new scans and alerts stay paused.{" "}
+          <button className="font-medium underline" onClick={() => onNavigate("scan-config")}>
+            Configure scanning
+          </button>
+        </p>
+      )}
     </div>
   );
 }

@@ -17,7 +17,15 @@ interface Props {
 export function SavedPage({ refreshTick, onSelectDeal, onToast, onRefreshSummary, onNavigate }: Props) {
   const [mode, setMode] = useState<"saved" | "archived">("saved");
   const filters = useMemo(
-    () => ({ saved_only: true, archived: mode === "archived", sort: "newest" as const, limit: 36 }),
+    () => ({
+      saved_only: true,
+      archived: mode === "archived",
+      sort: "newest" as const,
+      limit: 36,
+      // A saved item remains the user's explicit choice even when the active
+      // preset no longer covers its category or price.
+      active_preset: false,
+    }),
     [mode],
   );
   const { deals, total, loading, error, reload, removeDeal, updateDeal } = useDeals(filters, refreshTick);

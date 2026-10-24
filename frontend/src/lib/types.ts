@@ -74,6 +74,9 @@ export interface Deal {
   saved: boolean;
   dismissed: boolean;
   discount_pct: number | null;
+  scan_leaf?: string | null;
+  outside_preset?: boolean;
+  preset_reasons?: string[];
 }
 
 export interface Comp {
@@ -242,14 +245,89 @@ export interface DealDetail extends Deal {
   price_history: { price: number; observed_at: string }[];
 }
 
+export interface PresetSummary {
+  active_preset: string;
+  confirmed: boolean;
+  min_price: number;
+  max_price: number;
+  marketplaces: Record<string, boolean>;
+  enabled_categories: string[];
+  enabled_count: number;
+  hidden: number;
+  unfiltered: number;
+}
+
 export interface DealsResponse {
   deals: Deal[];
   total: number;
   page: number;
   limit: number;
   has_more: boolean;
+  preset: PresetSummary;
+  hidden_by_preset: number;
   generated_at: string;
   thresholds: Thresholds;
+}
+
+export type AuctionStatus = "verified" | "needs_verification" | "rejected";
+
+export interface Auction extends Deal {
+  verification_status: AuctionStatus;
+  verification_reason: string;
+  profit_supported: boolean;
+  total_cost: number;
+  cost_basis: string;
+  seconds_remaining: number | null;
+  ends_at: string;
+  identified_variant: string | null;
+  live_bid: number | null;
+}
+
+export interface AuctionScan {
+  id: number;
+  started_at: string;
+  finished_at: string | null;
+  status: string;
+  items_found: number;
+  items_new: number;
+  duration_ms: number | null;
+  error: string | null;
+  queries: string[];
+  window_minutes: number | null;
+  configured_categories: string[];
+  strategy: string | null;
+}
+
+export interface AuctionDiagnostics {
+  source: {
+    marketplace: string;
+    enabled: boolean;
+    state: string;
+    last_attempt_at: string | null;
+    last_success_at: string | null;
+    last_error: string | null;
+    next_scan_at: string | null;
+  };
+  last_scan: AuctionScan | null;
+  settings: {
+    alerts_enabled: boolean;
+    window_minutes: number;
+    scan_seconds: number;
+    urgent_seconds: number;
+  };
+  config_confirmed: boolean;
+}
+
+export interface AuctionsResponse {
+  auctions: Auction[];
+  total: number;
+  page: number;
+  limit: number;
+  has_more: boolean;
+  counts: Record<AuctionStatus | "all", number>;
+  preset: PresetSummary;
+  diagnostics: AuctionDiagnostics;
+  generated_at: string;
 }
 
 export interface ReviewGroupExample {
@@ -434,6 +512,8 @@ export interface HealthResponse {
 }
 
 export interface Overview {
+  preset: PresetSummary;
+  hidden_by_preset: number;
   deals: number;
   potential_profit: number;
   avg_roi: number;
@@ -462,6 +542,7 @@ export interface Overview {
   marketplaces: { marketplace: string; count: number }[];
   sources: { marketplace: string; state: string; last_success_at: string | null; last_error: string | null; next_scan_at: string | null; consecutive_failures: number }[];
   active_listings: number;
+  active_listings_all: number;
   tracked_models: number;
   scans_24h: number;
   last_scan: string | null;
@@ -767,6 +848,8 @@ export interface EvidenceImportResult {
 export type SortKey = "score" | "newest" | "profit" | "roi" | "confidence" | "price";
 
 export interface DealFilters {
+  active_preset?: boolean;
+  include_auctions?: boolean;
   category?: string;
   marketplace?: string;
   condition?: string;

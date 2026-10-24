@@ -479,6 +479,7 @@ class Database:
                 "min_next_bid": "REAL",
                 "identity_level": "TEXT",
                 "identity_basis": "TEXT",
+                "scan_leaf": "TEXT",
             },
             "market_comps": {
                 "postage": "REAL NOT NULL DEFAULT 0",
@@ -553,6 +554,13 @@ class Database:
         )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_comps_import ON market_comps(import_id)"
+        )
+        # Stored rows are filtered by the active preset at query time. The
+        # leaf is derived from identity, title and marketplace, so it can be
+        # rebuilt without touching any historical observation.
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_listings_scan_leaf "
+            "ON listings(scan_leaf, status)"
         )
         # A listing's identity is not allowed to change while old price memory
         # keeps being served under the previous identity. The scanner fills

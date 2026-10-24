@@ -58,6 +58,14 @@ export function DealCard({ deal, onOpen, onSave, onDismiss, onRestore, archived 
                 <TrendingUp className="h-3 w-3 rotate-180" /> Price drop
               </span>
             )}
+            {deal.outside_preset && (
+              <span
+                className="chip border-ember/35 bg-ink-950/85 text-ember backdrop-blur-md"
+                title={deal.preset_reasons?.join("; ") ?? "Outside the active scan preset"}
+              >
+                <CircleAlert className="h-3 w-3" /> Outside preset
+              </span>
+            )}
             {deal.saved && (
               <span className="chip border-lime-400/25 bg-ink-950/70 text-lime-300 backdrop-blur-md">
                 <BookmarkCheck className="h-3 w-3" /> Saved

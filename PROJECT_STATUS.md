@@ -1,9 +1,132 @@
 # FlipIntel — Project Status
 
-**Last updated:** 2026-10-23
+**Last updated:** 2026-10-24
 **Workspace:** `C:\Users\Charr\Documents\Freebuff web`
 **Runtime:** Python 3.10, FastAPI, SQLite, React 18 + Vite + Tailwind
 **Live dashboard:** http://127.0.0.1:8765 (while the local server is running)
+
+## Session 2026-10-24 — Dedicated Auctions tab and preset filtering for stored listings
+
+This session made the saved scan preset apply to data that was already in the
+database, and added a real auction workspace. No pricing model, historical
+observation or legacy collector was replaced.
+
+### Why old listings were still visible
+
+The scanner applied category, marketplace and budget rules before a **new**
+marketplace request, but the deal, overview, review and alert queries never
+looked at the saved preset again. A listing collected under an earlier preset
+therefore stayed in the feed after its category was disabled or its price left
+the budget, regardless of when it was discovered. The fix is at the SQL layer,
+not a frontend hide.
+
+- `listings.scan_leaf` now stores the taxonomy leaf derived from the stored
+  identity, title and marketplace. It is an additive column with an index; the
+  111,863 existing rows were classified on startup in about two seconds.
+  Identity corrections and the existing re-identification pass update it.
+- `app/visibility.py` owns the one definition of preset membership: enabled
+  leaves, enabled marketplaces, and total purchase cost (Vinted buyer-protection
+  fee and estimated delivery included, eBay/Gumtree postage included, auction
+  bids used instead of Buy-It-Now prices). `app/api.py` applies that filter to
+  deal feed, overview statistics, review counts/groups and auction lists;
+  `app/notifications.py` applies it before any Discord offer.
+- Pagination, `total`, `has_more`, category/marketplace statistics and the
+  dashboard cards all derive from the filtered query, so counts cannot disagree
+  with the rows. The response also reports how many stored rows the preset
+  hides.
+- **Active preset only** is on by default on the Deal feed. Turning it off
+  returns the same stored rows in history mode, labelled **Outside preset** with
+  the concrete reason (disabled category, disabled marketplace, over/under
+  budget). History mode does not re-scan, re-value or alert. Nothing is deleted.
+- The Shortlist is intentionally not preset-filtered: a user's explicit save
+  remains reachable, with an outside-preset label when relevant. My Flips and all
+  completed records are untouched.
+
+### Auctions workspace
+
+`AuctionsPage.tsx` is a separate tab backed by `GET /api/auctions`, using the
+existing eBay Browse auction scanner rather than a second collector. It shows
+all live discovered auctions inside the preset, not only promoted ones:
+image, title, exact identified model, current bid, bid count, postage, total
+cost now, exact end time, live countdown, seller, condition, evidence grade,
+resale estimate, direct eBay link and the scanner's last-pass diagnostics.
+
+- Filters are server-side: ending within 5/10/15/30/60 minutes, ending soonest,
+  current bid, potential profit, newest, and Verified / Needs verification /
+  Rejected. Refresh calls `POST /api/auctions/refresh`, which starts one
+  guarded auction pass through the existing scanner.
+- Verification is descriptive, not a fake probability: a verified row needs a
+  product identity, moderate or strong compatible evidence, a supported maximum
+  bid and a promoted deal. Insufficient/limited evidence, a missing identity or
+  an unresolved review stays **Needs verification**; faulty, over-budget or
+  above-ceiling rows are **Rejected** with the reason. Profit and maximum bid are
+  withheld in the UI and marked `profit_supported: false` unless verified.
+- Auctions are excluded from the default deal feed, so a current bid is never
+  presented as a Buy-It-Now purchase price. Saved auctions remain in the
+  Shortlist. The auction scanner still obeys the saved categories, eBay toggle,
+  budget, ending window and recheck/alert infrastructure.
+
+### Live measurements on the existing database
+
+Using the user's **`100gbp starter`** preset (28 leaves, £0–£100, eBay + Vinted +
+Gumtree):
+
+| Measure | Result |
+|---|---:|
+| Stored listings classified | 111,863 |
+| Active non-auction listings | 110,785 |
+| Active non-auction listings inside preset | 30,267 |
+| Deal-feed rows before filtering (history) | 199 |
+| Deal-feed rows shown by default | 11 |
+| Previously visible deal opportunities hidden | 188 |
+| Live upcoming auctions | 499 |
+| Upcoming auctions inside preset | 264 |
+| Auctions hidden by preset | 235 |
+| Verified / Needs verification / Rejected (in preset) | 0 / 222 / 42 |
+| Review rows inside preset | 352 |
+| Selected eBay auction categories | 25 |
+
+There are currently **zero verified auctions inside this preset**. The five
+promoted auction deals in the database are a Switch OLED, Xbox Series X, Switch
+2, Galaxy S24 and iPhone 17 Pro: every one is a disabled category or above the
+£100 budget. The tab labels them as outside preset/history instead of promoting
+them, which is the intended result of the fix.
+
+Historical data is intact: `listings` 111,863, `price_history` 115,041,
+`market_observations` 50,123, `valuation_snapshots` 7,976, `external_quotes`
+135, `cex_price_history` 174. The derived `scan_leaf` and filter work did not
+delete or rewrite any of those rows. The database grew only through normal
+scanning during the session.
+
+### Verification
+
+- `python -m pytest -q`: **192 passed** (187 previous, 5 new in
+  `tests/test_listing_visibility.py`). The new tests cover total-cost budget
+  including Vinted fees and postage, category/marketplace toggles, immediate
+  preset changes without a restart, history mode labels, overview/health counts,
+  auction verification states, ending-window and status filters, auction/deal
+  separation, Discord preset gating, and legacy-row classification.
+- `cd frontend && npm run build`: TypeScript and Vite build pass.
+- Live API checks against the real database confirmed the counts above and that
+  the default deal feed returns only in-preset rows while history mode returns
+  the full stored set with reasons.
+
+Remaining limitations:
+
+- An auction is verified only when its existing valuation has moderate/strong
+  evidence and a supported ceiling. With the current £100 PC-parts preset, no
+  auction clears that bar, so the tab deliberately shows a large
+  "needs verification" group rather than inventing opportunities.
+- The derived leaf is recalculated by the existing identity pass. If an operator
+  changes the taxonomy without restarting, run the re-identification/backfill
+  path before relying on the new mapping.
+- The Auctions tab's Refresh starts the existing scanner pass; a pass can take
+  tens of seconds and the page reloads automatically after it. It is not a
+  real-time bid stream.
+- This phase did not change the pricing/evidence model, eBay/Vinted/Gumtree
+  collectors, CeX integration or Discord formatting.
+
+Commits: _to be filled after the final push_.
 
 ## Session 2026-10-23 — Pre-scan category toggles, presets and budget controls
 

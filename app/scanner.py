@@ -8,7 +8,6 @@ import json
 import logging
 import random
 from datetime import timedelta
-from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlparse
 
@@ -16,6 +15,7 @@ from .categories import CATALOGUES, Category, categories_for, category_by_id, ca
 from .config import CATEGORY_LABELS, DISCOVERY_QUERIES, MARKETPLACE_LABELS, settings
 from .scan_config import ScanConfiguration, load_scan_config, scan_leaf_for
 from .scan_taxonomy import mapped_category_ids
+from .visibility import backfill_scan_leafs, leaf_for_row, preset_filter
 from .collectors import (
     BaseCollector,
     CollectorError,
@@ -135,6 +135,7 @@ class Scanner:
         self.notifier = Notifier(db)
         self._locks = {name: asyncio.Lock() for name in self.collectors}
         self._refresh_lock = asyncio.Lock()
+        self._auction_lock = asyncio.Lock()
         self._tasks: list[asyncio.Task] = []
         self._stop = asyncio.Event()
         self._running: set[str] = set()
@@ -224,7 +225,7 @@ class Scanner:
         rows = self.db.query(
             "SELECT id, title, description, condition_raw, category, product_key, product_name, "
             "identification_confidence, is_faulty, is_wanted, is_bundle, listing_kind, flags, attrs, "
-            "identity_level, identity_basis "
+            "identity_level, identity_basis, marketplace, scan_leaf "
             "FROM listings WHERE id NOT IN ("
             "SELECT listing_id FROM review_decisions WHERE decision='corrected')"
         )
@@ -237,6 +238,9 @@ class Scanner:
             )
             flags_json = json_dumps(ident.flags)
             attrs_json = json_dumps(ident.attrs)
+            scan_leaf = leaf_for_row({**row, "category": ident.category,
+                                      "product_key": ident.product_key,
+                                      "flags": flags_json, "attrs": attrs_json})
             if (
                 row["category"] == ident.category
                 and row["product_key"] == ident.product_key
@@ -250,6 +254,7 @@ class Scanner:
                 and row["attrs"] == attrs_json
                 and row.get("identity_level") == ident.identity_level
                 and row.get("identity_basis") == json_dumps(ident.identity_basis)
+                and row.get("scan_leaf") == scan_leaf
             ):
                 continue
             previous_key = row.get("product_key")
@@ -258,12 +263,13 @@ class Scanner:
             self.db.execute(
                 "UPDATE listings SET category=?, product_key=?, product_name=?, "
                 "identification_confidence=?, is_faulty=?, is_wanted=?, is_bundle=?, "
-                "listing_kind=?, flags=?, attrs=?, identity_level=?, identity_basis=? WHERE id=?",
+                "listing_kind=?, flags=?, attrs=?, identity_level=?, identity_basis=?, "
+                "scan_leaf=? WHERE id=?",
                 (
                     ident.category, ident.product_key, ident.product_name, ident.confidence,
                     int(ident.is_faulty), int(ident.is_wanted), int(ident.is_bundle),
                     ident.kind, flags_json, attrs_json, ident.identity_level,
-                    json_dumps(ident.identity_basis), row["id"],
+                    json_dumps(ident.identity_basis), scan_leaf, row["id"],
                 ),
             )
             changed += 1
@@ -277,6 +283,11 @@ class Scanner:
                 "Invalidated %d cached valuation(s) for %d superseded product key(s)",
                 invalidated, len(stale_keys),
             )
+        # Rows whose identity did not change may still predate the stored leaf
+        # column. Filling those is cheap and makes every query consistent.
+        filled = backfill_scan_leafs(self.db)
+        if filled:
+            log.info("Stored scan category for %d existing listings", filled)
         retired = self.pricing.invalidate_contaminated_observations()
         if retired:
             log.info("Retired %d market observation(s) filed under an old identity", retired)
@@ -1189,11 +1200,10 @@ class Scanner:
             description = normalise_text(item.description)[:4000]
             ident = identify_listing(title, f"{description} {item.condition_raw}", marketplace)
             source_category = str(item.category_id or category_id or "")
-            scan_leaf = None
+            scan_leaf = scan_leaf_for(
+                ident, title, source_category or None, marketplace
+            )
             if scan_config is not None:
-                scan_leaf = scan_leaf_for(
-                    ident, title, source_category or None, marketplace
-                )
                 # A disabled product class is rejected before storage, dedupe,
                 # enrichment and valuation. Existing historical rows are not
                 # deleted; they simply stop being refreshed by new scans.
@@ -1278,7 +1288,7 @@ class Scanner:
                         auction_end_at=?, current_bid=?, bid_count=?, min_next_bid=?, posted_at=?,
                         last_seen=?, last_price=?, previous_price=?, price_dropped_at=?,
                         status='active', search_query=?, raw_json=?, flags=?, attrs=?,
-                        identity_level=?, identity_basis=?, updated_at=?
+                        identity_level=?, identity_basis=?, scan_leaf=?, updated_at=?
                     WHERE id=?
                     """,
                     (
@@ -1291,7 +1301,7 @@ class Scanner:
                         old_price if price_dropped else None,
                         now if price_dropped else None,
                         item.search_query, raw_json, flags_json, attrs_json,
-                        identity_level, identity_basis, now,
+                        identity_level, identity_basis, scan_leaf, now,
                         existing["id"],
                     ),
                 )
@@ -1317,10 +1327,10 @@ class Scanner:
                         auction_end_at, current_bid, bid_count, min_next_bid,
                         posted_at, first_seen, last_seen, last_price, status, search_query,
                         raw_json, flags, attrs, created_at, updated_at,
-                        identity_level, identity_basis)
+                        identity_level, identity_basis, scan_leaf)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'GBP',
                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        'active', ?, ?, ?, ?, ?, ?, ?, ?)
+                        'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         marketplace, item.external_id, item.url, title, description,
@@ -1332,7 +1342,7 @@ class Scanner:
                         item.min_next_bid,
                         item.posted_at, now, now, item.price, item.search_query,
                         raw_json, flags_json, attrs_json, identity_level, identity_basis,
-                        now, now,
+                        scan_leaf, now, now,
                     ),
                 )
                 listing_id = int(cursor.lastrowid)
@@ -1364,6 +1374,7 @@ class Scanner:
             """
             SELECT l.product_key, l.listing_kind, l.product_name, l.category,
                    MAX(l.title) AS title, MAX(l.marketplace) AS marketplace,
+                   MAX(l.scan_leaf) AS scan_leaf,
                    COUNT(*) AS n, COUNT(DISTINCT l.marketplace) AS mp
             FROM listings l
             WHERE l.status='active' AND l.product_key IS NOT NULL AND l.last_seen >= ?
@@ -1422,18 +1433,7 @@ class Scanner:
         """Whether a stored product belongs to an enabled scan category."""
         if not self.scan_config.confirmed:
             return False
-        ident = SimpleNamespace(
-            category=row.get("category") or "other",
-            product_key=row.get("product_key") or "",
-            flags=[],
-            attrs={},
-        )
-        leaf = scan_leaf_for(
-            ident,
-            row.get("title") or row.get("product_name") or "",
-            None,
-            str(row.get("marketplace") or ""),
-        )
+        leaf = str(row.get("scan_leaf") or "") or leaf_for_row(row)
         return self.scan_config.allows(leaf)
 
     async def cex_quote_pause_check(self) -> None:
@@ -1451,21 +1451,26 @@ class Scanner:
         if not settings.cex_enabled:
             return
         pricing = self.valuation.pricing
+        # Disabled categories must not trigger independent CeX research either.
+        clauses, clause_params, _ = preset_filter(self.db, self.scan_config)
+        preset_sql = " AND " + " AND ".join(clauses) if clauses else ""
         priority_rows = self.db.query(
-            """
+            f"""
             SELECT DISTINCT d.product_key FROM deals d
             JOIN listings l ON l.id = d.listing_id
             WHERE l.status='active' AND d.product_key IS NOT NULL
-              AND (d.is_deal = 1 OR l.is_auction = 1)
-            """
+              AND (d.is_deal = 1 OR l.is_auction = 1){preset_sql}
+            """,
+            clause_params,
         )
         priority = [row["product_key"] for row in priority_rows]
         models = self.db.query(
-            """
+            f"""
             SELECT l.product_key, MAX(l.product_name) AS product_name,
                    MAX(l.condition_norm) AS condition_norm, MAX(l.attrs) AS attrs,
                    MAX(l.category) AS category, MAX(l.title) AS title,
-                   MAX(l.marketplace) AS marketplace, COUNT(*) AS n,
+                   MAX(l.marketplace) AS marketplace, MAX(l.scan_leaf) AS scan_leaf,
+                   COUNT(*) AS n,
                    MAX(CASE WHEN d.is_deal = 1 THEN 1 ELSE 0 END) AS deal_count,
                    MAX(CASE WHEN l.is_auction = 1 THEN 1 ELSE 0 END) AS auction_count
             FROM listings l
@@ -1474,11 +1479,11 @@ class Scanner:
             LEFT JOIN deals d ON d.listing_id = l.id
             WHERE l.status='active' AND l.product_key IS NOT NULL
               AND l.is_faulty=0 AND l.is_wanted=0 AND l.last_seen >= ?
-              AND l.product_key NOT LIKE 'pc:%'
+              AND l.product_key NOT LIKE 'pc:%'{preset_sql}
             GROUP BY l.product_key
             ORDER BY auction_count DESC, deal_count DESC, n DESC LIMIT 80
             """,
-            (hours_ago(24 * 7),),
+            (hours_ago(24 * 7), *clause_params),
         )
         if not models:
             return
@@ -1534,7 +1539,7 @@ class Scanner:
         rows = self.db.query(
             """
             SELECT id, external_id, marketplace, title, category, product_key,
-                   product_name, auction_end_at, price, current_bid
+                   product_name, auction_end_at, price, current_bid, scan_leaf
             FROM listings
             WHERE status='active' AND is_auction=1 AND auction_end_at IS NOT NULL
               AND auction_end_at >= ? AND auction_end_at <= ?
@@ -1593,7 +1598,7 @@ class Scanner:
             """
             SELECT l.id, l.marketplace, l.category, l.product_key, l.product_name,
                    l.title, l.price, l.shipping, l.current_bid, l.bid_count,
-                   l.min_next_bid, l.auction_end_at, d.expected_resale, d.net_profit,
+                   l.min_next_bid, l.auction_end_at, l.scan_leaf, d.expected_resale, d.net_profit,
                    d.max_bid, d.confidence, d.evidence_level, d.rank_score, d.rank_tier,
                    d.roi
             FROM listings l JOIN deals d ON d.listing_id = l.id
@@ -1623,6 +1628,13 @@ class Scanner:
         return allowed
 
     async def scan_auctions(self) -> SearchOutcome | None:
+        """Run one auction discovery pass, or skip if one is already active."""
+        if self._auction_lock.locked():
+            return None
+        async with self._auction_lock:
+            return await self._scan_auctions()
+
+    async def _scan_auctions(self) -> SearchOutcome | None:
         """Scan ending-soon auctions and revalue anything newly collected.
 
         Category-first discovery replaced keyword auction searches. A keyword

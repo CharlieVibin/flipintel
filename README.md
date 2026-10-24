@@ -97,6 +97,25 @@ clear a profit, ROI and confidence floor.
   and the ROI tier. Shortlisted auctions are rechecked every five minutes while
   they are close to ending, and keyword search remains as a fallback.
   Nothing is bid automatically and ended auctions leave the feed.
+- **Dedicated Auctions workspace** separate from the Buy-It-Now deal feed. It
+  shows every live discovered auction inside the saved preset, including ones
+  that are not promoted: current bid, bid count, postage, total cost now, exact
+  end time and live countdown, seller, condition, evidence grade and direct eBay
+  link. Filters cover ending within 5/10/15/30/60 minutes, ending-soonest,
+  current-bid and potential-profit sorting, and Verified / Needs verification /
+  Rejected states. Profit and a maximum bid appear only for a valuation with
+  moderate or strong compatible evidence. Ended, faulty, over-budget and
+  disabled-category auctions are excluded or explicitly labelled, and scanner
+  diagnostics show the last auction pass, source state and monitoring cadence.
+- **The active preset also filters stored history.** Deal feed, overview
+  statistics, review queue and auction lists are filtered at the SQL level by
+  the saved category leaves, marketplace toggles and total-cost budget. A
+  listing collected under an earlier preset cannot reappear as an opportunity
+  or trigger a Discord alert after its category or budget is disabled. An
+  **Active preset only** toggle (on by default) reveals those rows as clearly
+  labelled history without re-scanning or re-alerting them; nothing is deleted.
+  The scanner stores a derived taxonomy leaf per listing so filtering stays a
+  simple indexed query, and existing rows are classified on startup.
 - **My Flips**: mark a detected deal as purchased, record actual costs, price
   cuts and the final sale, and compare the realised result with the original
   prediction. Completed outcomes slowly adjust resale estimates per kind once at
@@ -118,10 +137,10 @@ clear a profit, ROI and confidence floor.
   can be inspected through the dashboard's Review filter.
 - **Cross-marketplace duplicate flags** for likely cross-posts. Original rows
   and URLs remain intact.
-- **Dashboard** with ranked feed, filters (condition, confidence, marketplace,
-  age), sorting, deal drawer, evidence, verified-sold import, images, direct
-  listing links, saved/dismissed deals, review queue, scanner health, scan
-  history and settings.
+- **Dashboard** with ranked Deal feed, a separate Auctions workspace, filters
+  (condition, confidence, marketplace, age), sorting, deal drawer, evidence,
+  verified-sold import, images, direct listing links, saved/dismissed deals,
+  review queue, scanner health, scan history, scan setup and settings.
 - **Typed Discord alerts**: new Buy-It-Now deals, Best Offer opportunities,
   auctions ending soon and material bid changes. Alerts include the image,
   listing URL, total cost, expected resale, net profit, ROI, evidence level,

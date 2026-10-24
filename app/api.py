@@ -1,8 +1,10 @@
 """HTTP API used by the dashboard."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+from datetime import timedelta
 from typing import Any
 from urllib.parse import urlparse
 
@@ -40,6 +42,13 @@ from .scan_config import (
 from .scanner import Scanner, ScanConfigurationRequired
 from .utils import age_hours, hours_ago, iso, parse_iso, normalise_text, utcnow
 from .valuation import ValuationConfig
+from .visibility import (
+    leaf_for_row,
+    preset_filter,
+    preset_summary,
+    row_in_preset,
+    row_total,
+)
 
 router = APIRouter(prefix="/api")
 
@@ -109,6 +118,7 @@ def _listing_row(row: dict[str, Any]) -> dict[str, Any]:
         "identification_confidence": row.get("identification_confidence") or 0,
         "identity_level": row.get("identity_level") or None,
         "identity_basis": _parse_json(row.get("identity_basis"), []),
+        "scan_leaf": row.get("scan_leaf"),
         "is_faulty": bool(row.get("is_faulty")),
         "is_wanted": bool(row.get("is_wanted")),
         "is_auction": bool(row.get("is_auction")),
@@ -177,6 +187,8 @@ def _deal_row(row: dict[str, Any]) -> dict[str, Any]:
         "computed_at": row.get("computed_at"),
         "saved": bool(row.get("saved")),
         "dismissed": bool(row.get("dismissed")),
+        "outside_preset": bool(row.get("outside_preset")),
+        "preset_reasons": row.get("preset_reasons") or [],
         "discount_pct": (
             round((float(expected) - purchase_total) / float(expected), 4)
             if expected and float(expected) > 0 else None
@@ -188,24 +200,42 @@ def _deal_row(row: dict[str, Any]) -> dict[str, Any]:
 async def health(request: Request) -> dict[str, Any]:
     db = _db(request)
     scanner = _scanner(request)
+    scan_config = load_scan_config(db)
+    preset_clauses, preset_params, scan_config = preset_filter(db, scan_config)
+    preset_sql = " AND ".join(preset_clauses)
     counts = {
         "listings": db.scalar("SELECT COUNT(*) FROM listings") or 0,
         "active_listings": db.scalar("SELECT COUNT(*) FROM listings WHERE status='active'") or 0,
         "deals": db.scalar("SELECT COUNT(*) FROM deals d JOIN listings l ON l.id=d.listing_id "
-                           "WHERE d.is_deal=1 AND l.status='active'") or 0,
+                           "WHERE d.is_deal=1 AND l.status='active' AND l.is_auction=0"
+                           + (f" AND {preset_sql}" if preset_sql else ""),
+                           preset_params) or 0,
         "review": db.scalar("SELECT COUNT(*) FROM deals d JOIN listings l ON l.id=d.listing_id "
                             "WHERE d.needs_review=1 AND l.status='active' "
-                            "AND NOT EXISTS (SELECT 1 FROM review_decisions r WHERE r.listing_id=l.id)") or 0,
+                            "AND NOT EXISTS (SELECT 1 FROM review_decisions r WHERE r.listing_id=l.id)"
+                            + (f" AND {preset_sql}" if preset_sql else ""),
+                            preset_params) or 0,
         "duplicates": db.scalar(
             "SELECT COUNT(*) FROM listings WHERE status='active' AND duplicate_of IS NOT NULL"
         ) or 0,
+        "hidden_by_preset": max(
+            0,
+            int(db.scalar(
+                "SELECT COUNT(*) FROM deals d JOIN listings l ON l.id=d.listing_id "
+                "WHERE d.is_deal=1 AND l.status='active' AND l.is_auction=0"
+            ) or 0) - int(db.scalar(
+                "SELECT COUNT(*) FROM deals d JOIN listings l ON l.id=d.listing_id "
+                "WHERE d.is_deal=1 AND l.status='active' AND l.is_auction=0"
+                + (f" AND {preset_sql}" if preset_sql else ""),
+                preset_params,
+            ) or 0),
+        ),
     }
     last_scan = db.scalar("SELECT MAX(last_success_at) FROM marketplace_status")
     decisions = dict(
         (row["decision"], row["count"])
         for row in db.query("SELECT decision, COUNT(*) AS count FROM review_decisions GROUP BY decision")
     )
-    scan_config = load_scan_config(db)
     return {
         "status": "ok",
         "time": iso(),
@@ -242,9 +272,19 @@ async def health(request: Request) -> dict[str, Any]:
 async def overview(request: Request) -> dict[str, Any]:
     db = _db(request)
     cfg = ValuationConfig.from_db(db)
+    scan_cfg = load_scan_config(db)
+    preset_clauses, preset_params, scan_cfg = preset_filter(db, scan_cfg)
+    preset_sql = " AND ".join(preset_clauses)
     base = (
         "FROM deals d JOIN listings l ON l.id = d.listing_id "
-        "WHERE d.is_deal = 1 AND l.status = 'active' "
+        "WHERE d.is_deal = 1 AND l.status = 'active' AND l.is_auction = 0 "
+        "AND NOT EXISTS (SELECT 1 FROM dismissed_deals x WHERE x.listing_id = l.id)"
+    )
+    if preset_sql:
+        base += f" AND {preset_sql}"
+    unfiltered_base = (
+        "FROM deals d JOIN listings l ON l.id = d.listing_id "
+        "WHERE d.is_deal = 1 AND l.status = 'active' AND l.is_auction = 0 "
         "AND NOT EXISTS (SELECT 1 FROM dismissed_deals x WHERE x.listing_id = l.id)"
     )
     active = db.query_one(
@@ -257,15 +297,21 @@ async def overview(request: Request) -> dict[str, Any]:
                COALESCE(MAX(d.net_profit), 0) AS best_profit,
                COALESCE(AVG(d.confidence), 0) AS avg_confidence
         {base}
-        """
+        """,
+        preset_params,
     ) or {}
+    unfiltered_deals = db.scalar(f"SELECT COUNT(*) {unfiltered_base}") or 0
+    hidden_deals = max(0, int(unfiltered_deals) - int(active.get("deals") or 0))
     new_24h = db.scalar(
-        f"SELECT COUNT(*) {base} AND l.first_seen >= ?", (hours_ago(24),)
+        f"SELECT COUNT(*) {base} AND l.first_seen >= ?",
+        (*preset_params, hours_ago(24)),
     ) or 0
     review_count = db.scalar(
         "SELECT COUNT(*) FROM deals d JOIN listings l ON l.id=d.listing_id "
         "WHERE d.needs_review=1 AND l.status='active' "
         "AND NOT EXISTS (SELECT 1 FROM review_decisions r WHERE r.listing_id=l.id)"
+        + (f" AND {preset_sql}" if preset_sql else ""),
+        preset_params,
     ) or 0
     sold_evidence = db.scalar("SELECT COUNT(*) FROM market_comps WHERE is_sold=1") or 0
     manual_evidence = db.scalar("SELECT COUNT(*) FROM market_comps WHERE source='manual'") or 0
@@ -278,27 +324,46 @@ async def overview(request: Request) -> dict[str, Any]:
                d.expected_resale, d.net_profit, d.roi, d.score, d.confidence
         {base}
         ORDER BY d.score DESC LIMIT 1
-        """
+        """,
+        preset_params,
     )
     categories = db.query(
         f"""
         SELECT l.category, COUNT(*) AS count
         {base} AND l.category IS NOT NULL
         GROUP BY l.category ORDER BY count DESC
-        """
+        """,
+        preset_params,
     )
     marketplaces = db.query(
         f"""
         SELECT l.marketplace, COUNT(*) AS count
         {base}
         GROUP BY l.marketplace ORDER BY count DESC
-        """
+        """,
+        preset_params,
     )
+    active_listings = db.scalar(
+        "SELECT COUNT(*) FROM listings l WHERE l.status='active' AND l.is_auction = 0"
+        + (f" AND {preset_sql}" if preset_sql else ""),
+        preset_params,
+    ) or 0
+    active_listings_all = db.scalar(
+        "SELECT COUNT(*) FROM listings WHERE status='active' AND is_auction = 0"
+    ) or 0
+    tracked_models = db.scalar(
+        "SELECT COUNT(DISTINCT l.product_key) FROM listings l "
+        "WHERE l.status='active' AND l.is_auction = 0 AND l.product_key IS NOT NULL"
+        + (f" AND {preset_sql}" if preset_sql else ""),
+        preset_params,
+    ) or 0
     last_scans = db.query(
         "SELECT marketplace, state, last_success_at, last_error, next_scan_at, "
         "consecutive_failures FROM marketplace_status"
     )
     return {
+        "preset": preset_summary(scan_cfg, hidden=hidden_deals, unfiltered=unfiltered_deals),
+        "hidden_by_preset": hidden_deals,
         "deals": active.get("deals", 0),
         "potential_profit": round(float(active.get("potential_profit") or 0), 2),
         "avg_roi": round(float(active.get("avg_roi") or 0), 4),
@@ -314,10 +379,9 @@ async def overview(request: Request) -> dict[str, Any]:
         "categories": categories,
         "marketplaces": marketplaces,
         "sources": last_scans,
-        "active_listings": db.scalar("SELECT COUNT(*) FROM listings WHERE status='active'") or 0,
-        "tracked_models": db.scalar(
-            "SELECT COUNT(DISTINCT product_key) FROM listings WHERE status='active' AND product_key IS NOT NULL"
-        ) or 0,
+        "active_listings": active_listings,
+        "active_listings_all": active_listings_all,
+        "tracked_models": tracked_models,
         "scans_24h": db.scalar(
             "SELECT COUNT(*) FROM scan_runs WHERE started_at >= ?", (hours_ago(24),)
         ) or 0,
@@ -348,10 +412,14 @@ async def list_deals(
     review_status: str = "pending",
     product_key: str | None = None,
     review_flag: str | None = None,
+    active_preset: bool = True,
+    include_auctions: bool = False,
     page: int = Query(1, ge=1),
     limit: int = Query(48, ge=1, le=120),
 ) -> dict[str, Any]:
     db = _db(request)
+    scan_cfg = load_scan_config(db)
+    preset_clauses, preset_params, scan_cfg = preset_filter(db, scan_cfg)
     where = ["l.status = 'active'"]
     params: list[Any] = []
     if review:
@@ -413,6 +481,16 @@ async def list_deals(
             raise HTTPException(status_code=422, detail="Unknown review flag")
         where.append("l.flags LIKE ?")
         params.append(f'%"{flag}"%')
+    # Auctions are a separate workspace. Their current bid must never be
+    # presented as a Buy It Now purchase price in the deal feed. Explicitly
+    # saved auctions stay visible in the Shortlist.
+    if not saved_only and not review and not archived and not include_auctions:
+        where.append("l.is_auction = 0")
+    base_where = list(where)
+    base_params = list(params)
+    if active_preset:
+        where = where + preset_clauses
+        params = params + preset_params
     order = SORT_SQL.get(sort, SORT_SQL["score"])
     where_sql = " AND ".join(where)
     joins = (
@@ -422,6 +500,18 @@ async def list_deals(
         "LEFT JOIN review_decisions r ON r.listing_id = l.id"
     )
     total = db.scalar(f"SELECT COUNT(*) {joins} WHERE {where_sql}", params) or 0
+    unfiltered_total = db.scalar(
+        f"SELECT COUNT(*) {joins} WHERE {' AND '.join(base_where)}", base_params
+    ) or 0
+    if active_preset:
+        hidden = max(0, int(unfiltered_total) - int(total))
+    else:
+        # History mode still reports how many rows the active preset hides.
+        preset_total = db.scalar(
+            f"SELECT COUNT(*) {joins} WHERE {' AND '.join(base_where + preset_clauses)}",
+            base_params + preset_params,
+        ) or 0
+        hidden = max(0, int(unfiltered_total) - int(preset_total))
     rows = db.query(
         f"""
         SELECT l.*, s.listing_id IS NOT NULL AS saved, x.listing_id IS NOT NULL AS dismissed,
@@ -442,12 +532,21 @@ async def list_deals(
         """,
         params + [limit, (page - 1) * limit],
     )
+    if not active_preset:
+        # History mode: label, never re-price or re-alert, rows outside the
+        # saved preset so they cannot be mistaken for current opportunities.
+        for row in rows:
+            inside, reasons = row_in_preset(scan_cfg, row)
+            row["outside_preset"] = not inside
+            row["preset_reasons"] = reasons
     return {
         "deals": [_deal_row(row) for row in rows],
         "total": total,
         "page": page,
         "limit": limit,
         "has_more": page * limit < total,
+        "preset": preset_summary(scan_cfg, hidden=hidden, unfiltered=unfiltered_total),
+        "hidden_by_preset": hidden,
         "generated_at": iso(),
         "thresholds": {
             "min_profit": db.setting_float("min_profit", 20),
@@ -463,6 +562,7 @@ async def review_groups(
     kind: str = "phone",
     flag: str = "variant_unclear",
     limit: int = Query(40, ge=1, le=100),
+    active_preset: bool = True,
 ) -> dict[str, Any]:
     """Group pending reviews by product so a widespread gap is visible at once.
 
@@ -486,6 +586,11 @@ async def review_groups(
     )
     like = f'%"{flag}"%'
     params: list[Any] = [kind, like]
+    if active_preset:
+        clauses, clause_params, _ = preset_filter(db)
+        if clauses:
+            base += " AND " + " AND ".join(clauses)
+            params.extend(clause_params)
     total_listings = db.scalar(f"SELECT COUNT(*) {base}", params) or 0
     total_groups = db.scalar(
         f"SELECT COUNT(DISTINCT l.product_key) {base}", params
@@ -646,6 +751,221 @@ async def restore_deal(request: Request, listing_id: int) -> dict[str, Any]:
     return {"dismissed": False}
 
 
+# ---------------------------------------------------------------------------
+# Auctions: a separate workspace from the fixed-price deal feed
+# ---------------------------------------------------------------------------
+
+AUCTION_SORTS = {
+    "ending": "l.auction_end_at ASC",
+    "bid": "COALESCE(l.current_bid, l.price) ASC, l.auction_end_at ASC",
+    "profit": "(d.net_profit IS NULL), d.net_profit DESC, l.auction_end_at ASC",
+    "newest": "l.first_seen DESC, l.auction_end_at ASC",
+}
+
+AUCTION_STATUSES = ("all", "verified", "needs_verification", "rejected")
+
+
+def _auction_status(row: dict[str, Any], config) -> tuple[str, str]:
+    """Classify an auction without inventing a valuation it does not have.
+
+    Only a valuation with moderate or strong compatible evidence can support a
+    profit figure or a maximum bid. Everything else stays a research candidate
+    and is never labelled as a verified opportunity.
+    """
+    inside, reasons = row_in_preset(config, row)
+    if not inside:
+        return "rejected", "; ".join(reasons)
+    if row.get("is_faulty"):
+        return "rejected", "Listed as faulty or for parts"
+    if row.get("needs_review"):
+        return "needs_verification", row.get("review_reason") or "Identity needs manual review"
+    if not row.get("product_key") or row.get("identity_level") == "insufficient":
+        return "needs_verification", "No reliable product identity"
+    level = row.get("evidence_level")
+    if row.get("expected_resale") is None or level in (None, "insufficient"):
+        return "needs_verification", "No compatible pricing evidence for this variant"
+    if level == "limited":
+        return "needs_verification", "Limited compatible evidence; no supported bid ceiling"
+    if row.get("max_bid") is None or row.get("net_profit") is None:
+        return "needs_verification", "Valuation supports a resale range but not a bid ceiling"
+    if row.get("is_deal"):
+        return "verified", "Supported resale estimate and profit after costs"
+    if float(row.get("net_profit") or 0) <= 0:
+        return "rejected", "Current bid is above the supported profitable ceiling"
+    return "rejected", "Below the saved profit threshold"
+
+
+def _auction_payload(row: dict[str, Any], config) -> dict[str, Any]:
+    auction = _deal_row(row)
+    status, reason = _auction_status(row, config)
+    total, basis = row_total(config, row)
+    inside, preset_reasons = row_in_preset(config, row)
+    end = parse_iso(row.get("auction_end_at"))
+    seconds = int((end - utcnow()).total_seconds()) if end else None
+    auction.update(
+        {
+            "verification_status": status,
+            "verification_reason": reason,
+            "profit_supported": status == "verified",
+            "outside_preset": not inside,
+            "preset_reasons": preset_reasons,
+            "total_cost": round(total, 2),
+            "cost_basis": basis,
+            "seconds_remaining": max(0, seconds) if seconds is not None else None,
+            "ends_at": row.get("auction_end_at"),
+            "identified_variant": row.get("product_name") or None,
+            "evidence_level": row.get("evidence_level"),
+            "live_bid": row.get("current_bid"),
+        }
+    )
+    return auction
+
+
+def _auction_diagnostics(db, config) -> dict[str, Any]:
+    status = db.query_one(
+        "SELECT state, last_attempt_at, last_success_at, last_error, next_scan_at "
+        "FROM marketplace_status WHERE marketplace='ebay'"
+    ) or {}
+    last_run = db.query_one(
+        "SELECT id, started_at, finished_at, status, items_found, items_new, "
+        "duration_ms, error, queries, detail FROM scan_runs "
+        "WHERE marketplace='ebay' AND detail LIKE '%ending_soon%' "
+        "ORDER BY id DESC LIMIT 1"
+    )
+    detail = _parse_json((last_run or {}).get("detail"), {})
+    return {
+        "source": {
+            "marketplace": "ebay",
+            "enabled": config.marketplace_enabled("ebay"),
+            "state": status.get("state") or "idle",
+            "last_attempt_at": status.get("last_attempt_at"),
+            "last_success_at": status.get("last_success_at"),
+            "last_error": status.get("last_error"),
+            "next_scan_at": status.get("next_scan_at"),
+        },
+        "last_scan": (
+            {
+                **{key: last_run.get(key) for key in (
+                    "id", "started_at", "finished_at", "status", "items_found",
+                    "items_new", "duration_ms", "error",
+                )},
+                "queries": _parse_json(last_run.get("queries"), []),
+                "window_minutes": detail.get("window_minutes"),
+                "configured_categories": detail.get("configured_categories") or [],
+                "strategy": detail.get("strategy"),
+            }
+            if last_run else None
+        ),
+        "settings": {
+            "alerts_enabled": db.setting_bool("auction_alerts_enabled", True),
+            "window_minutes": db.setting_int("auction_window_minutes", 30),
+            "scan_seconds": db.setting_int("auction_scan_seconds", 600),
+            "urgent_seconds": db.setting_int("auction_urgent_seconds", 300),
+        },
+        "config_confirmed": config.confirmed,
+    }
+
+
+@router.get("/auctions")
+async def list_auctions(
+    request: Request,
+    ending_within: int = Query(0, ge=0, le=1440),
+    sort: str = "ending",
+    status: str = "all",
+    active_preset: bool = True,
+    page: int = Query(1, ge=1),
+    limit: int = Query(24, ge=1, le=120),
+) -> dict[str, Any]:
+    db = _db(request)
+    config = load_scan_config(db)
+    clauses, clause_params, config = preset_filter(db, config)
+    status = status.strip().lower()
+    if status not in AUCTION_STATUSES:
+        raise HTTPException(status_code=422, detail="Unknown auction status")
+    order = AUCTION_SORTS.get(sort, AUCTION_SORTS["ending"])
+    window_end = utcnow() + timedelta(minutes=ending_within) if ending_within else None
+    base_sql = (
+        "FROM listings l LEFT JOIN deals d ON d.listing_id = l.id "
+        "LEFT JOIN dismissed_deals x ON x.listing_id = l.id "
+        "WHERE l.status='active' AND l.is_auction=1 AND l.auction_end_at IS NOT NULL "
+        "AND l.auction_end_at >= ? AND x.listing_id IS NULL"
+    )
+    base_params: list[Any] = [iso()]
+    if window_end is not None:
+        base_sql += " AND l.auction_end_at <= ?"
+        base_params.append(iso(window_end))
+    preset_sql = " AND " + " AND ".join(clauses) if clauses else ""
+    # The hidden count must stay meaningful in history mode too, so the
+    # preset-restricted count is always evaluated.
+    visible_count = db.scalar(
+        f"SELECT COUNT(*) {base_sql}{preset_sql}", base_params + clause_params
+    ) or 0
+    unfiltered_count = db.scalar(f"SELECT COUNT(*) {base_sql}", base_params) or 0
+    rows = db.query(
+        f"""
+        SELECT l.*, d.expected_resale, d.resale_low, d.resale_high, d.confidence,
+               d.sample_size, d.valuation_method, d.purchase_total, d.net_profit,
+               d.net_profit_conservative, d.net_profit_optimistic, d.roi, d.score,
+               d.is_deal, d.needs_review, d.review_reason, d.risk_score, d.risk_level,
+               d.risk_reasons, d.reasons, d.computed_at, d.evidence_level,
+               d.resale_strategy, d.resale_quick, d.resale_balanced, d.resale_max,
+               d.max_bid, d.estimated_days, d.valuation_refreshed_at,
+               d.valuation_basis, d.evidence_score, d.rank_score, d.rank_tier
+        {base_sql}{preset_sql if active_preset else ''}
+        ORDER BY {order}
+        LIMIT 1000
+        """,
+        base_params + (clause_params if active_preset else []),
+    )
+    payload = [_auction_payload(row, config) for row in rows]
+    counts = {
+        "all": len(payload),
+        "verified": sum(1 for item in payload if item["verification_status"] == "verified"),
+        "needs_verification": sum(
+            1 for item in payload if item["verification_status"] == "needs_verification"
+        ),
+        "rejected": sum(1 for item in payload if item["verification_status"] == "rejected"),
+    }
+    filtered_items = (
+        payload if status == "all"
+        else [item for item in payload if item["verification_status"] == status]
+    )
+    total = len(filtered_items)
+    start = (page - 1) * limit
+    return {
+        "auctions": filtered_items[start : start + limit],
+        "total": total,
+        "page": page,
+        "limit": limit,
+        "has_more": page * limit < total,
+        "counts": counts,
+        "preset": preset_summary(
+            config,
+            hidden=max(0, int(unfiltered_count) - int(visible_count)),
+            unfiltered=unfiltered_count,
+        ),
+        "diagnostics": _auction_diagnostics(db, config),
+        "generated_at": iso(),
+    }
+
+
+@router.post("/auctions/refresh")
+async def refresh_auctions(request: Request) -> dict[str, Any]:
+    db = _db(request)
+    scanner = _scanner(request)
+    config = load_scan_config(db)
+    if not config.confirmed:
+        raise HTTPException(status_code=409, detail="Save the scan configuration first")
+    if not config.marketplace_enabled("ebay"):
+        raise HTTPException(status_code=409, detail="eBay is disabled in Scan configuration")
+    if not db.setting_bool("auction_alerts_enabled", True):
+        raise HTTPException(status_code=409, detail="Auction monitoring is disabled in Settings")
+    if scanner._auction_lock.locked():
+        return {"accepted": False, "message": "An auction refresh is already running", "time": iso()}
+    asyncio.create_task(scanner.scan_auctions(), name="manual-auctions")
+    return {"accepted": True, "message": "Auction refresh started", "time": iso()}
+
+
 class ReviewUpdate(BaseModel):
     decision: str
     note: str | None = Field(default=None, max_length=1000)
@@ -772,6 +1092,12 @@ async def review_deal(
                 listing_id,
             ),
         )
+        refreshed = db.query_one("SELECT * FROM listings WHERE id=?", (listing_id,))
+        if refreshed:
+            db.execute(
+                "UPDATE listings SET scan_leaf=? WHERE id=?",
+                (leaf_for_row(refreshed), listing_id),
+            )
     db.execute(
         """
         INSERT INTO review_decisions(listing_id, decision, note, product_key, kind, decided_at)

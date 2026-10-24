@@ -15,6 +15,7 @@ from .config import settings
 from .db import Database
 from .scanner import Scanner
 from .utils import iso
+from .visibility import backfill_scan_leafs
 
 log = logging.getLogger("rigradar")
 
@@ -24,6 +25,11 @@ def create_app(db: Database | None = None, autostart: bool | None = None) -> Fas
     async def lifespan(app: FastAPI):
         database = db or Database()
         app.state.db = database
+        # Stored rows must be filterable by the saved preset even before a
+        # scan runs. The leaf is derived data and never rewrites history.
+        filled = backfill_scan_leafs(database)
+        if filled:
+            log.info("Classified %d stored listings for preset filtering", filled)
         app.state.scanner = Scanner(database)
         database.execute(
             "UPDATE marketplace_status SET state='unavailable', last_error=? WHERE marketplace='facebook'",

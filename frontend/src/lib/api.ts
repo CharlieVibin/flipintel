@@ -1,4 +1,5 @@
 import type {
+  AuctionsResponse,
   BulkReviewResult,
   CalibrationReport,
   CompInput,
@@ -56,8 +57,13 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 export function queryString(params: Record<string, unknown>): string {
   const search = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => {
-    if (value === undefined || value === null || value === "" || value === false) return;
-    if (key === "saved_only" && value === false) return;
+    if (value === undefined || value === null || value === "") return;
+    if (typeof value === "boolean") {
+      // Explicit false values matter for Active Preset Only and history mode.
+      search.set(key, value ? "true" : "false");
+      return;
+    }
+    if (value === false) return;
     search.set(key, String(value));
   });
   const text = search.toString();
@@ -69,6 +75,18 @@ export const api = {
   overview: () => request<Overview>("/overview"),
   deals: (filters: DealFilters = {}) =>
     request<DealsResponse>(`/deals${queryString(filters as Record<string, unknown>)}`),
+  auctions: (filters: {
+    ending_within?: number;
+    sort?: string;
+    status?: string;
+    active_preset?: boolean;
+    page?: number;
+    limit?: number;
+  } = {}) => request<AuctionsResponse>(`/auctions${queryString(filters)}`),
+  refreshAuctions: () =>
+    request<{ accepted: boolean; message: string; time: string }>("/auctions/refresh", {
+      method: "POST",
+    }),
   deal: (id: number) => request<DealDetail>(`/deals/${id}`),
   save: (id: number) => request<{ saved: boolean }>(`/deals/${id}/save`, { method: "POST" }),
   unsave: (id: number) => request<{ saved: boolean }>(`/deals/${id}/save`, { method: "DELETE" }),
