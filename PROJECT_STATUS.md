@@ -109,7 +109,12 @@ scanning during the session.
 - `cd frontend && npm run build`: TypeScript and Vite build pass.
 - Live API checks against the real database confirmed the counts above and that
   the default deal feed returns only in-preset rows while history mode returns
-  the full stored set with reasons.
+  the full stored set with reasons. A browser pass at `#auctions` showed 264
+  live in-preset auctions with live countdowns, current bids, total cost and
+  evidence, and toggling **Active preset only** switched to 499 auctions with
+  outside-preset rows labelled. The Deal feed showed 11 rows and
+  "188 stored listings outside this preset are hidden"; toggling history mode
+  returned 199 rows with an **Outside preset** badge.
 
 Remaining limitations:
 
@@ -126,7 +131,8 @@ Remaining limitations:
 - This phase did not change the pricing/evidence model, eBay/Vinted/Gumtree
   collectors, CeX integration or Discord formatting.
 
-Commits: _to be filled after the final push_.
+Commit: `e470b0e` — *Add auctions workspace and preset filtering for stored
+listings* — pushed to `main`.
 
 ## Session 2026-10-23 — Pre-scan category toggles, presets and budget controls
 
