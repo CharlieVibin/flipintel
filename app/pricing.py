@@ -126,18 +126,25 @@ class PricingDatabase:
         Raw rows are kept (they are evidence of what was observed) but they stop
         feeding valuations. Running this repeatedly is safe.
         """
+        # Join through the listing primary key. Comparing `'listing:' || l.id`
+        # inside a correlated EXISTS cannot use the primary-key index, which
+        # turned this into a scan of every listing per observation: on the live
+        # database (111k listings, 50k observations) startup never finished.
         cursor = self.db.execute(
             """
             UPDATE market_observations
             SET invalidated_at = ?, invalid_reason = 'listing identity changed'
             WHERE invalidated_at IS NULL
               AND source_id LIKE 'listing:%'
-              AND EXISTS (
-                  SELECT 1 FROM listings l
-                  WHERE ('listing:' || l.id) = market_observations.source_id
+              AND source_id IN (
+                  SELECT m.source_id
+                  FROM market_observations m
+                  JOIN listings l ON l.id = CAST(substr(m.source_id, 9) AS INTEGER)
+                  WHERE m.invalidated_at IS NULL
+                    AND m.source_id LIKE 'listing:%'
                     AND (l.product_key IS NULL
-                         OR l.product_key != market_observations.product_key
-                         OR COALESCE(l.listing_kind, '') != COALESCE(market_observations.kind, ''))
+                         OR l.product_key != m.product_key
+                         OR COALESCE(l.listing_kind, '') != COALESCE(m.kind, ''))
               )
             """,
             (iso(),),

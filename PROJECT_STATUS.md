@@ -131,8 +131,23 @@ Remaining limitations:
 - This phase did not change the pricing/evidence model, eBay/Vinted/Gumtree
   collectors, CeX integration or Discord formatting.
 
+- Startup fix found while relaunching:
+  `PricingDatabase.invalidate_contaminated_observations()` compared
+  `'listing:' || l.id` inside a correlated `EXISTS`,
+  which cannot use the listing primary key. On the live database (111,863
+  listings, 50,123 observations) that scan never finished, so the server never
+  bound its port. The update now joins the listing id directly
+  (`CAST(substr(source_id, 9) AS INTEGER)`): 0.15s instead of hanging, still
+  idempotent, still leaves raw observations in place. Boot on this database is
+  now about 2m20s (50s re-identification plus the startup valuation refresh), so
+  the dashboard takes a couple of minutes to answer after `run.py` starts.
+- A second live pass after the startup fix returned 271 live in-preset auctions
+  (0 verified, 229 awaiting verification, 42 rejected), 12 in-preset deal rows
+  out of 200 stored, and no auction rows in the deal feed at all.
+
 Commit: `e470b0e` — *Add auctions workspace and preset filtering for stored
-listings* — pushed to `main`.
+listings* — pushed to `main`, followed by the startup-query fix recorded in the
+commit that updated this file.
 
 ## Session 2026-10-23 — Pre-scan category toggles, presets and budget controls
 
