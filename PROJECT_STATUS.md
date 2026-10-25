@@ -1687,8 +1687,7 @@ integrity repair and its database revaluation were pushed as `123f60e`. The
 pre-scan category, preset and budget controls were pushed as `c7736b0`; the
 auction configuration enforcement followed as `786f87a`, with Discord auction
 alert gating as `4dfb1fa`. The Phase 6 identity/startup work is `9114f6e` and
-the review-queue eligibility repair is `fc8ec4a`, with its
-live-count status note as `cccac54`. `main` tracks `origin/main`;
+the review-queue eligibility repair is `fc8ec4a`. `main` tracks `origin/main`;
 local and remote trees match after each push.
 
 Earlier notes referenced `bboyrican20/flipintel`; that was the wrong remote and
