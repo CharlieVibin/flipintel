@@ -67,13 +67,15 @@ patterns. The title `AMD Ryzen 7 3700X COOLER/FAN ONLY no CPU` became
 
 | Measure | Before | After |
 |---|---:|---:|
-| Pending Human Review | 660 | **162** |
-| Pending review inside `100gbp starter` | — | **17** |
+| Pending Human Review | 660 | **164 live** (162 after reconciliation) |
+| Pending review inside `100gbp starter` | — | **15** |
 | Recommended deals | 191 | 189 |
 | Excluded listings | 112,931 | 113,431 |
 | Duplicate links | 547 | 547 |
 
-498 review rows were removed and none were added. Their current reasons:
+The reconciliation removed 498 review rows and added none; the startup
+background re-check later re-opened 2 rows after re-identifying them, leaving
+164 live. Their current reasons:
 
 | Reason | Rows |
 |---|---:|
@@ -100,8 +102,8 @@ The specific reported examples now read:
 - `DELL Equallogic 4TB HDD Tray` → accessory, excluded.
 
 Live check after the repair (`http://127.0.0.1:8765`): `/api/deals?review=1`
-returned 17 rows in the active preset and none of the failure titles;
-`/api/deals?review=1&active_preset=false` returned 162; the deal feed and the
+returned 15 rows in the active preset and none of the failure titles;
+`/api/deals?review=1&active_preset=false` returned 164; the deal feed and the
 Auctions tab (231 live auctions) still answered normally. `/api/health` response
 and startup stayed in the low single-digit seconds; the repair is a separate
 script, not part of startup.
@@ -1681,10 +1683,12 @@ pushed as the repository's first commit on 2026-10-23 (`22d2ea2`). The Phase 5
 work was pushed as `3d9e41b` (used-market evidence and the 240-listing
 benchmark), `bca0fa1` (form-factor rejection, mini-PC identity and evidence-gated
 auction alerts) and `5c3b51d` (sealed resale capped at CeX retail). The variant
-integrity repair and its database revaluation were pushed as `123f60e`.The pre-scan category, preset and budget controls were pushed as `c7736b0`; the
+integrity repair and its database revaluation were pushed as `123f60e`. The
+pre-scan category, preset and budget controls were pushed as `c7736b0`; the
 auction configuration enforcement followed as `786f87a`, with Discord auction
 alert gating as `4dfb1fa`. The Phase 6 identity/startup work is `9114f6e` and
-the review-queue eligibility repair is `cb3202f`. `main` tracks `origin/main`;
+the review-queue eligibility repair is `fc8ec4a`, with its
+live-count status note as `cccac54`. `main` tracks `origin/main`;
 local and remote trees match after each push.
 
 Earlier notes referenced `bboyrican20/flipintel`; that was the wrong remote and
