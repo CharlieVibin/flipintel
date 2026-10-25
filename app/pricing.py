@@ -149,7 +149,58 @@ class PricingDatabase:
             """,
             (iso(),),
         )
-        return max(0, cursor.rowcount or 0)
+        retired = max(0, cursor.rowcount or 0)
+        # Non-products are not asking-price evidence for a working device. Raw
+        # observations are retained for audit but stop feeding valuations.
+        junk_keys = [
+            str(row["product_key"])
+            for row in self.db.query(
+                """
+                SELECT DISTINCT o.product_key
+                FROM market_observations o
+                JOIN listings l ON l.id = CAST(substr(o.source_id, 9) AS INTEGER)
+                WHERE o.invalidated_at IS NULL AND o.source_id LIKE 'listing:%'
+                  AND (l.is_faulty = 1 OR l.is_bundle = 1
+                       OR COALESCE(l.sale_role, '') IN
+                           ('accessory','packaging','media','game','parts','wanted','unknown')
+                       OR COALESCE(l.flags, '') LIKE '%\"accessory_or_box\"%'
+                       OR COALESCE(l.flags, '') LIKE '%\"compatibility_accessory\"%'
+                       OR COALESCE(l.flags, '') LIKE '%\"parts_only\"%'
+                       OR COALESCE(l.flags, '') LIKE '%\"console_game\"%'
+                       OR COALESCE(l.flags, '') LIKE '%\"storage_media\"%'
+                       OR COALESCE(l.flags, '') LIKE '%\"untested\"%')
+                """
+            )
+        ]
+        second = self.db.execute(
+            """
+            UPDATE market_observations
+            SET invalidated_at = ?, invalid_reason = 'listing is not a working standalone product'
+            WHERE invalidated_at IS NULL
+              AND source_id LIKE 'listing:%'
+              AND CAST(substr(source_id, 9) AS INTEGER) IN (
+                  SELECT l.id FROM listings l
+                  WHERE l.is_faulty = 1 OR l.is_bundle = 1
+                     OR COALESCE(l.sale_role, '') IN
+                         ('accessory','packaging','media','game','parts','wanted','unknown')
+                     OR COALESCE(l.flags, '') LIKE '%\"accessory_or_box\"%'
+                     OR COALESCE(l.flags, '') LIKE '%\"compatibility_accessory\"%'
+                     OR COALESCE(l.flags, '') LIKE '%\"parts_only\"%'
+                     OR COALESCE(l.flags, '') LIKE '%\"console_game\"%'
+                     OR COALESCE(l.flags, '') LIKE '%\"storage_media\"%'
+                     OR COALESCE(l.flags, '') LIKE '%\"untested\"%'
+              )
+            """,
+            (iso(),),
+        )
+        retired += max(0, second.rowcount or 0)
+        if junk_keys:
+            # A snapshot built from those rows is no longer valid evidence.
+            # Invalidate it instead of letting it serve the rest of its 7 days.
+            self.invalidate(
+                junk_keys, "comparable evidence included a non-product or untested listing"
+            )
+        return retired
 
     def history(self, product_key: str, limit: int = 24) -> list[dict[str, Any]]:
         rows = self.db.query(

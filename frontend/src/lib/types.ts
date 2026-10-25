@@ -63,6 +63,9 @@ export interface Deal {
   score: number;
   is_deal: boolean;
   needs_review: boolean;
+  eligibility?: "recommended" | "needs_verification" | "excluded" | null;
+  eligibility_reason?: string | null;
+  sale_role?: string | null;
   review_reason: string | null;
   risk_score: number;
   risk_level: "low" | "medium" | "high";

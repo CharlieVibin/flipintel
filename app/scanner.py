@@ -4,6 +4,7 @@ stop the others."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import random
@@ -27,7 +28,7 @@ from .collectors import (
     VintedCollector,
 )
 from .db import Database
-from .identification import identify_listing
+from .identification import IDENTIFICATION_VERSION, identify_listing
 from .notifications import Notifier
 from .pricing_cex import CexPricing
 from .usage import usage_snapshot
@@ -120,6 +121,23 @@ class ScanConfigurationRequired(RuntimeError):
     """Raised when a scan is requested before the configuration is saved."""
 
 
+class ScannerMaintenance(RuntimeError):
+    """Raised when a scan is requested while startup maintenance still runs."""
+
+
+def identity_hash(title: str, description: str, condition_raw: str) -> str:
+    """Fingerprint of the text that identification actually reads.
+
+    A row is re-identified when this changes, not merely because the server
+    restarted. Price and seller changes do not alter the product identity and
+    must not trigger a full classifier pass.
+    """
+    payload = "\x1f".join(
+        (str(title or ""), str(description or ""), str(condition_raw or ""))
+    )
+    return hashlib.sha1(payload.encode("utf-8", "replace")).hexdigest()
+
+
 class Scanner:
     def __init__(self, db: Database, collectors: dict[str, BaseCollector] | None = None) -> None:
         self.db = db
@@ -144,12 +162,18 @@ class Scanner:
         self.scan_config: ScanConfiguration = load_scan_config(db)
         self._last_refresh_at: str | None = None
         self._last_refresh_result: dict[str, int] | None = None
+        self._last_refresh_ok = False
         # Ingest bumps this whenever a stored listing changes. Valuation refresh
         # must not be skipped just because another marketplace refreshed a few
         # seconds earlier; otherwise a price or identity update can sit behind a
         # stale deal row until the next cycle.
         self._data_version = 0
         self._valued_version = -1
+        # Startup work runs after the HTTP server is available. Scan loops wait
+        # for the event, so no collector can race an unfinished identity or
+        # valuation pass.
+        self._maintenance_ready = asyncio.Event()
+        self._maintenance_task: asyncio.Task | None = None
 
     # --- lifecycle ----------------------------------------------------------
     async def start(self) -> None:
@@ -157,6 +181,12 @@ class Scanner:
             return
         self._started = True
         self.scan_config = load_scan_config(self.db)
+        # Identification and valuation of a large history are deliberately not
+        # part of HTTP startup. The task below is resumable, reports progress,
+        # and the scan loops wait for it. The dashboard is available first.
+        self._maintenance_task = asyncio.create_task(
+            self._initial_maintenance(), name="startup-maintenance"
+        )
         if not self.scan_config.confirmed:
             for marketplace in ("vinted", "gumtree", "ebay"):
                 self._set_status(
@@ -169,22 +199,79 @@ class Scanner:
                 "Scanner waiting for scan configuration; no marketplace requests will be made"
             )
             return
-        # Re-apply the current classifier to stored listings so parser fixes
-        # (for example separating a whole PC from its GPU) take effect without
-        # deleting the user's collected market history.
-        try:
-            changed = self._reidentify_existing()
-            if changed:
-                log.info("Re-identified %d existing listings with the current rules", changed)
-            # Always revalue once at startup. Classification, risk and fee rules
-            # can change between sessions even when no identity changed, and
-            # the previous session's deal rows must not outlive those changes.
-            await self._run_refresh(force=True)
-        except Exception:
-            log.exception("Existing-listing re-identification failed")
         if self.scheduled_enabled:
             self._start_loops()
         log.info("Scanner started for %s", ", ".join(self.collectors))
+
+    async def _initial_maintenance(self) -> None:
+        """Apply identity and valuation maintenance after the server is up.
+
+        Nothing here deletes history. Identification is versioned, so a normal
+        restart processes no rows; the first start after a classifier change
+        resumes from the last committed batch.
+        """
+        started = utcnow()
+        try:
+            self._set_maintenance(
+                "identifying", started_at=iso(started), error="",
+                finished_at="", duration_seconds="",
+            )
+            changed = await asyncio.to_thread(self._reidentify_existing)
+            if changed:
+                self._data_version += 1
+                log.info("Re-identified %d existing listing(s)", changed)
+            self._set_maintenance("valuing", changed=str(changed))
+            if not await self._run_refresh(force=True):
+                raise RuntimeError("Valuation refresh failed; scans remain paused")
+            elapsed = (utcnow() - started).total_seconds()
+            self._set_maintenance(
+                "idle", finished_at=iso(), duration_seconds=f"{elapsed:.1f}", error=""
+            )
+            log.info(
+                "Startup maintenance finished in %.1fs (%d identity change(s))",
+                elapsed, changed,
+            )
+        except asyncio.CancelledError:
+            self._set_maintenance("cancelled", error="Server stopped during maintenance")
+            raise
+        except Exception as exc:
+            self._set_maintenance(
+                "error", error=f"{type(exc).__name__}: {exc}"[:400]
+            )
+            log.exception("Startup maintenance failed")
+            # Scans stay blocked: with an unfinished valuation pass, a new
+            # listing could be priced from evidence that is being rebuilt.
+            return
+        finally:
+            if self._maintenance_status().get("phase") != "error":
+                self._maintenance_ready.set()
+
+    def _set_maintenance(self, phase: str, **fields: Any) -> None:
+        values = {"phase": phase, "updated_at": iso(), **fields}
+        self.db.executemany(
+            "INSERT INTO maintenance_state(key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            [(key, str(value), values["updated_at"]) for key, value in values.items() if value is not None],
+        )
+
+    def _maintenance_status(self) -> dict[str, str]:
+        return {
+            row["key"]: row["value"]
+            for row in self.db.query("SELECT key, value FROM maintenance_state")
+        }
+
+    @property
+    def maintenance_ready(self) -> bool:
+        return self._maintenance_ready.is_set()
+
+    def maintenance(self) -> dict[str, Any]:
+        return self._maintenance_status()
+
+    def _identity_queue_where(self) -> str:
+        return (
+            "(l.identity_version IS NULL OR l.identity_version != ? OR l.identity_hash IS NULL) "
+            "AND l.id NOT IN (SELECT listing_id FROM review_decisions WHERE decision='corrected')"
+        )
 
     def _start_loops(self) -> None:
         if self._tasks:
@@ -210,6 +297,9 @@ class Scanner:
 
     async def stop(self) -> None:
         self._stop.set()
+        if self._maintenance_task and not self._maintenance_task.done():
+            self._maintenance_task.cancel()
+            await asyncio.gather(self._maintenance_task, return_exceptions=True)
         for task in self._tasks:
             task.cancel()
         if self._tasks:
@@ -221,68 +311,147 @@ class Scanner:
             await collector.close()
         self._started = False
 
-    def _reidentify_existing(self) -> int:
-        rows = self.db.query(
-            "SELECT id, title, description, condition_raw, category, product_key, product_name, "
-            "identification_confidence, is_faulty, is_wanted, is_bundle, listing_kind, flags, attrs, "
-            "identity_level, identity_basis, marketplace, scan_leaf "
-            "FROM listings WHERE id NOT IN ("
-            "SELECT listing_id FROM review_decisions WHERE decision='corrected')"
+    def _reidentify_existing(self, batch_size: int = 400) -> int:
+        """Apply the current classifier to rows that actually need it.
+
+        A row is queued when its identity version predates ``IDENTIFICATION_VERSION``
+        or its source text has never been fingerprinted. Each batch commits, so a
+        restart resumes rather than starting the 111k-row history again.
+        """
+        where = self._identity_queue_where()
+        total = int(
+            self.db.scalar(
+                f"SELECT COUNT(*) FROM listings l WHERE {where}",
+                (IDENTIFICATION_VERSION,),
+            ) or 0
         )
-        changed = 0
-        stale_keys: set[str] = set()
-        for row in rows:
-            ident = identify_listing(
-                row["title"] or "",
-                f'{row["description"] or ""} {row["condition_raw"] or ""}',
+        self._set_maintenance("identifying", total=str(total), processed="0")
+        changed = processed = invalidated_total = 0
+        if not total:
+            self._finish_identity_repairs()
+            return 0
+        while True:
+            rows = self.db.query(
+                f"""
+                SELECT l.id, l.title, l.description, l.condition_raw, l.category,
+                       l.product_key, l.product_name, l.identification_confidence,
+                       l.is_faulty, l.is_wanted, l.is_bundle, l.listing_kind,
+                       l.flags, l.attrs, l.identity_level, l.identity_basis,
+                       l.marketplace, l.scan_leaf, l.sale_role,
+                       dv.is_deal AS was_deal, dv.expected_resale AS old_resale,
+                       dv.evidence_level AS old_evidence_level
+                FROM listings l
+                LEFT JOIN deals dv ON dv.listing_id = l.id
+                WHERE {where}
+                ORDER BY l.id LIMIT ?
+                """,
+                (IDENTIFICATION_VERSION, batch_size),
             )
-            flags_json = json_dumps(ident.flags)
-            attrs_json = json_dumps(ident.attrs)
-            scan_leaf = leaf_for_row({**row, "category": ident.category,
-                                      "product_key": ident.product_key,
-                                      "flags": flags_json, "attrs": attrs_json})
-            if (
-                row["category"] == ident.category
-                and row["product_key"] == ident.product_key
-                and row["product_name"] == ident.product_name
-                and abs(float(row["identification_confidence"] or 0) - ident.confidence) < 0.001
-                and int(row["is_faulty"] or 0) == int(ident.is_faulty)
-                and int(row["is_wanted"] or 0) == int(ident.is_wanted)
-                and int(row["is_bundle"] or 0) == int(ident.is_bundle)
-                and row["listing_kind"] == ident.kind
-                and row["flags"] == flags_json
-                and row["attrs"] == attrs_json
-                and row.get("identity_level") == ident.identity_level
-                and row.get("identity_basis") == json_dumps(ident.identity_basis)
-                and row.get("scan_leaf") == scan_leaf
-            ):
-                continue
-            previous_key = row.get("product_key")
-            if previous_key and previous_key != ident.product_key:
-                stale_keys.add(str(previous_key))
-            self.db.execute(
-                "UPDATE listings SET category=?, product_key=?, product_name=?, "
-                "identification_confidence=?, is_faulty=?, is_wanted=?, is_bundle=?, "
-                "listing_kind=?, flags=?, attrs=?, identity_level=?, identity_basis=?, "
-                "scan_leaf=? WHERE id=?",
-                (
-                    ident.category, ident.product_key, ident.product_name, ident.confidence,
-                    int(ident.is_faulty), int(ident.is_wanted), int(ident.is_bundle),
-                    ident.kind, flags_json, attrs_json, ident.identity_level,
-                    json_dumps(ident.identity_basis), scan_leaf, row["id"],
-                ),
-            )
-            changed += 1
-        if stale_keys:
-            # A cached price produced under an identity that has now changed is
-            # not allowed to survive for the rest of its seven-day window.
-            invalidated = self.pricing.invalidate(
-                sorted(stale_keys), "listing identity revised by identification fix"
-            )
-            log.info(
-                "Invalidated %d cached valuation(s) for %d superseded product key(s)",
-                invalidated, len(stale_keys),
-            )
+            if not rows:
+                break
+            stale_keys: set[str] = set()
+            for row in rows:
+                source_hash = identity_hash(
+                    row["title"] or "", row["description"] or "", row["condition_raw"] or ""
+                )
+                try:
+                    ident = identify_listing(
+                        row["title"] or "",
+                        f'{row["description"] or ""} {row["condition_raw"] or ""}',
+                    )
+                except Exception:
+                    # One malformed title must not block the queue forever.
+                    log.exception("Identification failed for listing %s", row["id"])
+                    self.db.execute(
+                        "UPDATE listings SET identity_version=?, identity_hash=? WHERE id=?",
+                        (IDENTIFICATION_VERSION, source_hash, row["id"]),
+                    )
+                    processed += 1
+                    continue
+                flags_json = json_dumps(ident.flags)
+                attrs_json = json_dumps(ident.attrs)
+                scan_leaf = leaf_for_row({
+                    **row, "category": ident.category,
+                    "product_key": ident.product_key,
+                    "flags": flags_json, "attrs": attrs_json,
+                })
+                fields_changed = not (
+                    row["category"] == ident.category
+                    and row["product_key"] == ident.product_key
+                    and row["product_name"] == ident.product_name
+                    and abs(float(row["identification_confidence"] or 0) - ident.confidence) < 0.001
+                    and int(row["is_faulty"] or 0) == int(ident.is_faulty)
+                    and int(row["is_wanted"] or 0) == int(ident.is_wanted)
+                    and int(row["is_bundle"] or 0) == int(ident.is_bundle)
+                    and row["listing_kind"] == ident.kind
+                    and row["flags"] == flags_json
+                    and row["attrs"] == attrs_json
+                    and row.get("identity_level") == ident.identity_level
+                    and row.get("identity_basis") == json_dumps(ident.identity_basis)
+                    and row.get("scan_leaf") == scan_leaf
+                    and row.get("sale_role") == ident.sale_role
+                )
+                previous_key = row.get("product_key")
+                identity_moved = (
+                    previous_key != ident.product_key
+                    or (row.get("listing_kind") or "") != ident.kind
+                )
+                if fields_changed and previous_key and previous_key != ident.product_key:
+                    stale_keys.add(str(previous_key))
+                if fields_changed and identity_moved:
+                    self.db.execute(
+                        """
+                        INSERT INTO identity_revisions(
+                            listing_id, old_product_key, new_product_key, old_kind, new_kind,
+                            was_deal, old_resale, old_evidence_level, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            row["id"], previous_key, ident.product_key,
+                            row.get("listing_kind"), ident.kind,
+                            int(row.get("was_deal") or 0), row.get("old_resale"),
+                            row.get("old_evidence_level"), iso(),
+                        ),
+                    )
+                self.db.execute(
+                    "UPDATE listings SET category=?, product_key=?, product_name=?, "
+                    "identification_confidence=?, is_faulty=?, is_wanted=?, is_bundle=?, "
+                    "listing_kind=?, flags=?, attrs=?, identity_level=?, identity_basis=?, "
+                    "scan_leaf=?, sale_role=?, identity_version=?, identity_hash=? WHERE id=?",
+                    (
+                        ident.category, ident.product_key, ident.product_name, ident.confidence,
+                        int(ident.is_faulty), int(ident.is_wanted), int(ident.is_bundle),
+                        ident.kind, flags_json, attrs_json, ident.identity_level,
+                        json_dumps(ident.identity_basis), scan_leaf, ident.sale_role,
+                        IDENTIFICATION_VERSION, source_hash, row["id"],
+                    ),
+                )
+                if fields_changed:
+                    changed += 1
+                processed += 1
+            if stale_keys:
+                # A cached price produced under an identity that has now changed
+                # is not allowed to survive for the rest of its seven-day window.
+                invalidated = self.pricing.invalidate(
+                    sorted(stale_keys), "listing identity revised by identification fix"
+                )
+                invalidated_total += invalidated
+                if invalidated:
+                    log.info(
+                        "Invalidated %d cached valuation(s) for %d superseded product key(s)",
+                        invalidated, len(stale_keys),
+                    )
+            self._set_maintenance("identifying", processed=str(processed), total=str(total))
+            if processed and processed % 4000 == 0:
+                log.info("Re-identification progress: %d/%d", processed, total)
+        self._finish_identity_repairs()
+        self._set_maintenance(
+            "identified", processed=str(processed), total=str(total), changed=str(changed),
+            snapshots_invalidated=str(invalidated_total),
+        )
+        return changed
+
+    def _finish_identity_repairs(self) -> None:
         # Rows whose identity did not change may still predate the stored leaf
         # column. Filling those is cheap and makes every query consistent.
         filled = backfill_scan_leafs(self.db)
@@ -291,7 +460,7 @@ class Scanner:
         retired = self.pricing.invalidate_contaminated_observations()
         if retired:
             log.info("Retired %d market observation(s) filed under an old identity", retired)
-        return changed
+        self._set_maintenance("identified", observations_retired=str(retired))
 
     async def _sleep(self, seconds: float) -> bool:
         try:
@@ -301,6 +470,9 @@ class Scanner:
             return False
 
     async def _loop(self, marketplace: str) -> None:
+        # Never collect against an identity or valuation pass that is still
+        # committing. A failed maintenance pass leaves this blocked on purpose.
+        await self._maintenance_ready.wait()
         await self._sleep(random.uniform(2, 8))
         while not self._stop.is_set():
             try:
@@ -393,6 +565,11 @@ class Scanner:
         if not self.scan_config.confirmed:
             raise ScanConfigurationRequired(
                 "Save the scan configuration before starting a scan"
+            )
+        if not self._maintenance_ready.is_set():
+            raise ScannerMaintenance(
+                "Startup identity and valuation maintenance is still running; "
+                "scans resume automatically when it finishes."
             )
         targets = [marketplace] if marketplace else [m for m in ("vinted", "gumtree", "ebay")]
         targets = [
@@ -1229,7 +1406,7 @@ class Scanner:
                 SELECT l.id, l.price, l.last_price, l.category, l.product_key, l.product_name,
                        l.listing_kind, l.identification_confidence, l.is_faulty, l.is_wanted,
                        l.is_bundle, l.flags, l.attrs, l.identity_level, l.identity_basis,
-                       COALESCE(r.decision, '') AS review_decision
+                       l.sale_role, COALESCE(r.decision, '') AS review_decision
                 FROM listings l LEFT JOIN review_decisions r ON r.listing_id=l.id
                 WHERE l.marketplace=? AND l.external_id=?
                 """,
@@ -1238,6 +1415,7 @@ class Scanner:
             raw_json = json_dumps(item.raw)
             flags_json = json_dumps(ident.flags)
             attrs_json = json_dumps(ident.attrs)
+            source_hash = identity_hash(title, description, item.condition_raw or "")
             if existing and existing.get("review_decision") == "corrected":
                 # A persisted user correction is authoritative. Refresh price and
                 # description, but do not silently undo the corrected identity.
@@ -1253,6 +1431,7 @@ class Scanner:
                 attrs_json = existing["attrs"]
                 identity_level = existing.get("identity_level")
                 identity_basis = existing.get("identity_basis")
+                sale_role = existing.get("sale_role") or ident.sale_role
             else:
                 category = ident.category
                 kind = ident.kind
@@ -1264,6 +1443,7 @@ class Scanner:
                 is_bundle = int(ident.is_bundle)
                 identity_level = ident.identity_level
                 identity_basis = json_dumps(ident.identity_basis)
+                sale_role = ident.sale_role
             condition = ident.condition
             if not condition or condition == "unknown":
                 raw_condition = normalise_text(item.condition_raw).lower()
@@ -1349,6 +1529,15 @@ class Scanner:
                 self.db.execute(
                     "INSERT INTO price_history(listing_id, price, observed_at) VALUES (?, ?, ?)",
                     (listing_id, item.price, now),
+                )
+            if listing_id:
+                # Written separately so every ingest path records the
+                # classifier version and the exact source text fingerprint.
+                # A restart can then skip this row until either changes.
+                self.db.execute(
+                    "UPDATE listings SET sale_role=?, identity_version=?, identity_hash=? "
+                    "WHERE id=?",
+                    (sale_role, IDENTIFICATION_VERSION, source_hash, listing_id),
                 )
             resolved_category = item.category_id or category_id
             if listing_id and resolved_category:
@@ -1760,6 +1949,7 @@ class Scanner:
         )
 
     async def _auction_loop(self) -> None:
+        await self._maintenance_ready.wait()
         await self._sleep(20)
         while not self._stop.is_set():
             try:
@@ -1794,21 +1984,26 @@ class Scanner:
             if await self._sleep(urgent if soon else normal):
                 return
 
-    async def _run_refresh(self, force: bool = False) -> None:
+    async def _run_refresh(self, force: bool = False) -> bool:
         async with self._refresh_lock:
             now = utcnow()
             if not force and self._valued_version == self._data_version:
                 # No listing data changed since the last complete refresh.
-                return
+                self._last_refresh_ok = True
+                return True
             version = self._data_version
             try:
                 result = await asyncio.to_thread(self.valuation.refresh)
                 self._last_refresh_at = iso(now)
                 self._valued_version = version
                 self._last_refresh_result = result
+                self._last_refresh_ok = True
                 log.info("Valuation refresh: %s", result)
+                return True
             except Exception:
+                self._last_refresh_ok = False
                 log.exception("Valuation refresh failed")
+                return False
 
     async def _notify(self) -> None:
         try:

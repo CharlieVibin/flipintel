@@ -39,7 +39,7 @@ from .scan_config import (
     save_scan_config,
     update_custom_preset,
 )
-from .scanner import Scanner, ScanConfigurationRequired
+from .scanner import Scanner, ScannerMaintenance, ScanConfigurationRequired
 from .utils import age_hours, hours_ago, iso, parse_iso, normalise_text, utcnow
 from .valuation import ValuationConfig
 from .visibility import (
@@ -129,6 +129,7 @@ def _listing_row(row: dict[str, Any]) -> dict[str, Any]:
         "is_bundle": bool(row.get("is_bundle")),
         "duplicate_of": row.get("duplicate_of"),
         "duplicate_score": row.get("duplicate_score"),
+        "sale_role": row.get("sale_role"),
         "posted_at": row.get("posted_at"),
         "first_seen": row.get("first_seen"),
         "last_seen": row.get("last_seen"),
@@ -177,6 +178,8 @@ def _deal_row(row: dict[str, Any]) -> dict[str, Any]:
         "score": row.get("score") or 0,
         "is_deal": bool(row.get("is_deal")),
         "needs_review": bool(row.get("needs_review")),
+        "eligibility": row.get("eligibility"),
+        "eligibility_reason": row.get("eligibility_reason"),
         "review_reason": row.get("review_reason"),
         "risk_score": row.get("risk_score") or 0,
         "risk_level": row.get("risk_level") or "low",
@@ -211,7 +214,8 @@ async def health(request: Request) -> dict[str, Any]:
                            + (f" AND {preset_sql}" if preset_sql else ""),
                            preset_params) or 0,
         "review": db.scalar("SELECT COUNT(*) FROM deals d JOIN listings l ON l.id=d.listing_id "
-                            "WHERE d.needs_review=1 AND l.status='active' "
+                            "WHERE d.needs_review=1 AND COALESCE(d.eligibility,'') != 'excluded' "
+                            "AND l.status='active' "
                             "AND NOT EXISTS (SELECT 1 FROM review_decisions r WHERE r.listing_id=l.id)"
                             + (f" AND {preset_sql}" if preset_sql else ""),
                             preset_params) or 0,
@@ -241,6 +245,8 @@ async def health(request: Request) -> dict[str, Any]:
         "time": iso(),
         "version": "1.0.0",
         "scanner": scanner.health_snapshot(),
+        "maintenance": scanner.maintenance(),
+        "maintenance_ready": scanner.maintenance_ready,
         "scan_config": {
             "confirmed": scan_config.confirmed,
             "active_preset": scan_config.active_preset,
@@ -308,7 +314,8 @@ async def overview(request: Request) -> dict[str, Any]:
     ) or 0
     review_count = db.scalar(
         "SELECT COUNT(*) FROM deals d JOIN listings l ON l.id=d.listing_id "
-        "WHERE d.needs_review=1 AND l.status='active' "
+        "WHERE d.needs_review=1 AND COALESCE(d.eligibility,'') != 'excluded' "
+        "AND l.status='active' "
         "AND NOT EXISTS (SELECT 1 FROM review_decisions r WHERE r.listing_id=l.id)"
         + (f" AND {preset_sql}" if preset_sql else ""),
         preset_params,
@@ -425,6 +432,7 @@ async def list_deals(
     if review:
         if review_status == "pending":
             where.append("d.needs_review = 1")
+            where.append("COALESCE(d.eligibility, '') != 'excluded'")
             where.append("r.listing_id IS NULL")
         elif review_status in {"approved", "rejected", "corrected"}:
             # History includes items that were approved and consequently left
@@ -433,6 +441,7 @@ async def list_deals(
             params.append(review_status)
         else:
             where.append("d.needs_review = 1")
+            where.append("COALESCE(d.eligibility, '') != 'excluded'")
     elif not saved_only and not archived:
         where.append("d.is_deal = 1")
     if archived:
@@ -523,7 +532,7 @@ async def list_deals(
                d.resale_strategy, d.resale_quick, d.resale_balanced, d.resale_max,
                d.max_bid, d.estimated_days, d.valuation_refreshed_at,
                d.valuation_basis, d.evidence_score,
-               d.rank_score, d.rank_tier,
+               d.rank_score, d.rank_tier, d.eligibility, d.eligibility_reason,
                r.decision AS review_decision, r.decided_at AS review_decided_at
         {joins}
         WHERE {where_sql}
@@ -581,7 +590,8 @@ async def review_groups(
     base = (
         "FROM deals d JOIN listings l ON l.id = d.listing_id "
         "LEFT JOIN review_decisions r ON r.listing_id = l.id "
-        "WHERE d.needs_review = 1 AND l.status = 'active' AND r.listing_id IS NULL "
+        "WHERE d.needs_review = 1 AND COALESCE(d.eligibility, '') != 'excluded' "
+        "AND l.status = 'active' AND r.listing_id IS NULL "
         "AND l.listing_kind = ? AND l.flags LIKE ?"
     )
     like = f'%"{flag}"%'
@@ -1017,7 +1027,8 @@ async def bulk_review_deal(
             JOIN deals d ON d.listing_id = l.id
             LEFT JOIN review_decisions r ON r.listing_id = l.id
             WHERE l.id IN ({placeholders}) AND l.status = 'active'
-              AND d.needs_review = 1 AND r.listing_id IS NULL
+              AND d.needs_review = 1 AND COALESCE(d.eligibility, '') != 'excluded'
+              AND r.listing_id IS NULL
             ORDER BY l.id
             """,
             listing_ids,
@@ -1048,7 +1059,8 @@ async def bulk_review_deal(
         await _scanner(request)._run_refresh(force=True)
     remaining = db.scalar(
         "SELECT COUNT(*) FROM deals d JOIN listings l ON l.id = d.listing_id "
-        "WHERE d.needs_review = 1 AND l.status = 'active' "
+        "WHERE d.needs_review = 1 AND COALESCE(d.eligibility, '') != 'excluded' "
+        "AND l.status = 'active' "
         "AND NOT EXISTS (SELECT 1 FROM review_decisions r WHERE r.listing_id = l.id)"
     ) or 0
     return {
@@ -1741,7 +1753,7 @@ async def trigger_scan(request: Request, body: ScanRequest | None = None) -> dic
         raise HTTPException(status_code=404, detail="Unknown marketplace")
     try:
         accepted = await scanner.trigger(marketplace)
-    except ScanConfigurationRequired as exc:
+    except (ScanConfigurationRequired, ScannerMaintenance) as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     if accepted:
         message = "Scan started"

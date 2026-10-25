@@ -1,9 +1,154 @@
 # FlipIntel — Project Status
 
-**Last updated:** 2026-10-24
+**Last updated:** 2026-10-25
 **Workspace:** `C:\Users\Charr\Documents\Freebuff web`
 **Runtime:** Python 3.10, FastAPI, SQLite, React 18 + Vite + Tailwind
 **Live dashboard:** http://127.0.0.1:8765 (while the local server is running)
+
+## Session 2026-10-25 — Phase 6: reliable identity, eligibility and fast startup
+
+This pass fixed the two-minute startup and the product-class failures that were
+letting accessories, complete computers and single implausible asks set resale
+prices. It did not rebuild the application, reset the database, delete historical
+observations or add a paid data source.
+
+### Startup and maintenance
+
+- Identification is now versioned per listing (`identity_version` + a content
+  hash). A restart re-identifies only rows whose version or meaningful content
+  changed, and the pass batches/commits with a resumable cursor. The scanner no
+  longer performs the whole history synchronously before the HTTP port opens.
+- Measured on the live 113k-row database: HTTP `/api/health` answered in
+  **6.8 s** on the final warm restart and **5.3 s** on the preceding restart;
+  the no-op background maintenance took **6.6 s**. A version migration that
+  changed 1,395 identities took **264 s** in total (82 s identification, 182 s
+  valuation) while the dashboard was already serving.
+- The earlier cold benchmark on the same database was 8.7 s to HTTP readiness
+  and 113.9 s for the background pass. Collection is still rate-limited by the
+  marketplaces, not by startup work.
+
+### Why the Steam Deck LCD displayed OLED comparables
+
+Two separate faults were present:
+
+1. Product identity did not always carry the LCD/OLED attribute, so an
+   unqualified `Steam Deck` key pooled both display technologies. The structured
+   variant comparator now rejects a display mismatch before price weighting.
+2. The deal panel showed rejected rows next to accepted rows. The drawer now
+   separates accepted basis comparables from rejected rows and states why each
+   was rejected; only accepted rows are marked as contributing.
+
+The original `Steam deck 1tb lcd` listing (£180, Gumtree) is now
+`console:steam-deck-lcd:1tb:upgraded`. Its previous £290.42 estimate is gone.
+There is currently **no supported estimate**: the only exact LCD 1TB ask is
+£79.88, which is below 40% of the £321.45 median of 24 other Steam Deck LCD
+listings. That ask is rejected as a likely incomplete/faulty/scam outlier and the
+old £69.28 snapshot is invalidated. No OLED price is used. For context, the
+separate LCD keys are £255.00 (64GB, 5 asks), £284.61 (256GB, 11 asks, moderate)
+and £323.00 (512GB, 1 ask, insufficient); those values are never copied onto the
+1TB key.
+
+### Identity and eligibility
+
+- Identification version **6** adds Apple desktop families (Mac mini, Mac Studio,
+  iMac, Mac Pro), Windows specification-dense complete systems, and console
+  bundles containing an expansion SSD as console/bundle rather than a loose
+  drive. A complete Mac mini with a 512GB SSD no longer becomes an SSD
+  comparable, and `Xbox Series X ... Expansion SSD` is no longer an NVMe market
+  observation.
+- **1,395** records changed identity in the first Phase 6 pass (163 more in the
+  final console pass); **1,675** identity revisions
+  were recorded across the migration, **539** of them moved to a different
+  product key, and **4** previously promoted deals were re-identified.
+- `app/eligibility.py` is a backend gate before valuation: the physical product,
+  sale role (device/component/accessory/parts/packaging/media/game/bundle),
+  condition/functionality, preset membership, profit and evidence must all
+  support a recommendation. Frontend hiding alone is not used.
+- Final live eligibility: **191 recommended**, **660 needs verification**,
+  **112,838 excluded**, **131 unset** legacy rows. Main exclusion reasons:
+  40,748 product not established; 26,583 accessory/part; 16,748 no expected
+  profit; 10,777 exact model missing; 4,595 game software; 4,227 removable media;
+  3,053 insufficient compatible evidence; 1,815 bundle; 1,615 spare parts;
+  1,430 below thresholds; 790 faulty; 296 packaging; 74 implausible capacity.
+- Recommendations fell from **206 to 191** and the active review queue from
+  **1,221 to 660**. This is intentional precision-over-volume behaviour, not a
+  claim that every remaining recommendation is profitable.
+
+### Valuation integrity
+
+- Comparable pools exclude accessories, packaging, games, media, spare parts,
+  faulty/untested rows and complete-system contamination before aggregation.
+- **Storage peer guard:** an SSD asking price more than twice the median of other
+  drives at the same capacity and interface is rejected as an OEM/outlier ask.
+  The peer index is built once per refresh; per-key queries had made a repair
+  pass unacceptably slow. Live SSD snapshots above £200 fell from **25 to 6**,
+  all six being genuine 4TB drives.
+- **Sparse-family guard:** for a pool with fewer than three distinct sources, a
+  GPU/console/phone/tablet ask below 40% of the median of its own model family is
+  rejected as a sanity check. The family median is never substituted as the
+  estimate. This retired the £69.28 Steam Deck LCD, the £85.87 iPhone 15 Plus and
+  the £7.78 iPad Air M4 estimates rather than presenting them as values.
+- Re-evaluating a key that no longer has a supported estimate invalidates its
+  live snapshot (`no supported estimate after revaluation`) instead of leaving
+  the old price active for another seven days. Raw snapshots and observations are
+  retained; nothing is deleted.
+
+### Corrected examples on the live database
+
+| Product | Before | After |
+|---|---:|---:|
+| Steam Deck LCD 1TB upgraded (target) | £290.42 from OLED-contaminated pool | no estimate; exact LCD ask rejected as low outlier |
+| Steam Deck LCD 256GB | £290.42 mixed | £284.61, 11 exact LCD asks, moderate |
+| Steam Deck OLED 512GB | £412–440 mixed | £412.15, 17 exact OLED asks, moderate |
+| 256GB NVMe SSD | £261 implausible | £23.14 generic; £18.50 for the SK Hynix key |
+| 512GB NVMe SSD | £342–442 | £47.94 on live deals; old high snapshots retired |
+| Samsung 1TB / 2TB NVMe | £403.36 / £428.61 | both invalidated; no supported estimate |
+| 4TB Samsung 990 Pro | not previously separated | £358.89, limited, 4 exact asks |
+| RTX 4060 8GB / 4060 Ti 8GB | shared generic pools | £267.48 moderate / £255.00 insufficient, separate keys |
+| RTX 4070 12GB / 4070 Ti / 4070 Super | variant risk | £522.67 limited / £460.00 limited / £489.80 insufficient, separate keys |
+| RTX 3060 12GB | £247.92 earlier | £181.28 limited, 10 exact asks |
+| Gigabyte Z790 AORUS Master X | implausibly low | no estimate rather than a wrong one; listing is faulty/parts-flagged |
+
+Historical data remains intact: listings **113,820**, active **113,654**,
+valuation snapshots **11,382** (2,923 invalidated), market observations
+**72,458** (4,081 invalidated). The increase is normal scanning during the
+session; no history was reset. The two broken capacity keys (84TB/68TB style)
+are now zero.
+
+### Tests and verification
+
+- `.venv\Scripts\python.exe -m pytest -q`: **210 passed, 0 failed**.
+- `cd frontend && npm run build`: TypeScript and Vite build pass (403 kB JS,
+  49.58 kB CSS).
+- Live final restart: HTTP ready in 6.8 s; background maintenance idle in 6.6 s;
+  `/api/health` reports 113,654 active listings. The full 113,641-row migration
+  completed in 264 s with no scanner/migration race.
+- New tests cover the Mac mini/Studio/iMac and Windows-system SSD confusion,
+  console+expansion-SSD bundles, sparse-family outlier rejection, storage peer
+  outlier rejection, snapshot retirement and the resumable/incremental startup
+  path. The independent 240-listing benchmark still passes its precision/recall
+  and kind-accuracy thresholds.
+
+### Remaining limitations
+
+- A full reconciliation after a **valuation rule change** is still expensive on
+  this database (264 s for 113k rows, entirely background). Normal restarts are
+  incremental and took 6.6 s; a logic change uses a targeted key repair where
+  possible rather than re-evaluating every listing.
+- 131 legacy deals have no eligibility value because they are outside the
+  current valuation universe; they are not shown as recommendations.
+- The 40% family floor and 2x storage ceiling are sanity guards, not market
+  models. They require at least five/six sibling observations and only affect
+  sparse or extreme pools. A genuinely rare product with no siblings remains
+  insufficient rather than being guessed.
+- The six remaining live SSD snapshots above £200 are 4TB products; they are
+  plausible capacity-driven values, not leftovers from the 256GB/512GB failures.
+- There is still no completed-sale evidence in this database. Every displayed
+  estimate is asking-only and is labelled accordingly; calibration remains
+  inactive until genuine sold observations are imported.
+- RTX keys are separated when the title states VRAM or a Ti/Super suffix. A
+  generic RTX 4070 key without VRAM remains a provisional family match and should
+  be verified against the exact card before purchase.
 
 ## Session 2026-10-24 — Schedule and alert tuning
 
@@ -1375,7 +1520,7 @@ cd frontend
 npm run build
 ```
 
-Last verified: **175 passed, 0 failed**; frontend `tsc -b && vite build` passes.
+Last verified: **210 passed, 0 failed**; frontend `tsc -b && vite build` passes.
 
 ## Exact next tasks (in order)
 

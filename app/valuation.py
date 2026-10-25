@@ -19,6 +19,11 @@ from typing import Any
 
 from .comparables import split_pool
 from .db import Database
+from .eligibility import (
+    EXCLUDED,
+    assess as assess_eligibility,
+    sale_role as listing_sale_role,
+)
 from .identification import CONDITION_FACTORS, identity_level_for
 from .pricing import PricingDatabase
 from .risk import RiskAssessment, assess_listing
@@ -44,7 +49,7 @@ FULL_REFRESH_HOURS = 6
 
 # Bump when evaluation logic changes so the next refresh cannot reuse deals
 # computed by the previous rules.
-VALUATION_REVISION = 7
+VALUATION_REVISION = 12
 
 
 def _identity_basis(raw: Any) -> list[str]:
@@ -1160,6 +1165,13 @@ class ValuationEngine:
         self._estimate_conditions: dict[tuple[str, str], str] = {}
         self._snapshot_at: dict[str, str] = {}
         self._snapshot_cache: dict[str, str | None] = {}
+        self._storage_ceiling_cache: dict[tuple[str, str], tuple[float, int, float] | None] = {}
+        self._storage_peer_prices: dict[
+            tuple[str, str], list[tuple[str, float]]
+        ] | None = None
+        self._family_floor_cache: dict[
+            tuple[str, str], tuple[float, int, float] | None
+        ] = {}
 
     # --- data gathering -----------------------------------------------------
     def _market_comps(
@@ -1197,6 +1209,14 @@ class ValuationEngine:
                   AND l.last_seen >= ? AND l.id != ? AND l.is_faulty = 0 AND l.is_wanted = 0
                   AND COALESCE(l.condition_norm, 'unknown') != 'faulty'
                   AND l.is_bundle = 0 AND l.price >= 5 AND l.price <= 25000
+                  AND COALESCE(l.sale_role, '') NOT IN
+                      ('accessory','packaging','media','game','parts','wanted','unknown')
+                  AND COALESCE(l.flags, '') NOT LIKE '%\"accessory_or_box\"%'
+                  AND COALESCE(l.flags, '') NOT LIKE '%\"compatibility_accessory\"%'
+                  AND COALESCE(l.flags, '') NOT LIKE '%\"parts_only\"%'
+                  AND COALESCE(l.flags, '') NOT LIKE '%\"console_game\"%'
+                  AND COALESCE(l.flags, '') NOT LIKE '%\"storage_media\"%'
+                  AND COALESCE(l.flags, '') NOT LIKE '%\"untested\"%'
                 ORDER BY l.last_seen DESC LIMIT 250
             )
             """,
@@ -1217,6 +1237,14 @@ class ValuationEngine:
               AND COALESCE(l.is_bundle, 0)=0 AND COALESCE(l.is_faulty, 0)=0
               AND COALESCE(l.is_wanted, 0)=0
               AND COALESCE(l.condition_norm, 'unknown') != 'faulty'
+              AND COALESCE(l.sale_role, '') NOT IN
+                  ('accessory','packaging','media','game','parts','wanted','unknown')
+              AND COALESCE(l.flags, '') NOT LIKE '%\"accessory_or_box\"%'
+              AND COALESCE(l.flags, '') NOT LIKE '%\"compatibility_accessory\"%'
+              AND COALESCE(l.flags, '') NOT LIKE '%\"parts_only\"%'
+              AND COALESCE(l.flags, '') NOT LIKE '%\"console_game\"%'
+              AND COALESCE(l.flags, '') NOT LIKE '%\"storage_media\"%'
+              AND COALESCE(l.flags, '') NOT LIKE '%\"untested\"%'
               AND (l.id IS NULL OR o.product_key = l.product_key)
             ORDER BY o.observed_at DESC LIMIT 300
             """,
@@ -1240,11 +1268,220 @@ class ValuationEngine:
         accepted, rejected = split_pool(
             combined, kind=kind, product_key=product_key, candidate=candidate
         )
+        # A sparse pool is the easiest place for one desperate, incomplete or
+        # fraudulent ask to become a product price. Count distinct source rows:
+        # the same listing can arrive as a live row, an observation and an
+        # external quote, and that duplication must not make a one-ask market
+        # look like a three-observation consensus. Where enough sibling
+        # variants exist, a comparable below 40% of the family median is context
+        # evidence, not a resale value. It is rejected; the family median is
+        # never substituted as the estimate.
+        candidate_source = f"listing:{exclude_id}"
+        distinct_sources = {
+            str(row.get("source_id") or "") or f"{row.get('title')}|{row.get('price')}|{row.get('marketplace')}"
+            for row in accepted
+            if str(row.get("source_id") or "") != candidate_source
+        }
+        if accepted and len(distinct_sources) < MIN_COMPS and kind in {
+            "gpu", "console", "phone", "tablet"
+        }:
+            floor = self._family_price_floor(kind, product_key)
+            if floor:
+                cutoff, family_count, family_median = floor
+                filtered = []
+                for row in accepted:
+                    source = str(
+                        row.get("source") or row.get("marketplace") or ""
+                    ).lower()
+                    price = float(row.get("price") or 0)
+                    if (
+                        not row.get("is_sold")
+                        and source != "cex"
+                        and price < cutoff
+                    ):
+                        rejected.append(
+                            {
+                                "title": row.get("title"),
+                                "price": price,
+                                "marketplace": row.get("marketplace") or row.get("source"),
+                                "evidence": "asking",
+                                "reason": (
+                                    f"Asking price is less than 40% of the "
+                                    f"£{family_median:,.2f} median of {family_count} "
+                                    "other listings in the same product family; "
+                                    "a likely incomplete, faulty or scam ask cannot "
+                                    "set a resale value."
+                                ),
+                                "conflict": "price_outlier",
+                                "match_quality": "incompatible",
+                                "identified_variant": None,
+                            }
+                        )
+                    else:
+                        filtered.append(row)
+                accepted = filtered
+        # A drive's exact capacity and interface define a broad market, but a
+        # single overpriced OEM replacement part is not that market. Compare
+        # asking prices with the median of other products at the same capacity
+        # and interface. This is evidence-based (2x the observed peer median),
+        # not a hardcoded price cap, and only applies when enough peers exist.
+        peer = self._storage_peer_ceiling(kind, product_key)
+        if peer and accepted:
+            ceiling, peer_count, peer_median = peer
+            filtered: list[dict[str, Any]] = []
+            for row in accepted:
+                source = str(row.get("source") or row.get("marketplace") or "").lower()
+                price = float(row.get("price") or 0)
+                if (
+                    not row.get("is_sold")
+                    and source != "cex"
+                    and price > ceiling
+                ):
+                    rejected.append(
+                        {
+                            "title": row.get("title"),
+                            "price": price,
+                            "marketplace": row.get("marketplace") or row.get("source"),
+                            "evidence": "asking",
+                            "reason": (
+                                f"Asking price is over twice the £{peer_median:,.2f} "
+                                f"median of {peer_count} other {kind.upper()} listings "
+                                "at the same capacity and interface; an outlier OEM "
+                                "part is not evidence of the used resale market."
+                            ),
+                            "conflict": "price_outlier",
+                            "match_quality": "incompatible",
+                            "identified_variant": None,
+                        }
+                    )
+                else:
+                    filtered.append(row)
+            accepted = filtered
         self._last_rejected = rejected
         if self._comp_cache is not None:
             self._comp_cache[cache_key] = accepted
             self._rejected_cache[cache_key] = rejected
         return accepted
+
+    def _family_price_floor(
+        self,
+        kind: str,
+        product_key: str | None,
+    ) -> tuple[float, int, float] | None:
+        """Return (0.4x family median, family count, family median).
+
+        Only sibling variants of the *same* model family are used. The median
+        is only a sanity floor for a sparse pool; it is never returned as the
+        product valuation.
+        """
+        if not product_key or kind not in {"gpu", "console", "phone", "tablet"}:
+            return None
+        cache_key = (kind, product_key)
+        if cache_key in self._family_floor_cache:
+            return self._family_floor_cache[cache_key]
+        parts = product_key.split(":")
+        if kind == "console" and len(parts) >= 3:
+            family = ":".join(parts[:2])
+        else:
+            family = re.sub(r"-\d{1,4}(?:gb|tb)$", "", product_key)
+        if family == product_key:
+            # No capacity/variant suffix to group siblings by. The current key
+            # is excluded below, so there would be no independent peers.
+            self._family_floor_cache[cache_key] = None
+            return None
+        rows = self.db.query(
+            """
+            SELECT price FROM listings
+            WHERE listing_kind=? AND status='active'
+              AND product_key IS NOT NULL AND product_key != ?
+              AND product_key LIKE ? AND last_seen >= ?
+              AND price >= 5 AND price <= 25000
+              AND COALESCE(is_bundle, 0)=0 AND COALESCE(is_faulty, 0)=0
+              AND COALESCE(is_wanted, 0)=0
+              AND COALESCE(sale_role, '') NOT IN
+                  ('accessory','packaging','media','game','parts','wanted','unknown')
+            """,
+            (kind, product_key, f"{family}%", hours_ago(24 * 30)),
+        )
+        prices = sorted(float(row["price"]) for row in rows if float(row["price"]) > 0)
+        if len(prices) < 5:
+            self._family_floor_cache[cache_key] = None
+            return None
+        centre = float(median(prices) or 0.0)
+        if centre <= 0:
+            self._family_floor_cache[cache_key] = None
+            return None
+        result = (round(centre * 0.4, 2), len(prices), round(centre, 2))
+        self._family_floor_cache[cache_key] = result
+        return result
+
+    def _storage_peer_ceiling(
+        self, kind: str, product_key: str | None
+    ) -> tuple[float, int, float] | None:
+        """Return (2x peer median, peer count, peer median) for a storage key.
+
+        The peer set is active listings of the same drive interface and exact
+        capacity under *other* product keys. Requiring at least six peers keeps
+        rare enterprise capacities out of the guard, where a broad median would
+        not be meaningful.
+        """
+        if kind != "ssd" or not product_key or not product_key.startswith("ssd:"):
+            return None
+        cache_key = (kind, product_key)
+        if cache_key in self._storage_ceiling_cache:
+            return self._storage_ceiling_cache[cache_key]
+        parts = product_key.split(":")
+        if len(parts) < 3:
+            self._storage_ceiling_cache[cache_key] = None
+            return None
+        interface = parts[1]
+        capacity_match = re.search(r":(\d+(?:\.\d+)?(?:gb|tb))(?::|$)", product_key)
+        if not capacity_match:
+            self._storage_ceiling_cache[cache_key] = None
+            return None
+        capacity = capacity_match.group(1)
+        if self._storage_peer_prices is None:
+            # One indexed read for the whole refresh, not one query per product
+            # key. 700+ storage keys previously made a full rebuild take
+            # minutes longer than the incremental identification it followed.
+            index: dict[tuple[str, str], list[tuple[str, float]]] = defaultdict(list)
+            rows = self.db.query(
+                """
+                SELECT product_key, price FROM listings
+                WHERE listing_kind='ssd' AND status='active'
+                  AND product_key IS NOT NULL AND last_seen >= ?
+                  AND price >= 5 AND price <= 5000
+                  AND COALESCE(is_bundle, 0)=0 AND COALESCE(is_faulty, 0)=0
+                  AND COALESCE(is_wanted, 0)=0
+                """,
+                (hours_ago(24 * 30),),
+            )
+            for row in rows:
+                key = str(row["product_key"])
+                key_parts = key.split(":")
+                if len(key_parts) < 3:
+                    continue
+                match = re.search(r":(\d+(?:\.\d+)?(?:gb|tb))(?::|$)", key)
+                if not match:
+                    continue
+                index[(key_parts[1], match.group(1))].append(
+                    (key, float(row["price"]))
+                )
+            self._storage_peer_prices = index
+        peers = self._storage_peer_prices.get((interface, capacity), [])
+        prices = sorted(
+            price for key, price in peers if key != product_key and price > 0
+        )
+        if len(prices) < 6:
+            self._storage_ceiling_cache[cache_key] = None
+            return None
+        centre = float(median(prices) or 0.0)
+        if centre <= 0:
+            self._storage_ceiling_cache[cache_key] = None
+            return None
+        result = (round(centre * 2.0, 2), len(prices), round(centre, 2))
+        self._storage_ceiling_cache[cache_key] = result
+        return result
 
     def _gpu_fallback_comps(self, gpu_key: str) -> list[dict[str, Any]]:
         return self.db.query(
@@ -1688,6 +1925,23 @@ class ValuationEngine:
             if confidence < config.min_confidence:
                 reasons.append(f"Confidence below the {config.min_confidence:.0%} threshold")
 
+        # Eligibility is the final gate before the feed or review queue. It is
+        # evaluated after profit and thresholds so it cannot be fooled by
+        # intermediate values.
+        eligibility, eligibility_reason = assess_eligibility(
+            listing,
+            is_deal=is_deal,
+            needs_review=needs_review,
+            expected_resale=expected_resale,
+            purchase_total=purchase_total,
+            net_profit=net_profit,
+            risk_level=risk.level,
+            review_resolved=review_resolved,
+        )
+        if eligibility == EXCLUDED:
+            needs_review = False
+            review_reason = None
+
         if market_estimate is not None and product_key:
             slot = (str(product_key), str(kind))
             condition = str(listing.get("condition_norm") or "unknown")
@@ -1821,6 +2075,9 @@ class ValuationEngine:
             "is_deal": int(is_deal),
             "needs_review": int(needs_review),
             "review_reason": review_reason,
+            "eligibility": eligibility,
+            "eligibility_reason": eligibility_reason,
+            "sale_role": listing_sale_role(listing),
             "risk_score": round(risk.score, 1),
             "risk_level": risk.level,
             "risk_reasons": risk.reasons,
@@ -1857,6 +2114,14 @@ class ValuationEngine:
             FROM listings
             WHERE status='active' AND product_key IS NOT NULL AND last_seen >= ?
               AND is_bundle=0 AND is_faulty=0 AND is_wanted=0
+              AND COALESCE(sale_role, '') NOT IN
+                  ('accessory','packaging','media','game','parts','wanted','unknown')
+              AND COALESCE(flags, '') NOT LIKE '%\"accessory_or_box\"%'
+              AND COALESCE(flags, '') NOT LIKE '%\"compatibility_accessory\"%'
+              AND COALESCE(flags, '') NOT LIKE '%\"parts_only\"%'
+              AND COALESCE(flags, '') NOT LIKE '%\"console_game\"%'
+              AND COALESCE(flags, '') NOT LIKE '%\"storage_media\"%'
+              AND COALESCE(flags, '') NOT LIKE '%\"untested\"%'
             """,
             (hours_ago(24 * 7),),
         )
@@ -2047,7 +2312,19 @@ class ValuationEngine:
             or (age_hours(state.get("last_full_at")) or 0) >= FULL_REFRESH_HOURS
         )
         if full:
-            targets = rows
+            # A full pass over a large history is resumable. The cursor is
+            # keyed to the configuration signature, so a change in rules starts
+            # from zero while a restart continues where it stopped.
+            resume = 0
+            if state.get("cursor_signature") == config_signature:
+                try:
+                    resume = int(state.get("full_cursor") or 0)
+                except (TypeError, ValueError):
+                    resume = 0
+            targets = sorted(
+                (row for row in rows if int(row["id"]) > resume),
+                key=lambda row: int(row["id"]),
+            )
         else:
             targets = []
             for listing in rows:
@@ -2081,6 +2358,7 @@ class ValuationEngine:
         self._estimate_conditions = {}
         self._snapshot_cache = {}
         self._snapshot_at = {}
+        processed_in_pass = 0
         for listing in targets:
             result = self.evaluate(listing, config)
             self.db.execute(
@@ -2093,8 +2371,9 @@ class ValuationEngine:
                     reasons, breakdown, computed_at, input_fingerprint,
                     resale_strategy, resale_quick, resale_balanced, resale_max,
                     evidence_level, max_bid, estimated_days, valuation_refreshed_at,
-                    identity_level, valuation_basis, evidence_score, rank_score, rank_tier)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    identity_level, valuation_basis, evidence_score, rank_score, rank_tier,
+                    eligibility, eligibility_reason, sale_role)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(listing_id) DO UPDATE SET
                     product_key=excluded.product_key, kind=excluded.kind,
                     expected_resale=excluded.expected_resale, resale_low=excluded.resale_low,
@@ -2125,7 +2404,10 @@ class ValuationEngine:
                     valuation_basis=excluded.valuation_basis,
                     evidence_score=excluded.evidence_score,
                     rank_score=excluded.rank_score,
-                    rank_tier=excluded.rank_tier
+                    rank_tier=excluded.rank_tier,
+                    eligibility=excluded.eligibility,
+                    eligibility_reason=excluded.eligibility_reason,
+                    sale_role=excluded.sale_role
                 """,
                 (
                     result["listing_id"], result["product_key"], result["kind"],
@@ -2146,11 +2428,47 @@ class ValuationEngine:
                     result["estimated_days"], result["valuation_refreshed_at"],
                     result["identity_level"], result["valuation_basis"],
                     result["evidence_score"], result["rank_score"], result["rank_tier"],
+                    result["eligibility"], result["eligibility_reason"], result["sale_role"],
                 ),
             )
             evaluated += 1
+            processed_in_pass += 1
             deals += result["is_deal"]
             review += result["needs_review"]
+            if full and processed_in_pass % 2000 == 0:
+                self.db.execute(
+                    "INSERT INTO valuation_state(key, value, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                    ("full_cursor", str(listing["id"]), iso()),
+                )
+                self.db.execute(
+                    "INSERT INTO valuation_state(key, value, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                    ("cursor_signature", config_signature, iso()),
+                )
+        # A key that was re-evaluated but no longer has a supported estimate
+        # must not keep serving its old cached price for another week. History
+        # stays in the table, but the live snapshot is retired.
+        targeted_keys = {
+            (str(listing.get("product_key")), str(listing.get("listing_kind")))
+            for listing in targets
+            if listing.get("product_key")
+        }
+        supported_keys = {
+            slot
+            for slot, estimate in self._estimates.items()
+            if getattr(estimate, "resale_good", None)
+        }
+        unsupported_keys = [
+            product_key
+            for product_key, kind in targeted_keys
+            if (product_key, kind) not in supported_keys
+        ]
+        if unsupported_keys:
+            self.pricing.invalidate(
+                unsupported_keys,
+                "no supported estimate after revaluation",
+            )
         # Every product valuation is appended to the permanent price memory.
         # Reuse comes from this table, so a product researched on eBay is
         # available to a Vinted listing of the same identity.
@@ -2209,6 +2527,8 @@ class ValuationEngine:
         state_values = [("config_signature", config_signature, now), ("last_refresh_at", now, now)]
         if full:
             state_values.append(("last_full_at", now, now))
+            state_values.append(("full_cursor", "0", now))
+            state_values.append(("cursor_signature", config_signature, now))
         self.db.executemany(
             """
             INSERT INTO valuation_state(key, value, updated_at) VALUES (?, ?, ?)

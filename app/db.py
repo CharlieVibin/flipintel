@@ -480,6 +480,11 @@ class Database:
                 "identity_level": "TEXT",
                 "identity_basis": "TEXT",
                 "scan_leaf": "TEXT",
+                # Incremental identification: a stored row is reprocessed only
+                # when the classifier version changes or its source text does.
+                "identity_version": "INTEGER NOT NULL DEFAULT 0",
+                "identity_hash": "TEXT",
+                "sale_role": "TEXT",
             },
             "market_comps": {
                 "postage": "REAL NOT NULL DEFAULT 0",
@@ -531,6 +536,11 @@ class Database:
                 "evidence_score": "REAL",
                 "rank_score": "REAL",
                 "rank_tier": "TEXT",
+                # Recommended / needs_verification / excluded, decided before
+                # the feed or review queue can show a listing.
+                "eligibility": "TEXT",
+                "eligibility_reason": "TEXT",
+                "sale_role": "TEXT",
             },
             "scan_runs": {
                 "duplicates": "INTEGER NOT NULL DEFAULT 0",
@@ -561,6 +571,43 @@ class Database:
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_listings_scan_leaf "
             "ON listings(scan_leaf, status)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_listings_identity_queue "
+            "ON listings(identity_version, id)"
+        )
+        # Resumable maintenance state lives outside the settings the user edits.
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS maintenance_state (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        # Append-only audit of identity corrections. Raw listings, observations
+        # and snapshots are never removed, so a later report can explain which
+        # product changed and whether it had been promoted at the time.
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS identity_revisions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                listing_id INTEGER NOT NULL,
+                old_product_key TEXT,
+                new_product_key TEXT,
+                old_kind TEXT,
+                new_kind TEXT,
+                was_deal INTEGER NOT NULL DEFAULT 0,
+                old_resale REAL,
+                old_evidence_level TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_identity_revisions_listing "
+            "ON identity_revisions(listing_id, created_at DESC)"
         )
         # A listing's identity is not allowed to change while old price memory
         # keeps being served under the previous identity. The scanner fills
