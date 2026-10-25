@@ -134,8 +134,9 @@ COMPATIBILITY_TAIL_RE = re.compile(
     r"suitable\s+for|designed\s+for|made\s+for|works?\s+with|use\s+with|"
     r"replacement\s+for|upgrade\s+for|for)\s+"
     r"(?:the\s+|a\s+|an\s+)?"
-    r"(?:nintendo|switch|ps[1-5]\b|playstation|xbox|steam\s+deck|macbook|ipad|iphone|"
-    r"surface|galaxy|pixel|oneplus|xiaomi|rtx|gtx|rx\s*\d|nvidia|geforce|amd|radeon|"
+    r"(?:nintendo|switch|ps[1-5]\b|playstation|sony|xbox|microsoft|steam\s+deck|valve|"
+    r"macbook|ipad|iphone|surface|galaxy|pixel|oneplus|xiaomi|"
+    r"rtx|gtx|rx\s*\d|nvidia|geforce|amd|radeon|"
     r"intel|dell|hp\b|lenovo|asus|msi|acer|samsung|google)\b",
     re.I,
 )
@@ -194,7 +195,7 @@ CONSOLE_HARDWARE_NOUN_RE = re.compile(
 HARD_ACCESSORY_HEAD_RE = re.compile(
     r"\b(?:low[-\s]profile\s+)?brackets?\b|\bkeycaps?(?:\s+set|\s+kit)?\b|"
     r"\bempty\s+box\b|\boriginal\s+box\b|\bbox\s+only\b|\bpackaging(?:\s+only)?\b|"
-    r"\botter\s*box\b|\bbox\b|"
+    r"\botter\s*box\b|"
     r"\bmanuals?\s+only\b|\bmanual\b|"
     r"\b(?:replacement|spare)\s+(?:shell|case|back|screen|glass|battery|fan|"
     r"cooler|heatsink|bracket|stand|board|logic\s+board|display)\b|"
@@ -204,7 +205,8 @@ HARD_ACCESSORY_HEAD_RE = re.compile(
     r"\bmounting\s+(?:kit|bracket)\b|\bdisplay\s+assembly\b|"
     r"\bscreen\s+assembly\b|\b(?:lcd|oled|touchscreen?)\s+screen\b|\bscreen\s+only\b|"
     r"\blogic\s+board\b|\bmainboard\b|"
-    r"\bcaddy\b|\benclosure\b|\bssd\s+heatsink\b|"
+    r"\bcaddy\b|\b(?:hdd|ssd|drive|hard\s+drive|disk)\s+(?:tray|caddy)\b|"
+    r"\benclosure\b|\bssd\s+heatsink\b|"
     r"\bcharger\b|\bpower\s+supply\b|\bpsu\b|"
     r"\bcable\b|\badapters?\b|\bdock\b|\bhub\b|\bstand\b",
     re.I,
@@ -632,6 +634,8 @@ GAME_TITLE_RE = re.compile(
     r"final\s+fantasy|cyberpunk|witcher|batman|lego\s+\w+|minecraft|fortnite|"
     r"call\s+of\s+duty|battlefield|fifa|\bea\s+fc\b|football\s+manager|just\s+dance|"
     r"mario|zelda|pok[eé]mon|animal\s+crossing|splatoon|kirby|metroid|sonic|"
+    r"donkey\s+kong|bananza|planet\s+coaster|w2k\d{2}|wwe\s*2k\d*|mario\s+kart|"
+    r"luigi'?s\s+mansion|fire\s+emblem|ring\s+fit|nintendo\s+labo|"
     r"halo|forza|starfield|gears\s+of\s+war|destiny|diablo|overwatch|"
     r"pragmata|valhalla|mirage|origins|odyssey|ragnarok|returnal|ratchet\s*&\s*clank|"
     r"crash\s+bandicoot|tekken|street\s+fighter|mortal\s+kombat|nba\s*2k|madden|"
@@ -665,6 +669,28 @@ PARTS_ONLY_RE = re.compile(
     r"replacement\s+screen|lcd\s+assembly|logic\s+board|charging\s+port|sim\s+tray|"
     r"camera\s+module|parts\s+only|spares?\s+only|frame\s+only|shell\s+only|"
     r"motherboard\s+only|bare\s+board|for\s+parts|faulty)\b",
+    re.I,
+)
+# "Ryzen 7 3700X COOLER/FAN ONLY no CPU" sells the cooler. The expensive model
+# is named as the socket it fits, not as the item in the box. These read the
+# product subject from an explicit exclusion ("no CPU") and the part noun that
+# carries "only", so the model name cannot become the identity.
+COOLER_ONLY_RE = re.compile(
+    r"\b(?:cpu\s+)?(?:cooler|fan|heatsink)(?:\s*[/&+]\s*(?:cooler|fan|heatsink))?\s+only\b"
+    r"|\b(?:cooler|fan|heatsink)\b[^|;]{0,40}\bno\s+(?:cpu|processor)\b"
+    r"|\bno\s+(?:cpu|processor)\b[^|;]{0,30}\b(?:cooler|fan|heatsink)\b",
+    re.I,
+)
+CPU_NOT_INCLUDED_RE = re.compile(
+    r"\bno\s+(?:cpu|processor)\b|\b(?:cpu|processor)\s+not\s+included\b|"
+    r"\bwithout\s+(?:an?\s+)?(?:cpu|processor)\b",
+    re.I,
+)
+# A capacity written as a range ("1TB-128TB", "500GB to 2TB") is a variation
+# selector. The cheapest variant's price cannot be attached to a guessed
+# capacity, so the listing has no exact identity until a buyer picks one.
+CAPACITY_RANGE_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:gb|tb)\s*(?:-|–|—|to)\s*\d+(?:\.\d+)?\s*(?:gb|tb)\b",
     re.I,
 )
 BOX_ONLY_RE = re.compile(
@@ -725,8 +751,8 @@ PLATFORM_RE = re.compile(
     re.I,
 )
 GAME_MEDIA_RE = re.compile(
-    r"\b(?:game|games|cartridge|disc\s+only|manual|inlay|box\s+art|"
-    r"cib|complete\s+in\s+box|pal|ntsc|region\s+free|steelbook|"
+    r"\b(?:game|games|cartridge|disc\s+only|loose\s+disc|game\s+disc|manual|inlay|"
+    r"box\s+art|cib|complete\s+in\s+box|pal|ntsc|region\s+free|steelbook|"
     r"video\s+game|pegi|esrb)\b",
     re.I,
 )
@@ -735,7 +761,7 @@ GAME_MEDIA_RE = re.compile(
 GAME_HARDWARE_CUE_RE = re.compile(
     # "Bundle" is not hardware: "PS3 games bundle" is a bundle of games. A
     # console-with-games bundle is handled by CONSOLE_BUNDLE_RE instead.
-    r"\b(?:console|handheld|boxed\s+console|complete\s+console|"
+    r"\b(?:console(?!\s+edition)|handheld|boxed\s+console|complete\s+console|"
     r"controllers?|includes?\s+(?:an?\s+)?controllers?|1tb|2tb|512gb|825gb|"
     r"\d{3}\s*gb)\b",
     re.I,
@@ -2092,6 +2118,14 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     accessory = bool(ACCESSORY_RE.search(title_clean))
     caution = bool(CAUTION_RE.search(full_text))
     parts_only = bool(PARTS_ONLY_RE.search(title_clean))
+    # A cooler/fan sold on its own is a part even though the socket it fits is
+    # named in the title. The processor is explicitly not included.
+    cooler_only = bool(COOLER_ONLY_RE.search(title_clean))
+    cpu_not_included = bool(CPU_NOT_INCLUDED_RE.search(title_clean))
+    capacity_range = bool(CAPACITY_RANGE_RE.search(title_clean))
+    if cooler_only:
+        parts_only = True
+        accessory = True
     # Phone/tablet part cues only apply to those devices. "Steam Deck LCD" and
     # "PS5 LCD" are product descriptions, not replacement phone screens.
     phone_part = bool(PHONE_PART_RE.search(title_clean)) and bool(re.search(
@@ -2136,7 +2170,7 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     platform_game = bool(
         (GAME_TITLE_RE.search(title_clean) or console_game_media)
         and not re.search(
-            r"\b(console(?!\s+games?)|boxed\s+console|complete\s+console|"
+            r"\b(console(?!\s+(?:games?|edition))|boxed\s+console|complete\s+console|"
             r"with\s+(?:an?\s+)?controllers?|includes?\s+(?:an?\s+)?controllers?)\b",
             title_clean,
             re.I,
@@ -2727,19 +2761,36 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     if category == "other" and kind == "other":
         confidence = 0.0
 
+    # The title says the processor is not part of the sale. A motherboard or a
+    # cooler may still be, but a CPU key would price a component that nobody is
+    # selling.
+    if cpu_not_included and product_key and str(product_key).startswith("cpu:"):
+        product_key, product_name = None, None
+        confidence = 0.0
+        parts_only = True
+        if "parts_only" not in flags:
+            flags.append("parts_only")
+
+    # A variation listing advertises several capacities in the title. The
+    # cheapest selectable price does not identify which drive is included, so
+    # no exact identity or valuation is possible from the title alone.
+    if capacity_range:
+        flags.extend(flag for flag in ("capacity_range", "suspicious_capacity") if flag not in flags)
+        product_key, product_name = None, None
+        confidence = 0.0
+
     # Storage and memory define the price of phones, tablets and MacBooks far
     # more than the model line alone. When a listing omits them, the item is
     # still identified but cannot be an automatic recommendation: a "MacBook
     # Air M2" may be an 8/256 base model or a much more valuable 16/512.
-    if (
-        kind == "ssd"
-        and attrs.get("interface") == "usb"
-        and int(attrs.get("capacity_gb") or 0) >= 4000
-        and not attrs.get("brand")
-    ):
-        # Cheap unbranded 4TB+ portable SSDs are routinely misreported or
-        # counterfeit. They stay in the record but cannot support a valued deal.
-        flags.append("suspicious_capacity")
+    if kind == "ssd" and attrs.get("interface") == "usb" and not attrs.get("brand"):
+        # Portable drives without a manufacturer or model cannot be checked
+        # against a real product. Cheap unbranded high-capacity SSDs are also
+        # routinely misreported or counterfeit, so they stay in the record but
+        # cannot support a valued deal.
+        flags.append("unbranded_storage")
+        if int(attrs.get("capacity_gb") or 0) >= 4000:
+            flags.append("suspicious_capacity")
     if kind == "phone" and not attrs.get("storage_gb"):
         flags.append("variant_unclear")
     if kind == "tablet" and product_key and not attrs.get("storage_gb"):

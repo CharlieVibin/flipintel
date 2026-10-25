@@ -214,7 +214,7 @@ async def health(request: Request) -> dict[str, Any]:
                            + (f" AND {preset_sql}" if preset_sql else ""),
                            preset_params) or 0,
         "review": db.scalar("SELECT COUNT(*) FROM deals d JOIN listings l ON l.id=d.listing_id "
-                            "WHERE d.needs_review=1 AND COALESCE(d.eligibility,'') != 'excluded' "
+                            "WHERE d.needs_review=1 AND d.eligibility = 'needs_verification' "
                             "AND l.status='active' "
                             "AND NOT EXISTS (SELECT 1 FROM review_decisions r WHERE r.listing_id=l.id)"
                             + (f" AND {preset_sql}" if preset_sql else ""),
@@ -314,7 +314,7 @@ async def overview(request: Request) -> dict[str, Any]:
     ) or 0
     review_count = db.scalar(
         "SELECT COUNT(*) FROM deals d JOIN listings l ON l.id=d.listing_id "
-        "WHERE d.needs_review=1 AND COALESCE(d.eligibility,'') != 'excluded' "
+        "WHERE d.needs_review=1 AND d.eligibility = 'needs_verification' "
         "AND l.status='active' "
         "AND NOT EXISTS (SELECT 1 FROM review_decisions r WHERE r.listing_id=l.id)"
         + (f" AND {preset_sql}" if preset_sql else ""),
@@ -432,7 +432,7 @@ async def list_deals(
     if review:
         if review_status == "pending":
             where.append("d.needs_review = 1")
-            where.append("COALESCE(d.eligibility, '') != 'excluded'")
+            where.append("d.eligibility = 'needs_verification'")
             where.append("r.listing_id IS NULL")
         elif review_status in {"approved", "rejected", "corrected"}:
             # History includes items that were approved and consequently left
@@ -441,7 +441,7 @@ async def list_deals(
             params.append(review_status)
         else:
             where.append("d.needs_review = 1")
-            where.append("COALESCE(d.eligibility, '') != 'excluded'")
+            where.append("d.eligibility = 'needs_verification'")
     elif not saved_only and not archived:
         where.append("d.is_deal = 1")
     if archived:
@@ -590,7 +590,7 @@ async def review_groups(
     base = (
         "FROM deals d JOIN listings l ON l.id = d.listing_id "
         "LEFT JOIN review_decisions r ON r.listing_id = l.id "
-        "WHERE d.needs_review = 1 AND COALESCE(d.eligibility, '') != 'excluded' "
+        "WHERE d.needs_review = 1 AND d.eligibility = 'needs_verification' "
         "AND l.status = 'active' AND r.listing_id IS NULL "
         "AND l.listing_kind = ? AND l.flags LIKE ?"
     )
@@ -1027,7 +1027,7 @@ async def bulk_review_deal(
             JOIN deals d ON d.listing_id = l.id
             LEFT JOIN review_decisions r ON r.listing_id = l.id
             WHERE l.id IN ({placeholders}) AND l.status = 'active'
-              AND d.needs_review = 1 AND COALESCE(d.eligibility, '') != 'excluded'
+              AND d.needs_review = 1 AND d.eligibility = 'needs_verification'
               AND r.listing_id IS NULL
             ORDER BY l.id
             """,
@@ -1059,7 +1059,7 @@ async def bulk_review_deal(
         await _scanner(request)._run_refresh(force=True)
     remaining = db.scalar(
         "SELECT COUNT(*) FROM deals d JOIN listings l ON l.id = d.listing_id "
-        "WHERE d.needs_review = 1 AND COALESCE(d.eligibility, '') != 'excluded' "
+        "WHERE d.needs_review = 1 AND d.eligibility = 'needs_verification' "
         "AND l.status = 'active' "
         "AND NOT EXISTS (SELECT 1 FROM review_decisions r WHERE r.listing_id = l.id)"
     ) or 0

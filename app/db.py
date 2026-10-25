@@ -559,6 +559,12 @@ class Database:
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_listings_duplicate ON listings(duplicate_of)"
         )
+        # Same-seller relists are consolidated by seller + title + price; this
+        # index keeps that pass cheap next to a six-figure listing history.
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_listings_seller "
+            "ON listings(marketplace, seller)"
+        )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_deals_review ON deals(needs_review, computed_at DESC)"
         )

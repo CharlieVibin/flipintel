@@ -1937,6 +1937,10 @@ class ValuationEngine:
             net_profit=net_profit,
             risk_level=risk.level,
             review_resolved=review_resolved,
+            min_profit=config.min_profit,
+            min_roi=config.min_roi,
+            identity_level=identity_level,
+            confidence=estimate.confidence if estimate else 0.0,
         )
         if eligibility == EXCLUDED:
             needs_review = False
@@ -2255,6 +2259,161 @@ class ValuationEngine:
             signatures[key] = _fingerprint(sorted(extra))
         return signatures
 
+    def _store_result(self, result: dict[str, Any], fingerprint: str) -> None:
+        """Insert or update the stored decision for one evaluated listing."""
+        self.db.execute(
+            """
+            INSERT INTO deals(listing_id, product_key, kind, expected_resale, resale_low,
+                resale_high, confidence, sample_size, valuation_method, purchase_total,
+                resale_fees, resale_shipping, packaging, net_profit,
+                net_profit_conservative, net_profit_optimistic, roi, score, is_deal,
+                needs_review, review_reason, risk_score, risk_level, risk_reasons,
+                reasons, breakdown, computed_at, input_fingerprint,
+                resale_strategy, resale_quick, resale_balanced, resale_max,
+                evidence_level, max_bid, estimated_days, valuation_refreshed_at,
+                identity_level, valuation_basis, evidence_score, rank_score, rank_tier,
+                eligibility, eligibility_reason, sale_role)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(listing_id) DO UPDATE SET
+                product_key=excluded.product_key, kind=excluded.kind,
+                expected_resale=excluded.expected_resale, resale_low=excluded.resale_low,
+                resale_high=excluded.resale_high, confidence=excluded.confidence,
+                sample_size=excluded.sample_size, valuation_method=excluded.valuation_method,
+                purchase_total=excluded.purchase_total, resale_fees=excluded.resale_fees,
+                resale_shipping=excluded.resale_shipping, packaging=excluded.packaging,
+                net_profit=excluded.net_profit,
+                net_profit_conservative=excluded.net_profit_conservative,
+                net_profit_optimistic=excluded.net_profit_optimistic,
+                roi=excluded.roi, score=excluded.score,
+                is_deal=excluded.is_deal, needs_review=excluded.needs_review,
+                review_reason=excluded.review_reason,
+                risk_score=excluded.risk_score, risk_level=excluded.risk_level,
+                risk_reasons=excluded.risk_reasons,
+                reasons=excluded.reasons,
+                breakdown=excluded.breakdown, computed_at=excluded.computed_at,
+                input_fingerprint=excluded.input_fingerprint,
+                resale_strategy=excluded.resale_strategy,
+                resale_quick=excluded.resale_quick,
+                resale_balanced=excluded.resale_balanced,
+                resale_max=excluded.resale_max,
+                evidence_level=excluded.evidence_level,
+                max_bid=excluded.max_bid,
+                estimated_days=excluded.estimated_days,
+                valuation_refreshed_at=excluded.valuation_refreshed_at,
+                identity_level=excluded.identity_level,
+                valuation_basis=excluded.valuation_basis,
+                evidence_score=excluded.evidence_score,
+                rank_score=excluded.rank_score,
+                rank_tier=excluded.rank_tier,
+                eligibility=excluded.eligibility,
+                eligibility_reason=excluded.eligibility_reason,
+                sale_role=excluded.sale_role
+            """,
+            (
+                result["listing_id"], result["product_key"], result["kind"],
+                result["expected_resale"], result["resale_low"], result["resale_high"],
+                result["confidence"], result["sample_size"], result["valuation_method"],
+                result["purchase_total"], result["resale_fees"], result["resale_shipping"],
+                result["packaging"], result["net_profit"] or 0.0,
+                result["net_profit_conservative"], result["net_profit_optimistic"],
+                result["roi"] or 0.0,
+                result["score"], result["is_deal"], result["needs_review"],
+                result["review_reason"], result["risk_score"], result["risk_level"],
+                json_dumps(result["risk_reasons"]), json_dumps(result["reasons"]),
+                json_dumps(result["breakdown"]), result["computed_at"],
+                fingerprint,
+                result["resale_strategy"], result["resale_quick"],
+                result["resale_balanced"], result["resale_max"],
+                result["evidence_level"], result["max_bid"],
+                result["estimated_days"], result["valuation_refreshed_at"],
+                result["identity_level"], result["valuation_basis"],
+                result["evidence_score"], result["rank_score"], result["rank_tier"],
+                result["eligibility"], result["eligibility_reason"], result["sale_role"],
+            ),
+        )
+
+    def revalue_ids(self, listing_ids: list[int]) -> dict[str, int]:
+        """Re-evaluate an explicit set of listings during a targeted repair.
+
+        This is the path reconciliation uses after identities change. It never
+        starts or resumes the full-history refresh, so a review-queue repair
+        cannot turn into a multi-hour valuation pass.
+        """
+        from .calibration import build_calibration
+        from .flips import resale_factors
+
+        ids = sorted({int(value) for value in listing_ids})
+        if not ids:
+            return {"evaluated": 0, "deals": 0, "review": 0, "snapshots": 0}
+        config = ValuationConfig.from_db(self.db)
+        calibration = build_calibration(self.db)
+        config.category_factors = dict(calibration.category_factors)
+        config.calibration_active = calibration.active
+        config.calibration_note = calibration.reason
+        config.outcome_factors = resale_factors(self.db)
+        decisions = {
+            int(row["listing_id"]): row["decision"]
+            for row in self.db.query("SELECT listing_id, decision FROM review_decisions")
+        }
+        rows: list[dict[str, Any]] = []
+        for start in range(0, len(ids), 400):
+            chunk = ids[start : start + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            for listing in self.db.query(
+                f"SELECT * FROM listings WHERE id IN ({placeholders})", tuple(chunk)
+            ):
+                listing["flags_list"] = (
+                    json.loads(listing.get("flags") or "[]") if listing.get("flags") else []
+                )
+                listing["attrs_json"] = listing.get("attrs")
+                listing["review_decision"] = decisions.get(int(listing["id"]), "")
+                rows.append(listing)
+        self._comp_cache = {}
+        self._rejected_cache = {}
+        self._last_rejected = []
+        self._estimates = {}
+        self._estimate_conditions = {}
+        self._snapshot_cache = {}
+        self._snapshot_at = {}
+        evaluated = deals = review = 0
+        for listing in rows:
+            result = self.evaluate(listing, config)
+            self._store_result(result, _listing_fingerprint(listing))
+            evaluated += 1
+            deals += int(result["is_deal"])
+            review += int(result["needs_review"])
+        targeted_keys = {
+            (str(listing.get("product_key")), str(listing.get("listing_kind")))
+            for listing in rows
+            if listing.get("product_key")
+        }
+        supported_keys = {
+            slot for slot, estimate in self._estimates.items()
+            if getattr(estimate, "resale_good", None)
+        }
+        unsupported_keys = [
+            product_key
+            for product_key, kind in targeted_keys
+            if (product_key, kind) not in supported_keys
+        ]
+        if unsupported_keys:
+            self.pricing.invalidate(
+                unsupported_keys, "no supported estimate after targeted revaluation"
+            )
+        snapshots = 0
+        for (product_key, kind), estimate in self._estimates.items():
+            if self.pricing.record(product_key, kind, estimate):
+                snapshots += 1
+        self._estimates = {}
+        self._comp_cache = None
+        self._last_rejected = []
+        return {
+            "evaluated": evaluated,
+            "deals": deals,
+            "review": review,
+            "snapshots": snapshots,
+        }
+
     def refresh(self, limit: int = 100000, full: bool = False) -> dict[str, int]:
         from .calibration import build_calibration
 
@@ -2361,76 +2520,7 @@ class ValuationEngine:
         processed_in_pass = 0
         for listing in targets:
             result = self.evaluate(listing, config)
-            self.db.execute(
-                """
-                INSERT INTO deals(listing_id, product_key, kind, expected_resale, resale_low,
-                    resale_high, confidence, sample_size, valuation_method, purchase_total,
-                    resale_fees, resale_shipping, packaging, net_profit,
-                    net_profit_conservative, net_profit_optimistic, roi, score, is_deal,
-                    needs_review, review_reason, risk_score, risk_level, risk_reasons,
-                    reasons, breakdown, computed_at, input_fingerprint,
-                    resale_strategy, resale_quick, resale_balanced, resale_max,
-                    evidence_level, max_bid, estimated_days, valuation_refreshed_at,
-                    identity_level, valuation_basis, evidence_score, rank_score, rank_tier,
-                    eligibility, eligibility_reason, sale_role)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(listing_id) DO UPDATE SET
-                    product_key=excluded.product_key, kind=excluded.kind,
-                    expected_resale=excluded.expected_resale, resale_low=excluded.resale_low,
-                    resale_high=excluded.resale_high, confidence=excluded.confidence,
-                    sample_size=excluded.sample_size, valuation_method=excluded.valuation_method,
-                    purchase_total=excluded.purchase_total, resale_fees=excluded.resale_fees,
-                    resale_shipping=excluded.resale_shipping, packaging=excluded.packaging,
-                    net_profit=excluded.net_profit,
-                    net_profit_conservative=excluded.net_profit_conservative,
-                    net_profit_optimistic=excluded.net_profit_optimistic,
-                    roi=excluded.roi, score=excluded.score,
-                    is_deal=excluded.is_deal, needs_review=excluded.needs_review,
-                    review_reason=excluded.review_reason,
-                    risk_score=excluded.risk_score, risk_level=excluded.risk_level,
-                    risk_reasons=excluded.risk_reasons,
-                    reasons=excluded.reasons,
-                    breakdown=excluded.breakdown, computed_at=excluded.computed_at,
-                    input_fingerprint=excluded.input_fingerprint,
-                    resale_strategy=excluded.resale_strategy,
-                    resale_quick=excluded.resale_quick,
-                    resale_balanced=excluded.resale_balanced,
-                    resale_max=excluded.resale_max,
-                    evidence_level=excluded.evidence_level,
-                    max_bid=excluded.max_bid,
-                    estimated_days=excluded.estimated_days,
-                    valuation_refreshed_at=excluded.valuation_refreshed_at,
-                    identity_level=excluded.identity_level,
-                    valuation_basis=excluded.valuation_basis,
-                    evidence_score=excluded.evidence_score,
-                    rank_score=excluded.rank_score,
-                    rank_tier=excluded.rank_tier,
-                    eligibility=excluded.eligibility,
-                    eligibility_reason=excluded.eligibility_reason,
-                    sale_role=excluded.sale_role
-                """,
-                (
-                    result["listing_id"], result["product_key"], result["kind"],
-                    result["expected_resale"], result["resale_low"], result["resale_high"],
-                    result["confidence"], result["sample_size"], result["valuation_method"],
-                    result["purchase_total"], result["resale_fees"], result["resale_shipping"],
-                    result["packaging"], result["net_profit"] or 0.0,
-                    result["net_profit_conservative"], result["net_profit_optimistic"],
-                    result["roi"] or 0.0,
-                    result["score"], result["is_deal"], result["needs_review"],
-                    result["review_reason"], result["risk_score"], result["risk_level"],
-                    json_dumps(result["risk_reasons"]), json_dumps(result["reasons"]),
-                    json_dumps(result["breakdown"]), result["computed_at"],
-                    fingerprints[int(result["listing_id"])],
-                    result["resale_strategy"], result["resale_quick"],
-                    result["resale_balanced"], result["resale_max"],
-                    result["evidence_level"], result["max_bid"],
-                    result["estimated_days"], result["valuation_refreshed_at"],
-                    result["identity_level"], result["valuation_basis"],
-                    result["evidence_score"], result["rank_score"], result["rank_tier"],
-                    result["eligibility"], result["eligibility_reason"], result["sale_role"],
-                ),
-            )
+            self._store_result(result, fingerprints[int(result["listing_id"])])
             evaluated += 1
             processed_in_pass += 1
             deals += result["is_deal"]

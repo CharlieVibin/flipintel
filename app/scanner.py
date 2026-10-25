@@ -28,12 +28,13 @@ from .collectors import (
     VintedCollector,
 )
 from .db import Database
+from .dedup import mark_duplicates
 from .identification import IDENTIFICATION_VERSION, identify_listing
 from .notifications import Notifier
 from .pricing_cex import CexPricing
 from .usage import usage_snapshot
 from .utils import (
-    hours_ago, iso, jaccard, json_dumps, normalise_text, parse_iso, token_set, utcnow,
+    hours_ago, iso, json_dumps, normalise_text, parse_iso, utcnow,
 )
 from .valuation import ValuationEngine
 
@@ -1304,55 +1305,8 @@ class Scanner:
         return outcome
 
     def _mark_duplicates(self) -> int:
-        """Flag conservative cross-marketplace duplicates without merging rows.
-
-        Original marketplace records stay intact. A probable duplicate points at
-        an earlier listing; the feed can then de-emphasise it while the user still
-        has the original URL and evidence.
-        """
-        rows = self.db.query(
-            """
-            SELECT id, marketplace, title, price, product_key, duplicate_of
-            FROM listings
-            WHERE status='active' AND product_key IS NOT NULL
-              AND last_seen >= ? AND is_faulty=0 AND is_wanted=0 AND is_bundle=0
-            ORDER BY id DESC LIMIT 700
-            """,
-            (hours_ago(24 * 14),),
-        )
-        groups: dict[str, list[dict[str, Any]]] = {}
-        for row in rows:
-            groups.setdefault(str(row["product_key"]), []).append(row)
-        marked = 0
-        for group in groups.values():
-            if len(group) < 2:
-                continue
-            group.sort(key=lambda item: item["id"])
-            for index, row in enumerate(group):
-                if row.get("duplicate_of"):
-                    continue
-                row_tokens = token_set(row["title"])
-                for earlier in group[:index]:
-                    if earlier["marketplace"] == row["marketplace"]:
-                        continue
-                    price_a = float(row["price"] or 0)
-                    price_b = float(earlier["price"] or 0)
-                    if min(price_a, price_b) <= 0:
-                        continue
-                    tolerance = max(3.0, max(price_a, price_b) * 0.025)
-                    if abs(price_a - price_b) > tolerance:
-                        continue
-                    similarity = jaccard(row_tokens, token_set(earlier["title"]))
-                    if similarity < 0.72:
-                        continue
-                    score = round(similarity * (1.0 - min(1.0, abs(price_a - price_b) / max(price_a, price_b))), 3)
-                    self.db.execute(
-                        "UPDATE listings SET duplicate_of=?, duplicate_score=? WHERE id=?",
-                        (earlier["id"], score, row["id"]),
-                    )
-                    marked += 1
-                    break
-        return marked
+        """Flag conservative duplicates without merging or deleting rows."""
+        return mark_duplicates(self.db)
 
     def _ingest(
         self,

@@ -21,6 +21,10 @@
     "17736": {
       "expected_valued": true,
       "reason": "Complete gaming PC; the oracle misread 'Stream/ game' as an accessory"
+    },
+    "73010": {
+      "expected_valued": false,
+      "reason": "1TB-4TB advertises a capacity range; no single drive variant is being sold, so there is no exact identity"
     }
   }
 }

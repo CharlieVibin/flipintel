@@ -5,6 +5,136 @@
 **Runtime:** Python 3.10, FastAPI, SQLite, React 18 + Vite + Tailwind
 **Live dashboard:** http://127.0.0.1:8765 (while the local server is running)
 
+## Session 2026-10-25 — Review queue and product eligibility repair
+
+Phase 6 left 660 pending reviews, and real dashboard testing still showed a CPU
+cooler priced as a Ryzen processor, six near-identical generic `1TB-128TB`
+drives, duplicate cards and unprofitable rows in Human Review. This pass traced
+the actual pipeline and fixed the causes rather than rewriting the phase.
+
+### What was wrong
+
+1. **Cooler-only titles were read as the processor.** `ACCESSORY_TITLE_RE` had
+   `cooler only` and `fan only`, but the accessory branch was gated by
+   `title_accessory and not gpu and not cpu`. A listing that named a CPU could
+therefore never be a part, and `COOLER/FAN ONLY` did not match the single-token
+patterns. The title `AMD Ryzen 7 3700X COOLER/FAN ONLY no CPU` became
+`cpu:amd:ryzen-7-3700x` with no flags and entered review.
+2. **Capacity ranges were read as a fixed capacity.** `1TB-128TB` parsed as
+   1TB, producing an `hdd:external:1tb` identity and a £39.66 estimate for a
+   £16.99 variation listing. There was no range/variation detection at all.
+3. **Same-seller relists were never compared.** `_mark_duplicates` skipped every
+   same-marketplace pair, so one eBay seller's four identical generic drives
+   produced four separate review cards and four identical review cards.
+4. **Review was a by-product of risk, not a decision.** `needs_review` was set
+   for any price anomaly or medium-risk signal; `eligibility.assess` then mapped
+   every such row with positive profit to `needs_verification`. Thin margins, a
+   family-level identity and weak evidence all became manual work, and the review
+   endpoints accepted any state that was not exactly `excluded`.
+
+### What changed
+
+- `identification.py`: subject exclusion (`cooler/fan/heatsink only`, `no CPU`,
+  `CPU not included`) clears the model identity and records `parts_only`; a
+  capacity range is a variation listing with `capacity_range` and
+  `suspicious_capacity` and no exact key; unbranded portable storage records
+  `unbranded_storage`; storage media, HDD trays and compatibility mentions keep
+  their own product class; game titles (`Donkey Kong Bananza`, `W2K20`,
+  `Planet Coaster Console Edition`) stay games. `Unopened Box` no longer makes a
+  sealed processor an accessory.
+- `eligibility.py` is the single gate. It now excludes duplicates, capacity
+  ranges, unbranded storage and parts before valuation, and only returns
+  `needs_verification` when a human answer could unlock a plausible deal:
+  margin at or above the saved profit/ROI thresholds, valuation confidence at
+  least 0.40, and no family-level identity unless the upside is at least twice
+  the configured profit and confidence is 0.50+.
+- `dedup.py`: one shared duplicate implementation. It links same-seller,
+  same-title, same-price relists (the mass-storage case) and keeps the existing
+  conservative cross-marketplace comparison. Rows are linked via `duplicate_of`
+  and never merged or deleted.
+- `api.py`: the review queue, grouped reviews, bulk actions and both review
+  counters now require the persisted `eligibility = 'needs_verification'` state.
+  A stale `needs_review` flag on an excluded row cannot be shown anywhere.
+- `valuation.py`: `_store_result` is shared by the normal refresh and a new
+  `revalue_ids()` targeted repair, so a reconciliation can value an explicit set
+  of rows without starting or resuming the 113k-row full pass.
+- `scripts/reconcile_review_queue.py`: resumable, idempotent repair of only
+  visible recommendations/reviews plus the titles affected by the new rules. It
+  rewrites identity, links duplicates and revalues that bounded set; raw
+  listings, observations, snapshots and Flips are untouched.
+
+### Measured repair on the live database
+
+| Measure | Before | After |
+|---|---:|---:|
+| Pending Human Review | 660 | **162** |
+| Pending review inside `100gbp starter` | — | **17** |
+| Recommended deals | 191 | 189 |
+| Excluded listings | 112,931 | 113,431 |
+| Duplicate links | 547 | 547 |
+
+498 review rows were removed and none were added. Their current reasons:
+
+| Reason | Rows |
+|---|---:|
+| Margin below the level that justifies review | 272 |
+| Family-level identity, too weak to ask about a specific product | 124 |
+| Valuation evidence too weak to resolve by review | 55 |
+| Implausible/unverifiable storage capacity | 17 |
+| Generic unbranded portable storage | 16 |
+| Game software | 4 |
+| Spare parts/replacement component | 3 |
+| Duplicate of a tracked relist | 2 |
+| Physical product could not be established | 2 |
+| Accessory / storage media / insufficient evidence | 3 |
+
+The specific reported examples now read:
+
+- `AMD Ryzen 7 3700X COOLER/FAN ONLY no CPU` → identity none, `sale_role=parts`,
+  excluded as a spare part, no resale estimate.
+- `1TB-128TB ...` and `1TB-4TB ...` (six listings) → identity none,
+  excluded as a capacity range; three relists also point at the earliest row.
+- `Donkey Kong Bananza Switch 2`, `W2K20 Xbox one X` and
+  `Planet Coaster Console Edition PS5 ... Loose Disc` → game, excluded.
+- `32MB PSP Sony Memory Card Stick Duo ...` → removable media, excluded.
+- `DELL Equallogic 4TB HDD Tray` → accessory, excluded.
+
+Live check after the repair (`http://127.0.0.1:8765`): `/api/deals?review=1`
+returned 17 rows in the active preset and none of the failure titles;
+`/api/deals?review=1&active_preset=false` returned 162; the deal feed and the
+Auctions tab (231 live auctions) still answered normally. `/api/health` response
+and startup stayed in the low single-digit seconds; the repair is a separate
+script, not part of startup.
+
+### Limitations of this pass
+
+- The pattern sweep repaired 1,308 active rows (visible rows plus the titles
+  affected by the new rules), not the whole history. A listing whose title does
+  not match the new rules keeps its stored identity until it is scanned again;
+  the full 113k history was deliberately not reprocessed.
+- 189 recommended deals remain; two previously recommended RTX 3050 PCs dropped
+  out because their current ROI is below the 18% higher-value threshold, not
+  because of the review gate.
+- 162 reviews outside the active preset still exist. They have a plausible
+  margin and a resolved identity, but many are deep discounts on consoles and
+  GPUs that genuinely need a human answer. They are not visible under
+  `100gbp starter`.
+- Coolers are identified as parts and excluded. There is still no cooler product
+  key or cooler resale evidence, so enabling a cooling category cannot price one.
+- Game detection remains a named-title lexicon plus media cues; new games can
+  still be misread until their franchise is added.
+- No completed-sale evidence exists yet, so these valuations remain
+  asking-price estimates.
+
+### Tests
+
+220 backend tests pass, including the new `tests/test_review_eligibility.py`
+(10 tests covering cooler-only, included cooler, capacity ranges, unbranded vs
+branded storage, games, storage media, drive trays, review-margin gating,
+same-seller relists, the review API's authoritative state and the valuation
+clearing a now-excluded review). The 240-listing benchmark still passes; its
+`73010` label was corrected because a `1TB-4TB` range has no single identity.
+
 ## Session 2026-10-25 — Phase 6: reliable identity, eligibility and fast startup
 
 This pass fixed the two-minute startup and the product-class failures that were
@@ -1520,7 +1650,9 @@ cd frontend
 npm run build
 ```
 
-Last verified: **210 passed, 0 failed**; frontend `tsc -b && vite build` passes.
+Last verified: **220 passed, 0 failed**; frontend `tsc -b && vite build` passes.
+The review-queue repair also re-ran the bounded reconciliation against the live
+database (`scripts/reconcile_review_queue.py`) and verified the running API.
 
 ## Exact next tasks (in order)
 
@@ -1549,11 +1681,11 @@ pushed as the repository's first commit on 2026-10-23 (`22d2ea2`). The Phase 5
 work was pushed as `3d9e41b` (used-market evidence and the 240-listing
 benchmark), `bca0fa1` (form-factor rejection, mini-PC identity and evidence-gated
 auction alerts) and `5c3b51d` (sealed resale capped at CeX retail). The variant
-integrity repair and its database revaluation were pushed as `123f60e`. The
-pre-scan category, preset and budget controls were pushed as `c7736b0`; the
+integrity repair and its database revaluation were pushed as `123f60e`.The pre-scan category, preset and budget controls were pushed as `c7736b0`; the
 auction configuration enforcement followed as `786f87a`, with Discord auction
-alert gating as `4dfb1fa`. `main` tracks `origin/main`; local and remote trees
-match.
+alert gating as `4dfb1fa`. The Phase 6 identity/startup work is `9114f6e` and
+the review-queue eligibility repair is `cb3202f`. `main` tracks `origin/main`;
+local and remote trees match after each push.
 
 Earlier notes referenced `bboyrican20/flipintel`; that was the wrong remote and
 is no longer configured. No force-push is needed or recommended.

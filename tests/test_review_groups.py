@@ -47,8 +47,8 @@ def _pending_phone(
         ),
     ).lastrowid
     db.execute(
-        "INSERT INTO deals(listing_id, needs_review, review_reason, computed_at) "
-        "VALUES (?, 1, ?, ?)",
+        "INSERT INTO deals(listing_id, needs_review, review_reason, eligibility, computed_at) "
+        "VALUES (?, 1, ?, 'needs_verification', ?)",
         (listing_id, "Storage, memory or chip variant is not stated", now),
     )
     if decision:

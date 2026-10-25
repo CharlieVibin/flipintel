@@ -39,6 +39,8 @@ NON_PRODUCT_FLAGS = {
     "multi_item": "Multiple different devices in one listing",
     "engineering_sample": "Engineering sample, not a retail product",
     "suspicious_capacity": "Implausible or unverifiable storage capacity",
+    "capacity_range": "Variation listing advertises a capacity range, so the actual product is unknown",
+    "unbranded_storage": "Generic unbranded portable storage; model and capacity cannot be verified",
 }
 
 
@@ -76,8 +78,17 @@ def assess(
     net_profit: float | None,
     risk_level: str = "",
     review_resolved: bool = False,
+    min_profit: float | None = None,
+    min_roi: float | None = None,
+    identity_level: str = "",
+    confidence: float | None = None,
 ) -> tuple[str, str | None]:
-    """Return ``(eligibility, reason)`` for one evaluated listing."""
+    """Return ``(eligibility, reason)`` for one evaluated listing.
+
+    This is the single authoritative gate. The deal feed, review queue,
+    overview counters and Discord selection all read its persisted result, so
+    an excluded listing cannot reappear through another endpoint.
+    """
     flags = set(listing.get("flags_list") or [])
     role = sale_role(listing)
 
@@ -92,6 +103,8 @@ def assess(
         return EXCLUDED, "Faulty or spares item; it cannot support a working-condition valuation"
     if listing.get("is_bundle"):
         return EXCLUDED, "Bundle or multi-item listing, not one comparable product"
+    if listing.get("duplicate_of"):
+        return EXCLUDED, "Duplicate of an already tracked listing for the same seller, item and price"
     if not listing.get("product_key"):
         return EXCLUDED, "Exact model could not be established, so no compatible valuation exists"
     if (
@@ -113,6 +126,30 @@ def assess(
     if net_profit is None or net_profit <= 0 or expected_resale <= purchase_total:
         return EXCLUDED, "No expected profit after purchase, fees and delivery"
     if needs_review:
+        # A review card costs the user time, so it must be a plausible deal
+        # that one answer can unlock. Thin margins, a family-level guess or a
+        # weak estimate are internal research cases, not manual tasks.
+        roi = net_profit / purchase_total if purchase_total > 0 else 0.0
+        gate_profit = 10.0 if min_profit is None else max(10.0, min_profit)
+        gate_roi = 0.10 if min_roi is None else max(0.10, min_roi)
+        if net_profit < gate_profit or roi < gate_roi:
+            return EXCLUDED, (
+                "Uncertainty is real, but the supported margin is below the level "
+                "that justifies manual review"
+            )
+        if confidence is not None and confidence < 0.40:
+            return EXCLUDED, (
+                "Uncertainty cannot be resolved by review because the valuation "
+                "evidence is too weak"
+            )
+        if identity_level == "limited" and (
+            net_profit < max(40.0, gate_profit * 2)
+            or (confidence or 0.0) < 0.50
+        ):
+            return EXCLUDED, (
+                "Only a family-level identity is available; too weak to ask the "
+                "user to verify a specific product"
+            )
         return NEEDS_VERIFICATION, "Potentially profitable, but a material uncertainty needs checking"
     if risk_level == "high":
         return EXCLUDED, "High risk assessment; not presented as an opportunity"
