@@ -176,9 +176,24 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "discovery_mode": "category",
     "category_cycle_seconds": "1800",
     "category_requests_per_cycle": "12",
-    "ebay_category_requests_per_cycle": "4",
+    # eBay Browse has a documented default allowance of 5,000 calls/day. A
+    # fixed four-call budget covered only four of the enabled categories every
+    # half hour and left ~96% of the allowance unused. 0 means "derive the
+    # per-cycle budget from the daily allowance, the auction reserve and the
+    # categories actually due"; a positive value is a hard per-cycle cap.
+    "ebay_category_requests_per_cycle": "0",
+    "ebay_daily_call_limit": "5000",
+    "ebay_bin_auction_reserve": "1600",
+    "ebay_bin_requests_per_cycle_cap": "120",
+    "ebay_bin_manual_requests_cap": "200",
+    "auction_requests_per_pass": "4",
     "category_backfill_pages": "10",
     "category_incremental_pages": "2",
+    # After the newest pages, a rotating deep page per category makes older
+    # active stock reachable without re-downloading the whole branch. The
+    # price-filtered eBay categories contain far more than ten pages, so the
+    # default window is 50 pages (10,000 items) per category.
+    "category_sweep_pages": "50",
     "category_overlap_stop": "0.75",
     "keyword_supplement_queries": "2",
     "enabled_vinted": "true",

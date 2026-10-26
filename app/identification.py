@@ -62,6 +62,28 @@ FAULT_NEGATION_RE = re.compile(
     r"no\s+(?:issues?|problems?|faults?))\b",
     re.I,
 )
+# "Spares or repairs" is an as-is declaration, not proof of a fault. Sellers
+# use it when they cannot test an item (for example RAM left over after moving
+# to a DDR5 platform). It becomes a confirmed fault only when the listing also
+# states an actual failure such as "not working" or "no display".
+SPARES_REPAIRS_RE = re.compile(
+    r"\b(?:spares?\s*(?:or|/)\s*repairs?|sold\s+as\s+seen)\b", re.I
+)
+UNTESTED_RE = re.compile(
+    r"\b(?:untested|not\s+tested|unable\s+to\s+test|no\s+way\s+to\s+test|"
+    r"cannot\s+test|can'?t\s+test|unverified|only\s+tested\s+to\s+(?:bios|post)|"
+    r"tested\s+to\s+(?:bios|post))\b",
+    re.I,
+)
+# eBay's coarse condition label is not a seller description. Search summaries
+# have no body, so the collector used to store the label as both. Treat an
+# exact copy as no evidence of a specific fault; a real description that adds
+# "no display" or "does not boot" still marks the item faulty.
+GENERIC_CONDITION_DESCRIPTION_RE = re.compile(
+    r"^(?:for\s+parts(?:\s+or\s+not\s+working)?|used|new|brand\s+new|"
+    r"open\s+box|seller\s+refurbished)$",
+    re.I,
+)
 ACCESSORY_RE = re.compile(
     r"\b(box\s+only|empty\s+box|packaging\s+only|water\s*block|backplate\s+only|"
     r"cooler\s+only|heatsink\s+only|cable\s+only|bracket\s+only|manual\s+only|"
@@ -73,7 +95,7 @@ ACCESSORY_TITLE_RE = re.compile(
     r"\b(backpack|rucksack|carry\s+bag|carry\s+case|travel\s+case|sleeve|laptop\s+bag|"
     r"charger|charging\s+dock|power\s+supply|psu|keyboard|mouse|mousepad|headset|"
     r"headphones|earphones|screws?|screwdriver|stand|bracket|cable|adapter|dock|"
-    r"battery\s+only|replacement\s+battery|skins?|covers?|protectors?|decals?|stickers?|replacement|spares?|spare\s+parts|"
+    r"battery\s+only|replacement\s+battery|skins?|covers?|protectors?|decals?|stickers?|replacement|spare\s+parts|"
     r"faceplates?|shell|bezel|hinge|fan\s+only|cooler\s+only|empty\s+box|boxes|cases?|"
     r"nudient|casely|badge|pin\s+badge|bodyguardz|caudabe|velvet\s+caviar|loopy|"
     r"thumb\s*grips?|joy[-\s]?con|game\s+cartridge|splitter|docking\s+station|"
@@ -668,7 +690,7 @@ PARTS_ONLY_RE = re.compile(
     r"\b(?:mid\s*frame|midframe|chassis|rear\s+glass|back\s+glass|screen\s+assembly|"
     r"replacement\s+screen|lcd\s+assembly|logic\s+board|charging\s+port|sim\s+tray|"
     r"camera\s+module|parts\s+only|spares?\s+only|frame\s+only|shell\s+only|"
-    r"motherboard\s+only|bare\s+board|for\s+parts|faulty)\b",
+    r"motherboard\s+only|bare\s+board|for\s+parts|faulty|spares?)\b",
     re.I,
 )
 # "Ryzen 7 3700X COOLER/FAN ONLY no CPU" sells the cooler. The expensive model
@@ -1339,7 +1361,12 @@ def _ram(text: str) -> tuple[str, str, dict[str, Any]] | None:
     if not capacity:
         return None
     gen = ddr.group(1)
-    speed_match = re.search(r"\b([2-8]\d{3})\s*mhz\b", text)
+    # Speeds are usually written into the model number (DDR4-3200, PC4-3200)
+    # rather than as "3200 MHz". Missing one here used to make an otherwise
+    # identical module an uncertain match, so parse both forms.
+    speed_match = re.search(
+        r"\b(?:ddr[345]|pc[345])[-\s]?([2-8]\d{3})(?![0-9])", text, re.I
+    ) or re.search(r"\b([2-8]\d{3})\s*(?:mhz|mt\s*/\s*s)\b", text, re.I)
     speed = int(speed_match.group(1)) if speed_match else None
     kit_count = int(kit.group(1)) if kit else None
     kit_size = int(kit.group(2)) if kit else None
@@ -1347,23 +1374,32 @@ def _ram(text: str) -> tuple[str, str, dict[str, Any]] | None:
         # A single 16GB module is not the same sellable product as a 2x8GB
         # dual-channel kit even though both total 16GB.
         kit_count, kit_size = 1, capacity
-    if re.search(r"\b(ecc|registered|server|rdimm|lrdimm)\b", text):
-        form = "ecc"
-    elif re.search(r"\b(sodimm|so-dimm|laptop|notebook)\b", text):
-        form = "laptop"
-    else:
-        form = "desktop" if re.search(r"\b(desktop|dimm|udimm)\b", text) else ""
+    # "Non-ECC" contains the word ECC. Detect the negation first; otherwise
+    # every ordinary desktop and SO-DIMM module was classified as server ECC
+    # memory and compared against an incompatible pool.
+    non_ecc = bool(re.search(r"\bnon[-\s]?ecc\b|\bunbuffered\b", text, re.I))
+    ecc = bool(re.search(r"\b(?:ecc|registered|rdimm|lrdimm)\b", text, re.I)) and not non_ecc
+    laptop = bool(re.search(r"\b(?:so[-\s]?dimm|sodimm|laptop|notebook)\b", text, re.I))
+    server = bool(re.search(r"\b(?:server|registered|rdimm|lrdimm)\b", text, re.I))
+    form = (
+        "laptop" if laptop
+        else "desktop" if (server or re.search(r"\b(?:desktop|dimm|udimm)\b", text, re.I))
+        else ""
+    )
     key = f"ram:ddr{gen}:{capacity}gb"
     if speed:
         key += f":{speed}"
     if kit_count and kit_size:
         key += f":{kit_count}x{kit_size}"
-    if form:
+    if ecc:
+        key += ":ecc"
+    elif form:
         key += f":{form}"
     name = f"{capacity}GB DDR{gen}" + (f" {speed}MHz" if speed else "") + " RAM"
     return key, name, {
         "ddr": gen, "capacity_gb": capacity, "speed_mhz": speed,
-        "kit_count": kit_count, "kit_size_gb": kit_size, "form_factor": form or None,
+        "kit_count": kit_count, "kit_size_gb": kit_size,
+        "form_factor": form or None, "ecc": ecc,
     }
 
 
@@ -2093,6 +2129,8 @@ def _pc(text: str, gpu: tuple | None, cpu: tuple | None) -> tuple[str | None, st
 def identify_listing(title: str, description: str = "", marketplace: str = "") -> Identification:
     title_clean = normalise_text(title)
     desc_clean = normalise_text(description or "")
+    if GENERIC_CONDITION_DESCRIPTION_RE.match(desc_clean.strip()):
+        desc_clean = ""
     # Model and category cues come from the title only: descriptions often
     # mention compatibility ("works with PS5", "4K display") and would otherwise
     # misclassify accessories as consoles or monitors.
@@ -2111,13 +2149,35 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         return Identification(None, None, "other", "other", 0.0, is_wanted=True)
 
     wanted = bool(WANTED_RE.search(text)) and not re.search(r"\b(for\s+sale|selling|sale)\b", text)
-    faulty = bool(FAULT_RE.search(cleaned_fault_text)) or bool(
+    spares_declaration = bool(SPARES_REPAIRS_RE.search(full_text))
+    untested_cue = bool(UNTESTED_RE.search(full_text))
+    # Remove the as-is phrase before looking for an actual failure. Otherwise
+    # "spares/repairs, untested" is treated as confirmed faulty hardware and
+    # receives a near-zero faulty resale estimate.
+    explicit_fault_text = SPARES_REPAIRS_RE.sub(" ", cleaned_fault_text)
+    if spares_declaration and untested_cue:
+        # "For parts or not working" is eBay's coarse condition label. When
+        # the seller explicitly says the item is untested (for example, no
+        # DDR5 machine to test a DDR4 module), that is not proof of a fault.
+        explicit_fault_text = re.sub(
+            r"\bfor\s+parts(?:\s+or\s+not\s+working)?\b",
+            " ",
+            explicit_fault_text,
+            flags=re.I,
+        )
+    parts_word = bool(
         re.search(r"\bparts\b", title_clean, re.I)
         and not re.search(r"\b(with|includes?|inc\.?)\s+(spare\s+)?parts\b", title_clean, re.I)
     )
+    explicit_fault = bool(FAULT_RE.search(explicit_fault_text)) or parts_word
+    faulty = explicit_fault
     accessory = bool(ACCESSORY_RE.search(title_clean))
     caution = bool(CAUTION_RE.search(full_text))
     parts_only = bool(PARTS_ONLY_RE.search(title_clean))
+    # "Spares or repairs" plus an explicit inability to test is an as-is
+    # declaration, not a parts-only listing. Keep the physical product.
+    if spares_declaration and untested_cue and not explicit_fault:
+        parts_only = False
     # A cooler/fan sold on its own is a part even though the socket it fits is
     # named in the title. The processor is explicitly not included.
     cooler_only = bool(COOLER_ONLY_RE.search(title_clean))
@@ -2147,10 +2207,9 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         )
     )
     functionality = "unknown"
-    if faulty:
+    if explicit_fault:
         functionality = "faulty"
-    elif re.search(r"\b(?:untested|not\s+tested|unverified|sold\s+as\s+seen|"
-                   r"unable\s+to\s+test|no\s+way\s+to\s+test)\b", full_text, re.I):
+    elif untested_cue or spares_declaration:
         functionality = "untested"
     elif re.search(r"\b(?:tested|fully\s+working|working\s+perfectly|works\s+fine|"
                    r"fully\s+functional|tested\s+and\s+working)\b", full_text, re.I):
@@ -2195,8 +2254,14 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     )
     if faulty:
         flags.append("faulty_or_parts")
+    if functionality == "untested":
+        # Not a reason to exclude: it describes evidence quality and changes
+        # how a profit must be presented, not what the product is.
+        flags.append("untested_condition")
     if parts_only:
         flags.append("parts_only")
+    if spares_declaration and not explicit_fault:
+        flags.append("spares_declaration")
     if accessory or empty_title:
         flags.append("accessory_or_box")
     if platform_game or game_bundle:
@@ -2844,8 +2909,15 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
     multiple_gpus = len(MULTI_GPU_RE.findall(text)) >= 2
     if multiple_gpus:
         flags.append("multiple_gpus")
+    # A board sold with a processor and/or memory is a combination item, even
+    # when its chipset predates the modern list above (H81, H61, Z68, ...).
+    # Without this, an old motherboard/CPU/RAM combo was valued as a bare CPU
+    # and looked hopelessly unprofitable.
+    explicit_board = bool(
+        re.search(r"\b(?:motherboard|mobo|mboard|mainboard)\b", title_clean, re.I)
+    )
     component_bundle = bool(
-        MOBO_CHIPSET_RE.search(text)
+        (MOBO_CHIPSET_RE.search(text) or explicit_board)
         and (gpu or cpu or _ram(text))
         and not is_pc
         and not is_laptop
@@ -2977,7 +3049,7 @@ def identify_listing(title: str, description: str = "", marketplace: str = "") -
         # looked like a full system.
         flags.append("system_context")
     bundle = bool(re.search(
-        r"\b(bundle|job\s*lot|joblot|lot\s+of|multi[-\s]?pack|pair\s+of|full\s+setup|with\s+monitor|"
+        r"\b(bundle|combo|job\s*lot|joblot|lot\s+of|multi[-\s]?pack|pair\s+of|full\s+setup|with\s+monitor|"
         r"aio\s+cooler)\b",
         title_clean, re.I,
     ))

@@ -44,6 +44,14 @@ _COMPLETE_SYSTEM_RE = re.compile(
     r"sff\s+(?:pc|desktop)|prodesk|pro\s+desk|optiplex|elitedesk|thinkcentre)\b",
     re.I,
 )
+# "Laptop RAM" and "notebook SSD" describe a component's form factor, not a
+# complete portable device. The classifier is still the final arbiter: this
+# cue only lets the title reach it instead of being rejected on one word.
+_LAPTOP_COMPONENT_RE = re.compile(
+    r"\b(?:laptop|notebook)\b[^|,;]{0,24}\b(?:ram|memory|so[- ]?dimm|sodimm|"
+    r"ssd|hdd|hard\s+drive|processor|cpu|gpu|graphics\s+card)\b",
+    re.I,
+)
 
 
 def key_capacity(product_key: str) -> int | None:
@@ -132,7 +140,20 @@ def comparable_rejection(
         if _COMPLETE_SYSTEM_RE.search(subject):
             return "complete system, not a standalone component"
         if re.search(r"\b(?:laptop|notebook|tablet|phone)\b", subject, re.I):
-            return "portable device, not a standalone component"
+            from .identification import identify_listing
+
+            identified = identify_listing(title)
+            complete_key = str(identified.product_key or "")
+            if identified.kind in {"laptop", "pc", "tablet", "phone"} or complete_key.startswith(
+                ("laptop:", "pc:", "tablet:", "phone:")
+            ):
+                return "portable device, not a standalone component"
+            # A component identity survives the classifier (for example
+            # ram:ddr4:16gb:laptop). Accept it; variant comparison still
+            # enforces DDR generation, capacity and module form factor. If the
+            # classifier is unsure, require an explicit "laptop RAM" cue.
+            if identified.kind not in _COMPONENT_KINDS and not _LAPTOP_COMPONENT_RE.search(subject):
+                return "portable device, not a standalone component"
 
 
 

@@ -452,18 +452,39 @@ def _ram_fields(variant: Variant) -> dict[str, Any]:
         except (TypeError, ValueError):
             return None
 
+    key = variant.key or ""
+    form = str(attrs.get("form_factor") or "") or None
+    ecc = attrs.get("ecc")
+    if ecc is None:
+        # Older rows encoded ECC in the product key or used "ecc" as a form
+        # factor. Both mean the same thing and must not be compared as a
+        # laptop/desktop form mismatch.
+        ecc = key.endswith(":ecc") or form == "ecc"
+        if form == "ecc":
+            form = None
     return {
         "ddr": str(attrs.get("ddr") or "") or None,
-        "capacity": integer("capacity_gb") or _key_capacity(variant.key),
+        "capacity": integer("capacity_gb") or _key_capacity(key),
         "speed": integer("speed_mhz"),
         "kit_count": integer("kit_count"),
         "kit_size": integer("kit_size_gb"),
-        "form": str(attrs.get("form_factor") or "") or None,
+        "form": form,
+        "ecc": bool(ecc),
     }
 
 
 def _compare_ram(candidate: Variant, comp: Variant) -> tuple[str, str, str]:
     c, k = _ram_fields(candidate), _ram_fields(comp)
+    # ECC and non-ECC modules are electrically different products. Check this
+    # before the physical form factor, because both can be DIMMs or SO-DIMMs.
+    if c["ecc"] != k["ecc"]:
+        return (
+            INCOMPATIBLE,
+            "conflicting ECC support: "
+            f"{'ECC' if c['ecc'] else 'non-ECC'} versus "
+            f"{'ECC' if k['ecc'] else 'non-ECC'}",
+            "ecc",
+        )
     for field_name, label in (
         ("ddr", "memory generation"),
         ("capacity", "total capacity"),

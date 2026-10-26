@@ -548,6 +548,15 @@ class Database:
             "api_usage_daily": {
                 "last_success_at": "TEXT",
             },
+            "category_scans": {
+                # Rotating page for the deep sweep. Page 1 is always the
+                # newest page; this cursor reaches older active stock.
+                "sweep_page": "INTEGER NOT NULL DEFAULT 1",
+                # Rotating price-band cursor. Page one of the whole price
+                # range is dominated by the cheapest stock; scanning each
+                # band's newest page surfaces mid-range hardware too.
+                "band_cursor": "INTEGER NOT NULL DEFAULT 0",
+            },
         }
         for table, columns in migrations.items():
             existing = {
@@ -556,6 +565,39 @@ class Database:
             for name, definition in columns.items():
                 if name not in existing:
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+        # One-time budget migration: the old shipped default of four eBay
+        # requests per cycle was the cause of the coverage gap. Only rewrite
+        # that exact legacy value, and only once, so a deliberate later choice
+        # of 4 is not undone on every restart.
+        if not self.conn.execute(
+            "SELECT 1 FROM settings WHERE key='ebay_budget_mode_migrated'"
+        ).fetchone():
+            self.conn.execute(
+                "UPDATE settings SET value='0', updated_at=? "
+                "WHERE key='ebay_category_requests_per_cycle' AND value='4'",
+                (iso(),),
+            )
+            self.conn.execute(
+                "INSERT OR REPLACE INTO settings(key, value, updated_at) "
+                "VALUES ('ebay_budget_mode_migrated', '1', ?)",
+                (iso(),),
+            )
+        # The original ten-page sweep covered only the newest 2,000 items in
+        # each category. eBay's price-filtered categories are much larger, so
+        # lift that legacy default to a 50-page (10,000-item) rolling window.
+        if not self.conn.execute(
+            "SELECT 1 FROM settings WHERE key='category_sweep_depth_migrated'"
+        ).fetchone():
+            self.conn.execute(
+                "UPDATE settings SET value='50', updated_at=? "
+                "WHERE key='category_sweep_pages' AND value='10'",
+                (iso(),),
+            )
+            self.conn.execute(
+                "INSERT OR REPLACE INTO settings(key, value, updated_at) "
+                "VALUES ('category_sweep_depth_migrated', '1', ?)",
+                (iso(),),
+            )
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_listings_duplicate ON listings(duplicate_of)"
         )

@@ -253,8 +253,19 @@ class BaseCollector:
     async def search(self, queries: list[str], max_pages: int = 1) -> SearchOutcome:
         raise NotImplementedError
 
-    async def category_page(self, category: Any, page: int = 1) -> CategoryPage:
-        """Fetch one keyword-free browse page for a marketplace category."""
+    async def category_page(
+        self,
+        category: Any,
+        page: int = 1,
+        *,
+        price_min: float | None = None,
+        price_max: float | None = None,
+    ) -> CategoryPage:
+        """Fetch one keyword-free browse page for a marketplace category.
+
+        Categories that do not support a server-side price band may ignore the
+        optional bounds; the scanner only supplies them for eBay.
+        """
         raise NotImplementedError(
             f"{self.marketplace} does not support category browsing"
         )

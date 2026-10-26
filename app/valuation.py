@@ -21,7 +21,10 @@ from .comparables import split_pool
 from .db import Database
 from .eligibility import (
     EXCLUDED,
+    NEEDS_VERIFICATION,
+    RECOMMENDED,
     assess as assess_eligibility,
+    functionality as listing_functionality,
     sale_role as listing_sale_role,
 )
 from .identification import CONDITION_FACTORS, identity_level_for
@@ -1942,9 +1945,30 @@ class ValuationEngine:
             identity_level=identity_level,
             confidence=estimate.confidence if estimate else 0.0,
         )
-        if eligibility == EXCLUDED:
+        # A live auction belongs to the Auctions workspace. Its current bid is
+        # not a purchase price and a days-away auction is not a human review
+        # task, so it must never occupy the normal review queue even when its
+        # provisional margin looks attractive.
+        if eligibility == EXCLUDED or listing.get("is_auction"):
             needs_review = False
             review_reason = None
+        elif eligibility != RECOMMENDED:
+            # Only a RECOMMENDED row belongs in the deal feed. A needs-review
+            # or conditional row can still have a positive nominal profit, but
+            # presenting it as a recommended deal would overstate certainty.
+            is_deal = False
+        if (
+            eligibility == NEEDS_VERIFICATION
+            and listing_functionality(listing) == "untested"
+        ):
+            needs_review = True
+            untested_note = (
+                "Untested: the resale figure assumes it works after testing; "
+                "profit is conditional and there is no assigned success probability"
+            )
+            review_reason = "; ".join(
+                part for part in (review_reason, untested_note) if part
+            )
 
         if market_estimate is not None and product_key:
             slot = (str(product_key), str(kind))

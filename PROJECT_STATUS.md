@@ -1498,6 +1498,105 @@ delete listings or reset the database.
 - Risk scoring against the full comparable distribution rather than the
   twelve-row display slice.
 
+## Session 2026-10-26 — eBay coverage, untested RAM and auction review repair
+
+### eBay UK discovery
+
+The fixed-price pass was searching the right kind of category but spending only
+a few requests per cycle and mixing storage leaves into one broad parent. The
+corrected settings now reserve 1,600 of the documented 5,000 daily Browse calls
+for auctions and divide the remainder across the cycles left in the day. The
+saved configuration has 18 enabled leaves, which resolve to **24 eBay browse
+branches** (previously 16). The per-cycle budget is derived from the remaining
+allowance rather than the old hard-coded four calls.
+
+Real eBay leaf categories now used where the old mappings pointed at a mixed
+parent:
+
+- SSDs: `175669` Solid State Drives (not the HDD/SSD/NAS parent `182085`)
+- Internal HDDs: `56083`
+- Other storage: `175670` and `182093`
+- Network cards: `20318` and `42196` in addition to `45002`
+- Computer cases: `42014` in addition to `175674`
+- Capture devices: `175679` in addition to `3761`
+- Server memory: `11210` in addition to `170083`
+
+Each category has a newest page, a rotating deep page and rotating price bands,
+so mid-range stock is not buried under the cheapest items. A fresh run on
+2026-10-26 found **1,643 new listings in the first 45 minutes** (1,637 eBay Buy
+It Now, 4 Vinted, 1 Gumtree, 1 eBay auction). A live top-of-page audit of 1,135
+unique eBay results found 909 already stored (80.1%), up from 895 before the
+leaf mapping and targeted scan. The remaining 226 were 80 outside the saved
+preset, 12 over the saved purchase budget, 126 with no exact product identity
+and only **8 addressable misses** inside an enabled branch, down from 25.
+
+Browse usage was **123 calls** at the end of the pass, so the documented 5,000
+allowance is not the limiting factor. eBay does not return a usable remaining
+quota header on these Browse responses; the local request ledger is the source
+of truth until the developer portal is checked. The eBay UK price filter needs
+`priceCurrency:GBP`; without it eBay silently ignores the numeric range. This
+was verified live and is now covered by a regression test.
+
+### Untested RAM and laptop comparables
+
+The eBay condition label (`For parts or not working`) was being copied into the
+listing description. Identification then treated the label as seller-confirmed
+fault evidence. Search summaries now keep the label in `condition_raw` only,
+and a generic condition label alone is not fault evidence. Seller detail is
+fetched for a bounded set of condition-ambiguous listings. The targeted RAM
+repair corrected 69 stored RAM conditions, revalued 72 rows and retired no
+historic observations. There are no remaining RAM deals with the old £6-ish
+resale estimate. A live Corsair Vengeance RGB Pro 8GB DDR4 listing that actually
+states it will not POST is still correctly rejected as faulty.
+
+Laptop RAM was being rejected because its title contained the word `laptop`.
+The comparable gate now lets the classifier decide whether the title is a
+complete portable device or a component. Across the stored RAM observations,
+773 titles contained `laptop`/`notebook`/`tablet`/`phone` and would previously
+have been rejected on that word alone; **766 are now accepted**, and the other
+seven are rejected for real reasons (faulty/parts, or a capacity mismatch).
+The live database has 729 laptop-RAM listings and 366 laptop-RAM valuation
+snapshots, with typical sample sizes of 15–46 observations.
+
+### Auctions and review
+
+Live auctions no longer enter Human Review. The API filters them from the review
+list, count and bulk decisions, and a targeted repair cleared the stored
+auction review flags (0 remain). The five-minute auction loop, the 15-minute
+alert window and the separate Auctions tab are unchanged.
+
+### New-listing gate
+
+All 1,643 listings collected on 2026-10-26 were automatically excluded; none
+were promoted and none entered Human Review. The dominant reasons were: 502
+where the physical product could not be established, 451 accessories or parts,
+306 with no expected profit after costs, 300 without an exact model, 30 with
+insufficient compatible evidence and 7 below the saved thresholds. This is the
+intended precision-over-volume behaviour, not a claim that every excluded item
+is junk. The 126 unidentified items in the coverage audit show the remaining
+identification gap, especially cases, capture devices and network cards.
+
+### Verification
+
+- Backend: **230 passed, 0 failed** (`python -m pytest -q`).
+- Frontend: `npm run build` passed (`tsc -b && vite build`).
+- Database: 128,160 listings retained; no reset or deletion of historical
+  observations, snapshots, flips or review decisions.
+- Live dashboard: API health 200 and frontend 200 after restart; startup
+  maintenance completed in 1.0 s because the recent valuation was reused.
+
+### Remaining limitations
+
+- The live quota header is unavailable, so the 5,000 allowance is a documented
+  default rather than an observed remaining balance.
+- The full valuation reconciliation is still expensive on this 128k-listing
+  database. A scan can spend minutes revaluing changed keys; the startup path now
+  skips an already-current pass, but the six-hour full pass still needs a
+  chunked scheduler that yields to HTTP.
+- 126 of 1,135 audited live results had no exact product identity. Adding
+  identities for cases, capture devices and network cards is the next coverage
+  win, not a reason to weaken the eligibility gate.
+
 ## Previously completed and still working
 
 - [x] FastAPI backend with SQLite WAL persistence and additive migrations.
@@ -1652,7 +1751,7 @@ cd frontend
 npm run build
 ```
 
-Last verified: **220 passed, 0 failed**; frontend `tsc -b && vite build` passes.
+Last verified: **230 passed, 0 failed**; frontend `tsc -b && vite build` passes.
 The review-queue repair also re-ran the bounded reconciliation against the live
 database (`scripts/reconcile_review_queue.py`) and verified the running API.
 
@@ -1687,8 +1786,9 @@ integrity repair and its database revaluation were pushed as `123f60e`. The
 pre-scan category, preset and budget controls were pushed as `c7736b0`; the
 auction configuration enforcement followed as `786f87a`, with Discord auction
 alert gating as `4dfb1fa`. The Phase 6 identity/startup work is `9114f6e` and
-the review-queue eligibility repair is `fc8ec4a`. `main` tracks `origin/main`;
-local and remote trees match after each push.
+the review-queue eligibility repair is `fc8ec4a`. The eBay coverage, untested
+RAM and auction-review repair is `e9baa1f`. `main` tracks
+`origin/main`; local and remote trees match after each push.
 
 Earlier notes referenced `bboyrican20/flipintel`; that was the wrong remote and
 is no longer configured. No force-push is needed or recommended.

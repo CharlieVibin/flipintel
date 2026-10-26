@@ -94,17 +94,21 @@ _M: dict[str, tuple[MarketMapping, ...]] = {
     # --- PC components -----------------------------------------------------
     "gpu": (_v("3602", "Graphics cards", "/catalog/3602-electronics_comp_graphicscards", priority=3), _e("27386", "Graphics/Video Cards", priority=3)),
     "cpu": (_v("3599", "Processors", "/catalog/3599-electronics_comp_cpus", priority=3), _e("164", "CPUs/Processors", priority=3)),
-    "ram": (_v("3603", "Memory (RAM)", "/catalog/3603-electronics_comp_ram"), _e("170083", "Memory (RAM)")),
+    "ram": (_v("3603", "Memory (RAM)", "/catalog/3603-electronics_comp_ram"), _e("170083", "Memory (RAM)"), _e("11210", "Server Memory (RAM)")),
     "mobo": (_v("3600", "Motherboards", "/catalog/3600-electronics_comp_motherboards"), _e("1244", "Motherboards")),
     "cpu-combo": (_v("3601", "Motherboard & CPU combos", "/catalog/3601-electronics_compparts_cpucombos"), _e("131511", "Motherboard & CPU Combos")),
     "sound-card": (_v("3605", "Internal sound cards", "/catalog/3605-electronics_compparts_soundcards"), _e("44980", "Sound Cards (Internal)")),
-    "capture": (_v("3606", "Video capture & TV tuner cards", "/catalog/3606-electronics_compparts_vcc"), _e("3761", "Video Capture & TV Tuner Cards")),
-    "ssd": (_v("3607", "Internal SSDs", "/catalog/3607-electronics_compparts_internalstorage"), _e("182085", "Hard Drives (HDD, SSD & NAS)")),
-    "hdd": (_v("3605", "Internal hard drives", "/catalog/3605-electronics_compparts_internalstorage"), _e("182085", "Hard Drives (HDD, SSD & NAS)")),
+    "capture": (_v("3606", "Video capture & TV tuner cards", "/catalog/3606-electronics_compparts_vcc"), _e("3761", "Video Capture & TV Tuner Cards"), _e("175679", "TV Tuner/Video Capture Devices")),
+    # These are separate eBay leaves. Searching the parent 182085 mixed SSDs,
+    # internal HDDs, external drives and NAS stock in one newest-200 page, so
+    # an enabled SSD toggle could miss every actual SSD in the branch.
+    "ssd": (_v("3607", "Internal SSDs", "/catalog/3607-electronics_compparts_internalstorage"), _e("175669", "Solid State Drives")),
+    "hdd": (_v("3605", "Internal hard drives", "/catalog/3605-electronics_compparts_internalstorage"), _e("56083", "Internal Hard Disk Drives")),
+    "other-storage": (_e("175670", "Other Hard Drives"), _e("182093", "Network Storage Disk Arrays")),
     "psu": (_v("3608", "Computer power supplies", "/catalog/3608-electronics_compparts_power"), _e("42017", "Power Supplies")),
-    "case": (_v("3598", "Computer cases", "/catalog/3598-electronics_compparts_cases"), _e("175674", "Computer Cases & Accessories")),
+    "case": (_v("3598", "Computer cases", "/catalog/3598-electronics_compparts_cases"), _e("175674", "Computer Cases & Accessories"), _e("42014", "Computer Cases")),
     "cooling": (_v("3604", "Computer cooling & fans", "/catalog/3604-electronics_compparts_cooling"), _e("42000", "Fans, Heatsinks & Cooling")),
-    "net-adapter": (_v("3647", "Network adaptors", "/catalog/3647-electronics_compnet_adaptors"), _e("45002", "USB Wi-Fi Adapters/Dongles")),
+    "net-adapter": (_v("3647", "Network adaptors", "/catalog/3647-electronics_compnet_adaptors"), _e("45002", "USB Wi-Fi Adapters/Dongles"), _e("20318", "Network Cards"), _e("42196", "Laptop Network Cards")),
     "expansion": (_e("182088", "Interface/Add-On Cards"), _e("42190", "Laptop Add-On Cards")),
     "other-component": (_v("3611", "Other components & parts", "/catalog/3611-electronics_compparts_other"), _e("16145", "Other Components & Parts")),
     "repair-tools": (_v("3609", "Computer repair tools", "/catalog/3609-electronics_compparts_tools")),
@@ -195,7 +199,7 @@ _M: dict[str, tuple[MarketMapping, ...]] = {
     "satellite-internet": (_v("3648", "Satellite internet receivers", "/catalog/3648-electronics_compnet_satreceivers")),
     "smart-home": (_v("2995", "Other devices & accessories", "/catalog/2995-electronics_accessories", broad=True), _e("162", "Other Computers & Networking")),
     # --- storage -----------------------------------------------------------
-    "external-drive": (_e("182085", "Hard Drives (HDD, SSD & NAS)")),
+    "external-drive": (_e("131553", "External Hard Disk Drives")),
     "nas": (_e("182093", "Network Storage Disk Arrays")),
     "memory-card": (_v("3063", "Memory cards", "/catalog/3063-electronics_cam_memory_cards"), _e("18871", "Memory Cards")),
     "usb-flash": (_e("51071", "USB Flash Drives")),
@@ -376,7 +380,7 @@ def _build_nodes() -> list[ScanNode]:
     group("pc-components/storage", "Storage", "pc-components", 20)
     leaf("pc-components/ssds", "Internal SSDs", "pc-components/storage", 10, "ssd", kinds=("ssd",), default=True)
     leaf("pc-components/hdds", "Internal hard drives", "pc-components/storage", 20, "hdd", kinds=("ssd",), default=True)
-    leaf("pc-components/other-storage", "Other internal storage", "pc-components/storage", 30, "other-component", default=True)
+    leaf("pc-components/other-storage", "Other internal storage", "pc-components/storage", 30, "other-storage", default=True)
     group("pc-components/power-cooling", "Power, cases & cooling", "pc-components", 30)
     leaf("pc-components/power-supplies", "Power supplies", "pc-components/power-cooling", 10, "psu", default=True)
     leaf("pc-components/cases", "Computer cases", "pc-components/power-cooling", 20, "case", default=True)

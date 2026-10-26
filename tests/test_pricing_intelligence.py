@@ -112,7 +112,7 @@ def test_auction_search_keeps_only_items_inside_the_window(monkeypatch):
             bid_count=3,
         )
 
-    async def fake_browse(params, label):
+    async def fake_browse(params, label, **kwargs):
         assert params["sort"] == "endingSoonest"
         assert "AUCTION" in params["filter"]
         return [make("soon", 12), make("later", 90)], 2, 200

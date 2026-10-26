@@ -26,6 +26,8 @@ export interface Deal {
   rank_score?: number | null;
   rank_tier?: "strong" | "decent" | "speculative" | "weak" | null;
   is_faulty: boolean;
+  functionality?: "working" | "untested" | "faulty" | "unknown";
+  conditional_profit?: boolean;
   is_wanted: boolean;
   is_auction: boolean;
   auction_end_at?: string | null;

@@ -96,7 +96,22 @@ def _parse_json(value: Any, default: Any) -> Any:
         return default
 
 
+def _functionality(row: dict[str, Any]) -> str:
+    raw = row.get("attrs")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            raw = {}
+    if isinstance(raw, dict):
+        value = str(raw.get("functionality") or "").strip().lower()
+        if value:
+            return value
+    return "faulty" if row.get("is_faulty") else "unknown"
+
+
 def _listing_row(row: dict[str, Any]) -> dict[str, Any]:
+    functionality = _functionality(row)
     return {
         "id": row["id"],
         "marketplace": row["marketplace"],
@@ -120,6 +135,11 @@ def _listing_row(row: dict[str, Any]) -> dict[str, Any]:
         "identity_basis": _parse_json(row.get("identity_basis"), []),
         "scan_leaf": row.get("scan_leaf"),
         "is_faulty": bool(row.get("is_faulty")),
+        "functionality": functionality,
+        # A resale estimate for untested stock is the working-condition value,
+        # not a promise that the item works. Keep the distinction explicit in
+        # every API response instead of letting the UI imply guaranteed profit.
+        "conditional_profit": functionality == "untested",
         "is_wanted": bool(row.get("is_wanted")),
         "is_auction": bool(row.get("is_auction")),
         "auction_end_at": row.get("auction_end_at"),
@@ -215,7 +235,7 @@ async def health(request: Request) -> dict[str, Any]:
                            preset_params) or 0,
         "review": db.scalar("SELECT COUNT(*) FROM deals d JOIN listings l ON l.id=d.listing_id "
                             "WHERE d.needs_review=1 AND d.eligibility = 'needs_verification' "
-                            "AND l.status='active' "
+                            "AND l.status='active' AND l.is_auction=0 "
                             "AND NOT EXISTS (SELECT 1 FROM review_decisions r WHERE r.listing_id=l.id)"
                             + (f" AND {preset_sql}" if preset_sql else ""),
                             preset_params) or 0,
@@ -315,7 +335,7 @@ async def overview(request: Request) -> dict[str, Any]:
     review_count = db.scalar(
         "SELECT COUNT(*) FROM deals d JOIN listings l ON l.id=d.listing_id "
         "WHERE d.needs_review=1 AND d.eligibility = 'needs_verification' "
-        "AND l.status='active' "
+        "AND l.status='active' AND l.is_auction=0 "
         "AND NOT EXISTS (SELECT 1 FROM review_decisions r WHERE r.listing_id=l.id)"
         + (f" AND {preset_sql}" if preset_sql else ""),
         preset_params,
@@ -433,6 +453,10 @@ async def list_deals(
         if review_status == "pending":
             where.append("d.needs_review = 1")
             where.append("d.eligibility = 'needs_verification'")
+            # Auctions are a separate workspace. A current bid is not a
+            # purchase price and a days-away auction is not a manual review
+            # task, so it must never occupy the Human Review queue.
+            where.append("l.is_auction = 0")
             where.append("r.listing_id IS NULL")
         elif review_status in {"approved", "rejected", "corrected"}:
             # History includes items that were approved and consequently left
@@ -442,6 +466,7 @@ async def list_deals(
         else:
             where.append("d.needs_review = 1")
             where.append("d.eligibility = 'needs_verification'")
+            where.append("l.is_auction = 0")
     elif not saved_only and not archived:
         where.append("d.is_deal = 1")
     if archived:
@@ -591,7 +616,7 @@ async def review_groups(
         "FROM deals d JOIN listings l ON l.id = d.listing_id "
         "LEFT JOIN review_decisions r ON r.listing_id = l.id "
         "WHERE d.needs_review = 1 AND d.eligibility = 'needs_verification' "
-        "AND l.status = 'active' AND r.listing_id IS NULL "
+        "AND l.status = 'active' AND l.is_auction = 0 AND r.listing_id IS NULL "
         "AND l.listing_kind = ? AND l.flags LIKE ?"
     )
     like = f'%"{flag}"%'
@@ -798,6 +823,12 @@ def _auction_status(row: dict[str, Any], config) -> tuple[str, str]:
         return "needs_verification", "Limited compatible evidence; no supported bid ceiling"
     if row.get("max_bid") is None or row.get("net_profit") is None:
         return "needs_verification", "Valuation supports a resale range but not a bid ceiling"
+    if _functionality(row) == "untested":
+        return (
+            "needs_verification",
+            "Untested: the resale estimate assumes it works after testing; "
+            "profit is conditional, not guaranteed",
+        )
     if row.get("is_deal"):
         return "verified", "Supported resale estimate and profit after costs"
     if float(row.get("net_profit") or 0) <= 0:
@@ -1027,6 +1058,7 @@ async def bulk_review_deal(
             JOIN deals d ON d.listing_id = l.id
             LEFT JOIN review_decisions r ON r.listing_id = l.id
             WHERE l.id IN ({placeholders}) AND l.status = 'active'
+              AND l.is_auction = 0
               AND d.needs_review = 1 AND d.eligibility = 'needs_verification'
               AND r.listing_id IS NULL
             ORDER BY l.id
@@ -1060,7 +1092,7 @@ async def bulk_review_deal(
     remaining = db.scalar(
         "SELECT COUNT(*) FROM deals d JOIN listings l ON l.id = d.listing_id "
         "WHERE d.needs_review = 1 AND d.eligibility = 'needs_verification' "
-        "AND l.status = 'active' "
+        "AND l.status = 'active' AND l.is_auction = 0 "
         "AND NOT EXISTS (SELECT 1 FROM review_decisions r WHERE r.listing_id = l.id)"
     ) or 0
     return {
@@ -1080,6 +1112,11 @@ async def review_deal(
     listing = db.query_one("SELECT * FROM listings WHERE id=?", (listing_id,))
     if not listing:
         raise HTTPException(status_code=404, detail="Listing not found")
+    if listing.get("is_auction"):
+        raise HTTPException(
+            status_code=409,
+            detail="Live auctions are managed in the Auctions tab, not Human Review",
+        )
     decision = body.decision.strip().lower()
     if decision not in {"approved", "rejected", "corrected"}:
         raise HTTPException(status_code=422, detail="decision must be approved, rejected or corrected")

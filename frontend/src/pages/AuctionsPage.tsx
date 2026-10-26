@@ -385,6 +385,14 @@ function AuctionCard({
           >
             <Timer className="h-3 w-3" /> {endsIn}
           </span>
+          {auction.functionality === "untested" && (
+            <span
+              className="chip border-amber-400/35 bg-amber-400/10 text-amber-300"
+              title="The resale estimate assumes the item works after testing. No success probability is inferred."
+            >
+              Untested · conditional
+            </span>
+          )}
           {auction.outside_preset && (
             <span className="chip border-ember/35 bg-ember/10 text-ember" title={auction.preset_reasons?.join("; ")}>
               Outside preset
@@ -446,13 +454,18 @@ function AuctionCard({
                   {money(auction.net_profit)}
                 </p>
                 <p className="text-[9px] text-mist-500">Max bid {money(auction.max_bid)}</p>
+                {auction.functionality === "untested" && (
+                  <p className="text-[9px] text-amber-300/80">If tested working</p>
+                )}
               </>                ) : (
                   <>
                     <p className="eyebrow">Profit</p>
                     <p className="mt-0.5 text-[11px] leading-snug text-mist-400">
-                      {auction.verification_status === "rejected"
-                        ? "No supported profit at this bid."
-                        : "Withheld until the exact variant has compatible evidence."}
+                      {auction.functionality === "untested"
+                        ? "Conditional on testing working; not a guaranteed profit."
+                        : auction.verification_status === "rejected"
+                          ? "No supported profit at this bid."
+                          : "Withheld until the exact variant has compatible evidence."}
                     </p>
                   </>
                 )}

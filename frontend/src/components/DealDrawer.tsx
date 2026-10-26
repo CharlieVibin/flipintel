@@ -370,6 +370,19 @@ export function DealDrawer({ dealId, onClose, onChanged, onToast }: Props) {
                   />
                 </div>
 
+                {deal.conditional_profit && (
+                  <div className="rounded-xl border border-amber-400/25 bg-amber-400/[0.06] p-3.5">
+                    <p className="flex items-center gap-2 text-xs font-semibold text-amber-300">
+                      <CircleAlert className="h-3.5 w-3.5" /> Untested — conditional resale
+                    </p>
+                    <p className="mt-1 text-[11px] leading-relaxed text-mist-400">
+                      The estimate is the working-condition value, not proof that this item works.
+                      No probability of success has been assigned. Profit is only realised if it
+                      tests working after collection.
+                    </p>
+                  </div>
+                )}
+
                 {deal.needs_review && (
                   <div className="rounded-xl border border-ember/25 bg-ember/[0.06] p-3.5">
                     <div className="flex flex-wrap items-start justify-between gap-2">

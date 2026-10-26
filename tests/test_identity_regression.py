@@ -284,7 +284,7 @@ class _StubEbay(EbayCollector):
     async def _access_token(self):
         return "test"
 
-    async def _browse_request(self, params, query_label):
+    async def _browse_request(self, params, query_label, **kwargs):
         self.calls.append(dict(params))
         index = int(params.get("offset", 0)) // int(params.get("limit", 200))
         return self.pages[index], len(self.pages[index]), 200
@@ -314,18 +314,14 @@ async def test_get_items_rechecks_at_most_twenty_known_auctions(tmp_path):
 
         def json(self):
             return {
-                "items": [
-                    {
-                        "itemId": "a1",
-                        "title": "RTX 4070 12GB",
-                        "itemWebUrl": "https://www.ebay.co.uk/itm/a1",
-                        "buyingOptions": ["AUCTION"],
-                        "currentBidPrice": {"value": "250.00", "currency": "GBP"},
-                        "bidCount": 7,
-                        "itemEndDate": "2026-10-23T20:00:00.000Z",
-                        "itemLocation": {"country": "GB"},
-                    }
-                ]
+                "itemId": "a1",
+                "title": "RTX 4070 12GB",
+                "itemWebUrl": "https://www.ebay.co.uk/itm/a1",
+                "buyingOptions": ["AUCTION"],
+                "currentBidPrice": {"value": "250.00", "currency": "GBP"},
+                "bidCount": 7,
+                "itemEndDate": "2026-10-23T20:00:00.000Z",
+                "itemLocation": {"country": "GB"},
             }
 
     class _Client:
@@ -348,8 +344,8 @@ async def test_get_items_rechecks_at_most_twenty_known_auctions(tmp_path):
     try:
         items, status = await collector.get_items([f"a{i}" for i in range(30)])
         assert status == 200
-        assert len(fake.calls) == 1
-        assert len(fake.calls[0][1]["item_ids"].split(",")) == 20
+        assert len(fake.calls) == 20
+        assert all("/buy/browse/v1/item/" in call[0] for call in fake.calls)
         assert items[0].external_id == "a1"
         assert items[0].current_bid == 250.0
         assert items[0].bid_count == 7

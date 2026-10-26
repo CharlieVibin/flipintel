@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import random
 from datetime import timedelta
 from typing import Any
@@ -222,7 +223,28 @@ class Scanner:
                 self._data_version += 1
                 log.info("Re-identified %d existing listing(s)", changed)
             self._set_maintenance("valuing", changed=str(changed))
-            if not await self._run_refresh(force=True):
+            # A restart must not replay a long full-history valuation when the
+            # stored pass completed recently and no identity changed. Settings
+            # edits and scan ingests still call the refresh path directly; this
+            # only avoids starving the HTTP server on an ordinary restart.
+            state = {
+                row["key"]: row["value"]
+                for row in self.db.query("SELECT key, value FROM valuation_state")
+            }
+            last_refresh = parse_iso(state.get("last_refresh_at"))
+            recent = bool(
+                last_refresh
+                and (utcnow() - last_refresh).total_seconds() < 24 * 3600
+            )
+            has_deals = bool(self.db.scalar("SELECT 1 FROM deals LIMIT 1"))
+            if changed == 0 and recent and has_deals:
+                self._valued_version = self._data_version
+                self._last_refresh_ok = True
+                log.info(
+                    "Stored valuation is current (last refresh %s); skipping startup replay",
+                    state.get("last_refresh_at"),
+                )
+            elif not await self._run_refresh(force=True):
                 raise RuntimeError("Valuation refresh failed; scans remain paused")
             elapsed = (utcnow() - started).total_seconds()
             self._set_maintenance(
@@ -519,6 +541,78 @@ class Scanner:
             return max(60, self.db.setting_int("category_cycle_seconds", 60))
         return max(60, self.db.setting_int(f"scan_interval_{marketplace}", 300))
 
+    def ebay_price_bands(self) -> list[tuple[float, float]]:
+        """Split the saved eBay budget into a few price bands.
+
+        A single ``newlyListed`` page of the whole range is dominated by the
+        cheapest stock in large categories. Rotating the newest page of each
+        band gives mid-range hardware (16GB RAM kits, usable GPUs and CPUs)
+        the same visibility as £2 cables without inventing keyword searches.
+        """
+        low, high = self.scan_config.server_price_bounds("ebay")
+        low = max(1.0, float(low or 1.0))
+        high = float(high or 0)
+        if high <= low:
+            return []
+        if high - low <= 20:
+            return [(low, high)]
+        count = max(2, min(8, int(math.ceil((high - low) / 25.0))))
+        width = (high - low) / count
+        bands: list[tuple[float, float]] = []
+        for index in range(count):
+            band_low = low + index * width
+            band_high = high if index == count - 1 else low + (index + 1) * width - 0.01
+            if band_high >= band_low:
+                bands.append((round(band_low, 2), round(band_high, 2)))
+        return bands
+
+    def ebay_budget_snapshot(self, *, manual: bool = False) -> dict[str, Any]:
+        """How many Browse calls the fixed-price pass may spend right now.
+
+        eBay does not return a usable remaining-quota header on the Browse
+        API, so the documented 5,000-calls/day allowance is tracked from the
+        local request ledger. The auction loop has its own 1,600-call reserve;
+        fixed-price discovery may only spend what remains after that reserve.
+        The budget is spread over the cycles left today, which prevents either
+        starving the first hours or exhausting the day before the auctions.
+        """
+        limit = max(0, self.db.setting_int("ebay_daily_call_limit", 5000))
+        reserve = max(0, self.db.setting_int("ebay_bin_auction_reserve", 1600))
+        used = self.db.scalar(
+            "SELECT requests FROM api_usage_daily WHERE marketplace='ebay' AND day=?",
+            (utcnow().date().isoformat(),),
+        ) or 0
+        cycle_seconds = max(60, self.db.setting_int("category_cycle_seconds", 1800))
+        now = utcnow()
+        tomorrow = (now + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        seconds_left = max(1, int((tomorrow - now).total_seconds()))
+        cycles_left = max(1, (seconds_left + cycle_seconds - 1) // cycle_seconds)
+        remaining = max(0, int(limit) - int(used) - int(reserve))
+        fair = remaining // cycles_left
+        if manual:
+            cap = max(1, self.db.setting_int("ebay_bin_manual_requests_cap", 200))
+            budget = min(cap, remaining)
+        else:
+            configured = self.db.setting_int("ebay_category_requests_per_cycle", 0)
+            cap = configured if configured > 0 else max(
+                1, self.db.setting_int("ebay_bin_requests_per_cycle_cap", 120)
+            )
+            budget = min(cap, fair)
+        return {
+            "daily_limit": int(limit),
+            "used_today": int(used),
+            "auction_reserve": int(reserve),
+            "remaining_after_reserve": remaining,
+            "cycles_left": int(cycles_left),
+            "fair_share": int(fair),
+            "budget": max(0, int(budget)),
+            "manual": bool(manual),
+            "quota_headers": "unavailable",
+            "source": "eBay Browse documented default allowance (local ledger)",
+        }
+
     async def _maintenance_loop(self) -> None:
         while not self._stop.is_set():
             if await self._sleep(3600):
@@ -797,17 +891,16 @@ class Scanner:
             )
 
         candidates.sort(key=rank)
-        # Keep initial backfills separate: at most two per cycle, then the
-        # incremental categories that are genuinely due.
+        # Initial backfills used to consume the whole cycle one category at a
+        # time, which starved every already-backfilled category for days. Give
+        # backfills a bounded share of the budget and keep incremental scans
+        # running in the same pass.
         backfills = [row for row in candidates if not row.get("backfill_done")]
         incremental = [row for row in candidates if row.get("backfill_done")]
-        if backfills and not manual:
-            # Initial backfills run as their own phase, one category at a time,
-            # so a category reaches its configured depth instead of every
-            # category advancing one page per cycle. Incrementals resume
-            # between backfills and immediately after the last one.
-            return backfills[:1]
-        return (backfills[:2] + incremental)[:limit]
+        if backfills:
+            share = max(1, min(3, limit // 8))
+            return (backfills[:share] + incremental)[:limit]
+        return incremental[:limit]
 
     @staticmethod
     def _category_interval(new_count: int) -> int:
@@ -873,12 +966,24 @@ class Scanner:
             self._set_status(marketplace, state, last_attempt_at=iso(), last_error=reason, next_scan=None)
             return SearchOutcome(marketplace=marketplace, status=state, error=reason)
 
-        budget_default = 4 if marketplace == "ebay" else 12
-        budget_key = (
-            "ebay_category_requests_per_cycle" if marketplace == "ebay"
-            else "category_requests_per_cycle"
-        )
-        budget = max(1, min(30, self.db.setting_int(budget_key, budget_default)))
+        budget_info: dict[str, Any] | None = None
+        if marketplace == "ebay":
+            budget_info = self.ebay_budget_snapshot(manual=manual)
+            budget = int(budget_info["budget"])
+            if budget <= 0:
+                reason = (
+                    "Daily eBay Browse allowance is fully reserved for the auction "
+                    "scanner; fixed-price discovery resumes after midnight."
+                )
+                self._set_status(
+                    marketplace, "cooldown", last_error=reason,
+                    next_scan=iso(utcnow() + timedelta(minutes=15)),
+                )
+                return SearchOutcome(marketplace=marketplace, status="cooldown", error=reason)
+        else:
+            budget = max(
+                1, min(30, self.db.setting_int("category_requests_per_cycle", 12))
+            )
         rows = self._due_category_rows(
             marketplace, manual, budget, allowed_ids=allowed_ids
         )
@@ -897,10 +1002,16 @@ class Scanner:
         self._set_status(marketplace, "scanning", last_attempt_at=iso(started), last_error=None)
 
         backfill_cap = max(1, min(50, self.db.setting_int("category_backfill_pages", 10)))
-        incremental_pages = max(1, min(5, self.db.setting_int("category_incremental_pages", 2)))
+        # eBay's fixed-price pass fetches the newest page here; the sweep below
+        # covers older pages without immediately re-downloading page 2.
+        incremental_pages = (
+            1 if marketplace == "ebay"
+            else max(1, min(5, self.db.setting_int("category_incremental_pages", 2)))
+        )
         overlap_stop = min(1.0, max(0.2, self.db.setting_float("category_overlap_stop", 0.75)))
         collect_started = utcnow()
         items: list[RawListing] = []
+        condition_details = 0
         details: list[dict[str, Any]] = []
         failures = 0
         total_found = total_new = total_drops = 0
@@ -1059,6 +1170,29 @@ class Scanner:
             cat["coverage"] = coverage
             details.append(cat)
 
+        # A rotating deep page per category reaches active stock that is older
+        # than the newest page(s). Without this, a listing that was missed
+        # while a category was starved could never be discovered until it was
+        # relisted. The sweep is bounded and does not re-download page 1.
+        sweep_detail: list[dict[str, Any]] = []
+        if marketplace == "ebay" and budget > 0 and rows:
+            s_found, s_new, s_drops, sweep_detail = await self._sweep_category_pages(
+                collector,
+                rows,
+                budget,
+                session_ids=session_ids,
+                processed_ids=processed_ids,
+                manual=manual,
+            )
+            total_found += s_found
+            total_new += s_new
+            total_drops += s_drops
+
+        if marketplace == "ebay":
+            condition_details = await self._enrich_condition_descriptions(
+                collector, manual=manual
+            )
+
         # Secondary targeted keyword pass for miscategorised listings and
         # comparables. Category mode is keyword-free by design: the old
         # supplement added thousands of games, cases and unrelated products to
@@ -1112,6 +1246,9 @@ class Scanner:
             detail={
                 "categories": details,
                 "budget": budget,
+                "budget_plan": budget_info,
+                "sweep": sweep_detail,
+                "condition_details": condition_details,
                 "discovery_mode": self._discovery_mode(marketplace),
                 "keyword_supplement": supplement_detail,
             },
@@ -1124,6 +1261,169 @@ class Scanner:
             stage_ms={"collect": elapsed},
             stats=(total_found, total_new, total_drops),
         )
+
+    async def _sweep_category_pages(
+        self,
+        collector: BaseCollector,
+        rows: list[dict[str, Any]],
+        budget: int,
+        *,
+        session_ids: set[str],
+        processed_ids: set[str],
+        manual: bool = False,
+    ) -> tuple[int, int, int, list[dict[str, Any]]]:
+        """Rotate deep pages and price bands across backfilled categories.
+
+        Page one of the full budget window is always the newest page, but in
+        large categories it is dominated by the cheapest stock. The sweep uses
+        the rest of the Browse budget for two complementary jobs:
+
+        * a rolling deep page per category, reaching older active listings;
+        * the newest page of each price band, so usable mid-range hardware is
+          seen even when hundreds of low-value items were listed after it.
+
+        ``sweep_page=0`` means the deep branch was exhausted. Band scanning
+        continues independently, so a category with tens of thousands of cheap
+        modules still contributes its £50–£150 stock every few cycles.
+        """
+        marketplace = collector.marketplace
+        max_pages = max(0, min(50, self.db.setting_int("category_sweep_pages", 50)))
+        if max_pages <= 1:
+            return 0, 0, 0, []
+        bands = self.ebay_price_bands() if marketplace == "ebay" else []
+        found = new = drops = 0
+        details: list[dict[str, Any]] = []
+        # A manual pass reaches deeper in one go; an automatic pass spreads a
+        # few pages per category across its half-hour cycles. Bands are visited
+        # on one round and deep pages on the others, so neither starves.
+        rounds = max(1, min(8 if manual else 5, budget // max(1, len(rows))))
+        for round_index in range(rounds):
+            progressed = False
+            for row in rows:
+                if budget <= 0:
+                    break
+                if not row.get("backfill_done"):
+                    continue
+                category = category_by_id(marketplace, row["category_id"])
+                if not category:
+                    continue
+                use_band = bool(bands) and (
+                    round_index % 2 == 0 if manual else round_index in {0, 2}
+                )
+                page_number = 0
+                band: tuple[float, float] | None = None
+                if use_band:
+                    cursor = int(row.get("band_cursor") or 0) % len(bands)
+                    band = bands[cursor]
+                    fetch = lambda category=category, band=band: collector.category_page(
+                        category, 1, price_min=band[0], price_max=band[1]
+                    )
+                else:
+                    current = row.get("sweep_page")
+                    current = 1 if current is None else int(current)
+                    if current == 0:
+                        continue
+                    page_number = current if current >= 2 else 2
+                    if page_number > max_pages:
+                        row["sweep_page"] = 0
+                        self.db.execute(
+                            "UPDATE category_scans SET sweep_page=0, updated_at=? "
+                            "WHERE marketplace=? AND category_id=?",
+                            (iso(), marketplace, category.category_id),
+                        )
+                        continue
+                    fetch = lambda category=category, page_number=page_number: collector.category_page(
+                        category, page_number
+                    )
+                budget -= 1
+                started = utcnow()
+                try:
+                    page = await fetch()
+                except Exception as exc:
+                    message = (
+                        exc.message if isinstance(exc, CollectorError)
+                        else f"{type(exc).__name__}: {exc}"
+                    )
+                    details.append({
+                        "category_id": category.category_id,
+                        "label": category.label,
+                        "page": 1 if band else page_number,
+                        "band": list(band) if band else None,
+                        "error": message[:300],
+                    })
+                    continue
+                page_ids = {item.external_id for item in page.items if item.external_id}
+                known = self._known_ids(marketplace, page.items) | (page_ids & session_ids)
+                session_ids |= page_ids
+                fresh = [
+                    item for item in page.items
+                    if item.external_id and item.external_id not in processed_ids
+                ]
+                processed_ids.update(item.external_id for item in fresh if item.external_id)
+                page_found, page_new, page_drops = self._ingest(
+                    fresh,
+                    marketplace,
+                    category_id=category.category_id,
+                    scan_config=self.scan_config,
+                    enforce_budget=True,
+                )
+                found += page_found
+                new += page_new
+                drops += page_drops
+                if band:
+                    cursor = int(row.get("band_cursor") or 0) % len(bands)
+                    next_cursor = (cursor + 1) % len(bands)
+                    row["band_cursor"] = next_cursor
+                    self.db.execute(
+                        "UPDATE category_scans SET band_cursor=?, updated_at=? "
+                        "WHERE marketplace=? AND category_id=?",
+                        (next_cursor, iso(), marketplace, category.category_id),
+                    )
+                    details.append({
+                        "category_id": category.category_id,
+                        "label": category.label,
+                        "page": 1,
+                        "band": list(band),
+                        "items": len(page.items),
+                        "known": len(known),
+                        "new": page_new,
+                        "ms": int((utcnow() - started).total_seconds() * 1000),
+                    })
+                    progressed = True
+                    continue
+                total_pages = int(page.total or 0)
+                known_pages = (
+                    min(max_pages, max(1, (total_pages + 199) // 200))
+                    if total_pages else max_pages
+                )
+                next_page = page_number + 1
+                if (
+                    not page.items
+                    or not page.has_more
+                    or next_page > known_pages
+                    or next_page > max_pages
+                ):
+                    next_page = 0
+                row["sweep_page"] = next_page
+                self.db.execute(
+                    "UPDATE category_scans SET sweep_page=?, updated_at=? "
+                    "WHERE marketplace=? AND category_id=?",
+                    (next_page, iso(), marketplace, category.category_id),
+                )
+                details.append({
+                    "category_id": category.category_id,
+                    "label": category.label,
+                    "page": page_number,
+                    "next_page": next_page,
+                    "items": len(page.items),
+                    "known": len(known),
+                    "new": page_new,
+                    "ms": int((utcnow() - started).total_seconds() * 1000),
+                })
+                progressed = True
+            if not progressed:
+                break
+        return found, new, drops, details
 
     async def _scan_keywords(self, collector: BaseCollector, manual: bool = False) -> SearchOutcome:
         marketplace = collector.marketplace
@@ -1509,6 +1809,56 @@ class Scanner:
         return found, new, drops
 
     # --- enrichment and refresh --------------------------------------------
+    async def _enrich_condition_descriptions(
+        self, collector: BaseCollector, *, manual: bool = False
+    ) -> int:
+        """Read seller notes for a bounded set of condition-ambiguous listings.
+
+        eBay Browse search summaries omit the seller description, so an item
+        with the condition label "For parts or not working" can be either
+        confirmed faulty or merely untested. Fetching the singular item detail
+        is the only way to tell. The probe is deliberately capped and marked so
+        the same listing is not fetched on every scan.
+        """
+        limit = 20 if manual else 5
+        rows = self.db.query(
+            """
+            SELECT l.id, l.external_id
+            FROM listings l
+            WHERE l.marketplace='ebay' AND l.is_auction=0 AND l.status='active'
+              AND l.last_seen >= ?
+              AND (lower(l.condition_raw) LIKE '%parts%'
+                   OR lower(l.condition_raw) LIKE '%not working%')
+              AND COALESCE(l.flags, '') NOT LIKE '%untested_condition%'
+              AND COALESCE(l.raw_json, '') NOT LIKE '%condition_detail_fetched%'
+            ORDER BY l.first_seen DESC
+            LIMIT ?
+            """,
+            (hours_ago(24 * 7), limit),
+        )
+        updated = 0
+        for row in rows:
+            try:
+                item = await collector.get_item(str(row["external_id"]))
+            except CollectorError as exc:
+                if exc.kind in {"auth", "rate_limited"}:
+                    break
+                continue
+            except Exception:
+                continue
+            if not item:
+                continue
+            item.raw["condition_detail_fetched"] = True
+            self._ingest(
+                [item],
+                "ebay",
+                category_id=item.category_id or None,
+                scan_config=self.scan_config,
+                enforce_budget=False,
+            )
+            updated += 1
+        return updated
+
     async def _enrich_comparables(self) -> None:
         """Automatically fetch a model-level search for models whose comparable
         set is thin. No user configuration is needed; this is rate limited."""
@@ -1673,8 +2023,9 @@ class Scanner:
 
         Discovery rotates through categories, so an auction alerted earlier may
         not appear in the next pass. Only the specific shortlisted IDs are
-        fetched (one Browse request, at most 20 items), and an auction that has
-        already ended is removed from the active feed instead of being alerted.
+        fetched (one singular Browse request per auction, capped at 20), and an
+        auction that has already ended is removed from the active feed instead
+        of being alerted. The daily call ledger still bounds the whole pass.
         """
         collector = self.collectors.get("ebay")
         if collector is None or not hasattr(collector, "get_items"):
@@ -2022,6 +2373,11 @@ class Scanner:
                     "verified": verified,
                     "backfill_done": bool(row.get("backfill_done")),
                     "pages_scanned": int(row.get("pages_scanned") or 0),
+                    "sweep_page": int(row.get("sweep_page") or 1),
+                    "sweep_pages": max(
+                        1, self.db.setting_int("category_sweep_pages", 50)
+                    ),
+                    "band_cursor": int(row.get("band_cursor") or 0),
                     "last_scan_at": row.get("last_scan_at"),
                     "last_success_at": row.get("last_success_at"),
                     "last_error": row.get("last_error"),
@@ -2120,6 +2476,10 @@ class Scanner:
             "cex": self.cex.health(),
             "coverage": self.coverage_snapshot(),
             "discovery": self.category_discovery_snapshot(),
+            "ebay_budget": (
+                self.ebay_budget_snapshot()
+                if "ebay" in self.collectors else None
+            ),
             "pricing": self.valuation.pricing.stats(),
             "auctions": {
                 "alerts_enabled": self.db.setting_bool("auction_alerts_enabled", True),

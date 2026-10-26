@@ -44,18 +44,46 @@ NON_PRODUCT_FLAGS = {
 }
 
 
+def _attrs(listing: dict[str, Any]) -> dict[str, Any]:
+    raw = listing.get("attrs_json") or listing.get("attrs")
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def functionality(listing: dict[str, Any]) -> str:
+    """Tested, untested, faulty or unknown.
+
+    This is deliberately separate from the product identity. A memory module
+    whose seller cannot test it is still the same memory module; only the
+    confidence in its working resale changes.
+    """
+    value = str(_attrs(listing).get("functionality") or "").strip().lower()
+    flags = set(listing.get("flags_list") or [])
+    if not value and ({"untested", "untested_condition"} & flags):
+        value = "untested"
+    if value in {"working", "tested", "tested_working"}:
+        return "working"
+    if value in {"untested", "unverified", "as_seen"}:
+        return "untested"
+    if value in {"faulty", "damaged", "incomplete", "parts"}:
+        return "faulty"
+    return "faulty" if listing.get("is_faulty") else "unknown"
+
+
 def sale_role(listing: dict[str, Any]) -> str:
     role = str(listing.get("sale_role") or "").strip().lower()
     if role:
         return role
-    raw = listing.get("attrs_json") or listing.get("attrs")
-    if raw:
-        try:
-            attrs = json.loads(raw) if isinstance(raw, str) else raw
-            if isinstance(attrs, dict):
-                return str(attrs.get("sale_role") or "").strip().lower()
-        except (TypeError, ValueError):
-            pass
+    attrs = _attrs(listing)
+    if attrs:
+        role = str(attrs.get("sale_role") or "").strip().lower()
+        if role:
+            return role
     flags = set(listing.get("flags_list") or [])
     if "storage_media" in flags:
         return "media"
@@ -91,6 +119,9 @@ def assess(
     """
     flags = set(listing.get("flags_list") or [])
     role = sale_role(listing)
+    condition = functionality(listing)
+    gate_profit = 10.0 if min_profit is None else max(10.0, min_profit)
+    gate_roi = 0.10 if min_roi is None else max(0.10, min_roi)
 
     if listing.get("is_wanted"):
         return EXCLUDED, NON_PRODUCT_ROLES["wanted"]
@@ -99,7 +130,7 @@ def assess(
     for flag, reason in NON_PRODUCT_FLAGS.items():
         if flag in flags:
             return EXCLUDED, reason
-    if listing.get("is_faulty"):
+    if listing.get("is_faulty") or condition == "faulty":
         return EXCLUDED, "Faulty or spares item; it cannot support a working-condition valuation"
     if listing.get("is_bundle"):
         return EXCLUDED, "Bundle or multi-item listing, not one comparable product"
@@ -118,6 +149,23 @@ def assess(
         # item. Keep the record, but do not spend the user's review time on it.
         return EXCLUDED, "Price is under 5% of modelled resale; identity or legitimacy cannot be trusted"
 
+    if condition == "untested":
+        # The estimate is the working-condition resale value, not proof that
+        # the item works. It can justify a verification task when the upside
+        # is material, but it must never become a confident recommendation or
+        # a guaranteed-profit alert.
+        if expected_resale is None or net_profit is None or net_profit <= 0:
+            return EXCLUDED, "Untested and not profitable after known costs"
+        roi = net_profit / purchase_total if purchase_total > 0 else 0.0
+        if net_profit < gate_profit or roi < gate_roi:
+            return EXCLUDED, "Untested and below the profit threshold that justifies testing"
+        if confidence is not None and confidence < 0.40:
+            return EXCLUDED, "Untested and the working-condition evidence is too weak"
+        return (
+            NEEDS_VERIFICATION,
+            "Untested: resale assumes it works after testing; profit is conditional",
+        )
+
     if is_deal:
         return RECOMMENDED, None
 
@@ -130,8 +178,6 @@ def assess(
         # that one answer can unlock. Thin margins, a family-level guess or a
         # weak estimate are internal research cases, not manual tasks.
         roi = net_profit / purchase_total if purchase_total > 0 else 0.0
-        gate_profit = 10.0 if min_profit is None else max(10.0, min_profit)
-        gate_roi = 0.10 if min_roi is None else max(0.10, min_roi)
         if net_profit < gate_profit or roi < gate_roi:
             return EXCLUDED, (
                 "Uncertainty is real, but the supported margin is below the level "

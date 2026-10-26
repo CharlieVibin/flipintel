@@ -15,6 +15,7 @@ import base64
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -69,15 +70,22 @@ class EbayCollector(BaseCollector):
     # Browse category search is implemented from eBay's documented contract,
     # but this workspace has no eBay keys, so it is not marked verified.
     category_discovery_verified = False
-    def _browse_filter(self) -> str:
+    def _browse_filter(
+        self, price_min: float | None = None, price_max: float | None = None
+    ) -> str:
         """Browse filter with the live purchase-budget window.
 
         eBay supports a server-side GBP price range. The scanner still applies
         the exact total-cost rule because listed postage is added separately.
+        Optional bounds narrow the request to one rotating price band without
+        escaping the saved purchase budget.
         """
-        low = max(1.0, float(getattr(self, "scan_price_min", 0) or 0))
-        high = float(getattr(self, "scan_price_max", 0) or 25000)
-        high = max(low, min(25000.0, high))
+        budget_low = max(1.0, float(getattr(self, "scan_price_min", 0) or 0))
+        budget_high = max(budget_low, min(25000.0, float(getattr(self, "scan_price_max", 0) or 25000)))
+        low = max(budget_low, float(price_min)) if price_min is not None else budget_low
+        high = min(budget_high, float(price_max)) if price_max is not None else budget_high
+        low = min(low, budget_high)
+        high = max(low, high)
         return ",".join([
             "buyingOptions:{FIXED_PRICE}",
             "itemLocationCountry:GB",
@@ -127,6 +135,7 @@ class EbayCollector(BaseCollector):
         self._quota_pause_until = 0.0
         self._quota_reason: str | None = None
         self._last_request_at: str | None = None
+        self._last_total: int | None = None
 
     @property
     def credentials(self):
@@ -254,6 +263,7 @@ class EbayCollector(BaseCollector):
                         "filter": self._auction_filter(),
                     },
                     f"auction:{query}",
+                    auction=True,
                 )
             except CollectorError as exc:
                 failed += 1
@@ -344,6 +354,7 @@ class EbayCollector(BaseCollector):
                             "filter": self._auction_filter(),
                         },
                         f"auction-category:{label}",
+                        auction=True,
                     )
                 except CollectorError as exc:
                     failed += 1
@@ -435,18 +446,18 @@ class EbayCollector(BaseCollector):
             "note": "Connection test only; results were not inserted into the deal feed.",
         }
 
-    async def get_items(self, item_ids: list[str]) -> tuple[list[RawListing], int]:
-        """Re-fetch up to 20 known items by ID.
+    async def get_item(
+        self, item_id: str, *, auction: bool = False
+    ) -> RawListing | None:
+        """Fetch one item's current detail, including the seller description.
 
-        Ending-soon discovery covers a rotating slice of the catalogue, so a
-        shortlisted auction is not guaranteed to appear in the next category
-        pass. Checking the specific IDs is the only way to know its latest bid
-        and true end time before alerting. The Browse get_items endpoint accepts
-        at most 20 IDs per request.
+        Search summaries do not include the seller's description; the singular
+        item endpoint does. This is used for auction rechecks and for the small
+        set of condition-ambiguous listings where untested and faulty must be
+        distinguished.
         """
-        ids = [str(item) for item in dict.fromkeys(item_ids) if item][:20]
-        if not ids:
-            return [], 0
+        if not item_id:
+            return None
         if time.monotonic() < self._quota_pause_until:
             raise CollectorError(self._quota_reason or "eBay quota pause", "rate_limited")
         token = await self._access_token()
@@ -459,17 +470,16 @@ class EbayCollector(BaseCollector):
         try:
             await self._throttle()
             response = await self.client.get(
-                f"{self.api_base}/buy/browse/v1/item/get_items",
-                params={"item_ids": ",".join(ids)},
+                f"{self.api_base}/buy/browse/v1/item/{quote(str(item_id), safe='')}",
                 headers=headers,
             )
         except httpx.HTTPError as exc:
             record_api_usage(
                 self.db, self.marketplace,
-                error=f"Browse recheck network error: {type(exc).__name__}",
+                error=f"Browse detail network error: {type(exc).__name__}",
             )
             raise CollectorError(
-                f"eBay recheck network error: {type(exc).__name__}", "network"
+                f"eBay detail network error: {type(exc).__name__}", "network"
             )
         self._last_request_at = iso()
         record_api_usage(
@@ -481,27 +491,63 @@ class EbayCollector(BaseCollector):
             quota_limit=_int_header(response, "X-RateLimit-Limit", "RateLimit-Limit"),
             quota_reset_at=_reset_header(response),
         )
+        if response.status_code == 401:
+            self._token = None
+            raise CollectorError("eBay API rejected the access token", "auth", 401)
         if response.status_code == 429:
             self._quota_pause_until = time.monotonic() + 5 * 60
+            self._quota_reason = "eBay API rate limit reached (HTTP 429)."
             raise CollectorError("eBay API rate limit reached (HTTP 429)", "rate_limited", 429)
+        if response.status_code == 404:
+            return None
         if response.status_code >= 400:
             raise CollectorError(
-                f"eBay recheck failed (HTTP {response.status_code})", "http", response.status_code
+                f"eBay detail request failed (HTTP {response.status_code})",
+                "http",
+                response.status_code,
             )
         try:
-            payload = response.json()
+            raw = response.json()
         except ValueError:
-            raise CollectorError("eBay recheck returned non-JSON", "parse", response.status_code)
-        items = [
-            parsed for parsed in (
-                self._parse_item(raw, "auction-recheck")
-                for raw in payload.get("items") or []
-            ) if parsed
-        ]
-        return items, response.status_code
+            raise CollectorError("eBay detail returned non-JSON", "parse", response.status_code)
+        item = self._parse_item(raw, "item-detail", auction=auction)
+        if item and raw.get("categoryId"):
+            item.category_id = str(raw["categoryId"])
+        return item
+
+    async def get_items(self, item_ids: list[str]) -> tuple[list[RawListing], int]:
+        """Re-fetch up to 20 known items by ID.
+
+        Ending-soon discovery covers a rotating slice of the catalogue, so a
+        shortlisted auction is not guaranteed to appear in the next category
+        pass. Checking the specific IDs is the only way to know its latest bid
+        and true end time before alerting. The documented batch endpoint
+        returns 404 for ordinary Browse item IDs in this application, so the
+        singular item endpoint is used with a hard 20-item cap.
+        """
+        ids = [str(item) for item in dict.fromkeys(item_ids) if item][:20]
+        if not ids:
+            return [], 0
+        items: list[RawListing] = []
+        last_status = 200
+        for item_id in ids:
+            try:
+                item = await self.get_item(item_id, auction=True)
+            except CollectorError as exc:
+                if exc.kind in {"auth", "rate_limited"}:
+                    raise
+                last_status = exc.status or last_status
+                continue
+            if item:
+                items.append(item)
+        return items, last_status
 
     async def _browse_request(
-        self, params: dict[str, Any], query_label: str
+        self,
+        params: dict[str, Any],
+        query_label: str,
+        *,
+        auction: bool = False,
     ) -> tuple[list[RawListing], int, int]:
         if time.monotonic() < self._quota_pause_until:
             raise CollectorError(self._quota_reason or "eBay quota pause", "rate_limited")
@@ -572,9 +618,14 @@ class EbayCollector(BaseCollector):
         except ValueError:
             raise CollectorError("eBay API returned a non-JSON response", "parse", response.status_code)
         summaries = data.get("itemSummaries") or []
+        # ``total`` is used by the scanner to decide how deep a category can be
+        # paged. It is not the number of returned rows.
+        self._last_total = (
+            int(data.get("total")) if str(data.get("total") or "").isdigit() else None
+        )
         items = [
             parsed for parsed in (
-                self._parse_item(raw, query_label) for raw in summaries
+                self._parse_item(raw, query_label, auction=auction) for raw in summaries
             ) if parsed
         ]
         return items, len(summaries), response.status_code
@@ -604,11 +655,20 @@ class EbayCollector(BaseCollector):
                 break
         return items, pages, last_status
 
-    async def category_page(self, category, page: int = 1) -> CategoryPage:
+    async def category_page(
+        self,
+        category,
+        page: int = 1,
+        *,
+        price_min: float | None = None,
+        price_max: float | None = None,
+    ) -> CategoryPage:
         """Keyword-free eBay Browse search for one non-top-level category.
 
         eBay requires a keyword for top-level categories, so the catalogue uses
         documented leaf/branch IDs. Browse allows one category ID per request.
+        A price band may be supplied to surface the newest stock in that band
+        instead of only the cheapest end of the whole purchase range.
         """
         limit = 200
         offset = max(0, page - 1) * limit
@@ -620,28 +680,45 @@ class EbayCollector(BaseCollector):
                 "limit": limit,
                 "offset": offset,
                 "sort": "newlyListed",
-                "filter": self._browse_filter(),
+                "filter": self._browse_filter(price_min, price_max),
             },
             f"category:{category.category_id}",
         )
         for item in items:
             item.category_id = str(category.category_id)
             item.raw = {**item.raw, "category_id": str(category.category_id)}
+        total = self._last_total
+        # ``count`` can be below 200 while more results exist (for example when
+        # eBay filters a malformed item). Use the provider total when present
+        # so a short page does not silently end discovery.
+        has_more = (
+            (offset + count) < total if total is not None else count >= limit
+        )
         return CategoryPage(
             items=items,
             page=page,
-            has_more=count >= limit,
+            has_more=has_more,
             http_status=status,
+            total=total,
         )
 
-    def _parse_item(self, raw: dict[str, Any], query: str) -> RawListing | None:
+    def _parse_item(
+        self, raw: dict[str, Any], query: str, *, auction: bool = False
+    ) -> RawListing | None:
         title = (raw.get("title") or "").strip()
         item_id = str(raw.get("itemId") or "")
         url = raw.get("itemWebUrl") or ""
-        buying_options = raw.get("buyingOptions") or []
-        is_auction = "AUCTION" in buying_options
-        if buying_options and not ({"FIXED_PRICE", "AUCTION"} & set(buying_options)):
+        buying_options = set(raw.get("buyingOptions") or [])
+        has_fixed = "FIXED_PRICE" in buying_options
+        has_auction = "AUCTION" in buying_options
+        if buying_options and not (has_fixed or has_auction):
             return None
+        # A listing can offer a Buy It Now price *and* accept bids. In a
+        # fixed-price category pass it is a Buy It Now listing: using the
+        # current bid there would both misclassify it as an auction and
+        # understate the price the user must pay to secure it. In an auction
+        # pass the same listing is an auction and its current bid is relevant.
+        is_auction = has_auction and (auction or not has_fixed)
         price_data = raw.get("price") or {}
         bid_data = raw.get("currentBidPrice") or {}
         bid_value = parse_money(bid_data.get("value"))
@@ -684,6 +761,35 @@ class EbayCollector(BaseCollector):
         if shipping_costs:
             shipping = min(shipping_costs)
 
+        # Browse summaries do not carry the full listing body, but they do
+        # expose the seller's short description and condition note. Those are
+        # the only seller-authored text available, and they are essential for
+        # distinguishing "untested" from a confirmed fault. The coarse
+        # ``condition`` label (for example "For parts or not working") is kept
+        # in ``condition_raw`` only: repeating it as the description made a
+        # generic eBay label look like a seller-confirmed fault.
+        description = " ".join(
+            part.strip()
+            for part in (
+                raw.get("description"),
+                raw.get("shortDescription"),
+                raw.get("conditionDescription"),
+            )
+            if isinstance(part, str) and part.strip()
+        )[:4000]
+
+        # Browse summaries name the leaf category first. Keep it so keyword
+        # diagnostics can tell whether a missed listing came from a category
+        # the active preset does not scan or from pagination inside an enabled
+        # branch. Category-page callers overwrite this with the requested
+        # branch after parsing.
+        categories = raw.get("categories") or []
+        category_id = ""
+        if isinstance(categories, list) and categories:
+            first = categories[0] if isinstance(categories[0], dict) else {}
+            category_id = str(first.get("categoryId") or "")
+        category_id = category_id or str(raw.get("categoryId") or "")
+
         image = (raw.get("image") or {}).get("imageUrl")
         if not image:
             thumbnails = raw.get("thumbnailImages") or []
@@ -714,7 +820,7 @@ class EbayCollector(BaseCollector):
             price=price,
             shipping=shipping,
             image_url=image,
-            description=raw.get("condition") or "",
+            description=description,
             condition_raw=raw.get("condition") or "",
             location=location,
             seller=seller_name,
@@ -730,9 +836,12 @@ class EbayCollector(BaseCollector):
             if is_auction else None,
             posted_at=raw.get("itemCreationDate"),
             search_query=query,
+            category_id=category_id,
             raw={
                 "condition_id": raw.get("conditionId"),
-                "buying_options": buying_options,
+                "category_id": category_id,
+                "categories": categories,
+                "buying_options": sorted(buying_options),
                 "seller_feedback": seller.get("feedbackPercentage"),
                 "seller_feedback_score": seller.get("feedbackScore"),
                 "seller_account_type": seller.get("sellerAccountType"),
