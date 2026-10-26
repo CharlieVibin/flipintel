@@ -1787,7 +1787,7 @@ pre-scan category, preset and budget controls were pushed as `c7736b0`; the
 auction configuration enforcement followed as `786f87a`, with Discord auction
 alert gating as `4dfb1fa`. The Phase 6 identity/startup work is `9114f6e` and
 the review-queue eligibility repair is `fc8ec4a`. The eBay coverage, untested
-RAM and auction-review repair is `e9baa1f`. `main` tracks
+RAM and auction-review repair is `4db5ff4`. `main` tracks
 `origin/main`; local and remote trees match after each push.
 
 Earlier notes referenced `bboyrican20/flipintel`; that was the wrong remote and
